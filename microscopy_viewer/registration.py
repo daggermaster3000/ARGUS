@@ -56,6 +56,33 @@ ROLE_CARRY = "Carry-along"
 
 ROLES = (ROLE_DRIVER, ROLE_LANDMARK, ROLE_CARRY)
 
+#: Channel-name fragments that identify the nuclear stain, i.e. the one channel
+#: allowed to drive a fit. Matched with separators stripped, the same way
+#: :func:`~microscopy_viewer.loaders.layer_spec.is_brightfield` matches, so
+#: "Confocal - dapi", "DAPI_405" and "Hoechst" all hit.
+DRIVER_KEYWORDS = ("dapi", "hoechst", "sytox", "draq5", "topro", "nuclear", "nucleus", "h2b")
+
+#: Fragments identifying a tract or landmark channel. QC and, if asked for, a
+#: second metric term — never a driver on its own.
+LANDMARK_KEYWORDS = ("actub", "acetylatedtubulin", "tubulin", "tuj", "neurofilament", "terk", "elavl3")
+
+
+def guess_role(channel_name: str | None) -> str:
+    """The role a channel name suggests, defaulting to carry-along.
+
+    Defaulting to carry-along is the safe direction: a channel nobody recognises
+    gets resampled and measured, but is never quietly promoted to steering the
+    registration.
+    """
+    if not channel_name:
+        return ROLE_CARRY
+    squashed = re.sub(r"[^a-z0-9]", "", str(channel_name).lower())
+    if any(word in squashed for word in DRIVER_KEYWORDS):
+        return ROLE_DRIVER
+    if any(word in squashed for word in LANDMARK_KEYWORDS):
+        return ROLE_LANDMARK
+    return ROLE_CARRY
+
 #: Filename fragments that identify a nuclear reference in an atlas download.
 #: A nuclear-to-nuclear registration is same-modality, which is the easy case;
 #: everything else here is a fallback.
@@ -862,11 +889,15 @@ def decimate(
         # rather than reducing it to nothing.
         return values, tuple(float(v) for v in spacing)  # type: ignore[return-value]
 
-    reduced = trimmed.reshape(
-        trimmed.shape[0] // factor, factor,
-        trimmed.shape[1] // factor, factor,
-        trimmed.shape[2] // factor, factor,
-    ).mean(axis=(1, 3, 5), dtype=np.float32)
+    depth, height, width = (n // factor for n in trimmed.shape)
+    reduced = np.empty((depth, height, width), dtype=np.float32)
+    # One output plane at a time. Reshaping the whole stack and averaging in one
+    # call is the obvious way to write this, and on a 134 x 2040 x 2040 stack it
+    # asks numpy for several gigabytes of float32 at once; this asks for one
+    # slab, which is tens of megabytes.
+    for index in range(depth):
+        slab = np.asarray(trimmed[index * factor : (index + 1) * factor], dtype=np.float32)
+        reduced[index] = slab.reshape(factor, height, factor, width, factor).mean(axis=(0, 2, 4))
     new_spacing = tuple(float(v) * factor for v in spacing)
     logger.info(
         "decimated %s to %s by %dx for registration", values.shape, reduced.shape, factor
@@ -936,10 +967,19 @@ def register_to_atlas(
     reference, reference_spacing = read_volume(atlas.reference_path)
     if reference_spacing is None:
         reference_spacing = atlas.voxel_size_um or (1.0, 1.0, 1.0)
-        result.warnings.append(
-            f"{atlas.reference_path.name} carries no voxel size; assuming "
-            f"{reference_spacing[0]:g} × {reference_spacing[1]:g} × {reference_spacing[2]:g} µm."
-        )
+        size = f"{reference_spacing[0]:g} × {reference_spacing[1]:g} × {reference_spacing[2]:g} µm"
+        if atlas.voxel_size_um is None:
+            # Nothing to go on at all. A wrong reference voxel size scales the
+            # whole fit, so this is the warning that matters most on this panel.
+            result.warnings.append(
+                f"{atlas.reference_path.name} carries no voxel size and none was given; "
+                f"assuming {size}. If that is wrong, every distance in the result is wrong."
+            )
+        else:
+            result.warnings.append(
+                f"{atlas.reference_path.name} carries no voxel size; using the {size} "
+                "given for the atlas."
+            )
     result.atlas_voxel_size_um = tuple(float(v) for v in reference_spacing)  # type: ignore[assignment]
 
     fixed = winsorize(np.asarray(reference), settings.winsorize)

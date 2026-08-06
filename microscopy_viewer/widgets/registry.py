@@ -86,6 +86,11 @@ def _register_builtin_panels() -> None:
 
         return IntensityComparisonWidget(app.viewer)
 
+    def _registration(app):
+        from .registration_widget import RegistrationWidget
+
+        return RegistrationWidget(app.viewer)
+
     register_panel(
         PanelSpec(
             identifier="metadata",
@@ -112,6 +117,16 @@ def _register_builtin_panels() -> None:
             attribute="intensity_widget",
             tabify_with="measurements",
             order=30,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="atlas_registration",
+            title="Atlas registration",
+            factory=_registration,
+            attribute="registration_widget",
+            tabify_with="intensity_comparison",
+            order=40,
         )
     )
 

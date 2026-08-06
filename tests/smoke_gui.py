@@ -339,12 +339,61 @@ def main() -> int:
     check("metadata" in identifiers, f"metadata panel registered ({identifiers})")
     check("measurements" in identifiers, "measurements panel registered")
     check("intensity_comparison" in identifiers, "intensity comparison panel registered")
+    check("atlas_registration" in identifiers, "atlas registration panel registered")
     for identifier in identifiers:
         check(identifier in app.panels, f"{identifier} built and tracked in app.panels")
         check(identifier in app.docks, f"{identifier} has a dock")
     check(app.metadata_widget is not None, "metadata_widget attribute still populated")
     check(app.measurements_widget is not None, "measurements_widget attribute still populated")
     check(app.intensity_widget is not None, "intensity_widget attribute populated")
+    check(app.registration_widget is not None, "registration_widget attribute populated")
+    print(flush=True)
+
+    print("atlas registration panel", flush=True)
+    from microscopy_viewer import registration as rg
+
+    panel = app.registration_widget
+    panel.refresh_layers()
+    assigned = panel.roles()
+    check(bool(assigned), f"the role table lists {len(assigned)} layer(s)")
+    check(
+        all(role in rg.ROLES for role in assigned.values()),
+        f"every layer got a role from the manifest ({sorted(set(assigned.values()))})",
+    )
+    # Nothing in the sample data is a nuclear channel, so nothing may be promoted
+    # to driving a registration by accident.
+    check(
+        rg.ROLE_DRIVER not in assigned.values(),
+        "no driver is guessed when no channel looks nuclear",
+    )
+    check(rg.guess_role("Confocal - dapi") == rg.ROLE_DRIVER, "a DAPI channel is guessed as the driver")
+    check(rg.guess_role("Confocal - Actub") == rg.ROLE_LANDMARK, "acetylated tubulin is guessed as a landmark")
+    check(rg.guess_role("Confocal - sv2") == rg.ROLE_CARRY, "an unrecognised channel stays a carry-along")
+
+    # Refusals have to be quiet status text, not modal dialogs: an offscreen run
+    # would hang on one, and so would a user who just wanted to look at the panel.
+    panel.run()
+    check("driver" in panel._status.text().lower() or "antspyx" in panel._status.text(),
+          f"running with nothing set up explains itself ({panel._status.text()[:60]}…)")
+    panel.export_regions()
+    check("Nothing to export" in panel._status.text(), "exporting with no result is refused politely")
+
+    first_layer = next(iter(assigned))
+    volume, problem = panel._volume_from_layer(app.viewer.layers[first_layer], rg.ROLE_CARRY)
+    if volume is not None:
+        check(len(volume.spacing) == 3, f"a snapshot carries a 3-axis voxel size ({volume.spacing})")
+        check(
+            all(size > 0 for size in volume.spacing),
+            "and no zero voxel size, which would collapse the stack in physical space",
+        )
+    else:
+        check("3D" in problem, f"a non-3D layer is reported rather than snapshotted ({problem})")
+
+    if rg.backend_available("ants"):
+        check(panel._run_button.isEnabled(), "antspyx is installed, so Register is live")
+    else:
+        check(not panel._run_button.isEnabled(), "without antspyx, Register is disabled")
+        check(not panel._backend_notice.isHidden(), "and the panel says what to install")
     print(flush=True)
 
     print("ROI intensity comparison panel", flush=True)

@@ -290,6 +290,82 @@ histogram and the AUC, so the numbers are reproducible and the panel stays
 responsive; the statistics themselves always use every pixel. Measurement runs on
 a `thread_worker`, so the viewer keeps redrawing while a large ROI is measured.
 
+### Atlas registration
+
+**Atlas registration** fits an open brain onto a reference atlas — Z-Brain, ZBB or
+anything else that ships a reference volume — and reads the signal channel out per
+anatomical region.
+
+**One channel drives the fit, and it is the nuclear one.** DAPI is the only
+channel with signal across the whole brain, which is what a global affine plus a
+deformable pass needs. The others are assigned around it:
+
+| Role | Channel | What happens to it |
+|---|---|---|
+| **Registration driver** | DAPI | Fitted against the atlas reference. The only channel the optimiser ever sees. |
+| **Landmark / QC** | acetylated tubulin | Resampled and shown for eyeballing tracts. Contributes to the metric only if you tick it on. |
+| **Carry-along** | anti-SV2 | Resampled through the driver's transform. Never fitted. |
+
+That asymmetry is the point. A regional channel like anti-SV2 handed to the
+optimiser produces a beautiful alignment of its own domains onto whatever the
+atlas happens to have nearby — confident, and wrong. The landmark option is off
+by default for a milder version of the same problem: a tract-rich channel pulls
+the warp onto tracts and lets the space between them drift.
+
+Roles are guessed from the channel names the reader already recorded, so a file
+whose channels are called `dapi`, `Actub` and `sv2` arrives assigned correctly.
+Every guess is a combo box. An unrecognised channel defaults to carry-along —
+never to driving the fit.
+
+**Atlas** — *Detect from a folder…* scans a download and picks the reference, the
+region masks and the name list. A **nuclear reference is preferred**, since DAPI
+against a nuclear channel is the same-modality case; falling back to tERK is
+allowed, but it is reported on the panel and recorded in the result, because that
+fit is the one to check before believing its output. All three paths can be set
+by hand.
+
+Region masks are read in both forms atlases ship them: an integer label volume,
+and Z-Brain's one-binary-mask-per-region HDF5 — whose regions *overlap*, so they
+are never collapsed into a single volume. Masks are read one at a time; three
+hundred at atlas resolution do not fit in memory at once.
+
+Other behaviour worth knowing:
+
+- Registration runs in **physical space**, using the calibrated voxel size the
+  reader already put on each layer. An anisotropic stack and an atlas at a
+  different resolution line up without resampling anything by hand.
+- **Affine only** is a fast sanity pass. Run it first: a deformable registration
+  cannot undo a mirrored or upside-down stack — it converges to a confident wrong
+  answer — so check the overlay, and use **Flip axes** if handedness is wrong.
+- The fit is done at or below **Fit at most** voxels; the transform is smooth, so
+  it is found on a decimated volume and applied at full atlas resolution.
+- The signal is warped **into atlas space** and scored against the atlas's own
+  masks, so no region boundary is ever interpolated. The inverse transform is
+  kept too, for bringing masks back onto the original stack.
+- The run is on a `thread_worker`, so the window stays usable.
+- The region table exports through the same writer as the measurements workbook.
+
+Registration needs `antspyx`, which is a large, platform-fussy wheel and so is an
+optional extra rather than a dependency:
+
+```bash
+python -m pip install ".[registration]"
+```
+
+Without it the panel still appears and says exactly that, the way the slide export
+reports a missing `python-pptx`. `Backend` is a three-method interface, so
+`itk-elastix` can be added beside ANTs — relevant on Apple Silicon, where antspyx
+may need a source build.
+
+Measured on a real 7 dpf larva (134 × 2040 × 2040, 558 Mvoxels, 1.29 × 0.61 ×
+0.61 µm) registered onto a 54 × 510 × 510 nuclear reference: **43 s affine, 63 s
+with the deformable pass**, both including resampling two channels at atlas
+resolution.
+
+One thing the software cannot do for you: an atlas is a *brain*, so a field
+holding a whole larva has to be cropped to the head, or the fit will spend itself
+matching yolk and trunk to a brain-shaped reference.
+
 ### Exports
 
 **Export Snapshot** saves what is on the canvas at 2× oversampling, so it stays
@@ -504,6 +580,7 @@ python tests/test_intensity.py      # ROI statistics, AUC / overlap, CSV export 
 python tests/test_rendering.py      # GPU voxel budget and the volume cache — no Qt needed
 python tests/test_slides.py         # channel/merge rendering and the .pptx table — no Qt needed
 python tests/test_overview.py       # overview detection, stitching, the locator slide — no Qt needed
+python tests/test_registration.py   # atlas registration engine — no Qt; ANTs checks skip without antspyx
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 
