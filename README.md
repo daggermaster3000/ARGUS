@@ -1,5 +1,9 @@
 # ARGUS — Microscopy Viewer
 
+[![tests](https://github.com/daggermaster3000/ARGUS/actions/workflows/tests.yml/badge.svg)](https://github.com/daggermaster3000/ARGUS/actions/workflows/tests.yml)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+
 A customised [napari](https://napari.org) viewer for rapid microscopy image inspection.
 It opens Imaris `.ims`, TIFF, OME-TIFF and OME-Zarr datasets, shows the acquisition
 metadata alongside the image, and lets you measure and annotate in calibrated
