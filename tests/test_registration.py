@@ -126,6 +126,42 @@ def test_decimation() -> None:
     check(kept.shape[0] >= 1 and kept.size > 0, f"a 2-plane stack survives decimation ({kept.shape})")
 
 
+def test_voxel_size_from_headers() -> None:
+    print("the atlas voxel size, read without loading the volume")
+    import tifffile
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+
+        # A plain TIFF records nothing, which is the case the panel has to let
+        # the user type around: assuming 1 µm silently would make every distance
+        # downstream wrong.
+        plain = _write_tiff(root / "plain.tif", _blob(shape=(4, 8, 8)))
+        check(reg.read_voxel_size(plain) is None, "a plain TIFF reports no voxel size")
+
+        # An ImageJ TIFF does record one, and it must come back as (z, y, x).
+        calibrated = root / "calibrated.tif"
+        tifffile.imwrite(
+            str(calibrated), _blob(shape=(4, 8, 8)),
+            imagej=True, resolution=(1 / 0.5, 1 / 0.5),
+            metadata={"spacing": 2.0, "unit": "um"},
+        )
+        spacing = reg.read_voxel_size(calibrated)
+        check(spacing is not None, "an ImageJ TIFF reports its voxel size")
+        if spacing is not None:
+            check(
+                abs(spacing[0] - 2.0) < 1e-6 and abs(spacing[1] - 0.5) < 1e-6,
+                f"and it comes back as (z, y, x) ({spacing})",
+            )
+
+        check(reg.read_voxel_size(root / "missing.tif") is None, "a missing file is not an error")
+
+        # The spec's voxel size is what gets used when the file has none, and it
+        # must be reported as given rather than as an assumption.
+        atlas = reg.AtlasSpec(reference_path=plain, voxel_size_um=(2.0, 0.8, 0.8))
+        check(atlas.voxel_size_um == (2.0, 0.8, 0.8), "a spec can carry the voxel size itself")
+
+
 def test_atlas_discovery() -> None:
     print("picking the reference out of an atlas download")
     with tempfile.TemporaryDirectory() as directory:
@@ -533,6 +569,7 @@ def main() -> int:
         test_roles_and_volumes,
         test_intensity_preparation,
         test_decimation,
+        test_voxel_size_from_headers,
         test_atlas_discovery,
         test_reading_labels,
         test_region_table,

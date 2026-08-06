@@ -373,8 +373,13 @@ def main() -> int:
     # Refusals have to be quiet status text, not modal dialogs: an offscreen run
     # would hang on one, and so would a user who just wanted to look at the panel.
     panel.run()
-    check("driver" in panel._status.text().lower() or "antspyx" in panel._status.text(),
-          f"running with nothing set up explains itself ({panel._status.text()[:60]}…)")
+    # Which refusal comes back depends on what is installed: without antspyx it
+    # names the package, with it the first missing thing is the atlas itself.
+    refusal = panel._status.text().lower()
+    check(
+        any(word in refusal for word in ("driver", "antspyx", "atlas reference")),
+        f"running with nothing set up explains itself ({panel._status.text()[:60]}…)",
+    )
     panel.export_regions()
     check("Nothing to export" in panel._status.text(), "exporting with no result is refused politely")
 

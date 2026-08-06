@@ -170,6 +170,31 @@ class RegistrationWidget(QWidget):
         )
         form.addRow("Region names", names_row)
 
+        # Plain TIFF and HDF5 carry no voxel size, and most atlas downloads are
+        # one of the two. Without it every distance downstream is wrong — the
+        # region volumes, the scale of the warped layers, and the fit itself —
+        # so it is typed here rather than silently assumed to be 1 µm.
+        voxel_row = QWidget()
+        voxel_layout = QHBoxLayout(voxel_row)
+        voxel_layout.setContentsMargins(0, 0, 0, 0)
+        self._voxel_boxes = {}
+        for axis, label in (("z", "Z"), ("y", "Y"), ("x", "X")):
+            spin = QDoubleSpinBox()
+            spin.setRange(0.001, 1000.0)
+            spin.setDecimals(3)
+            spin.setValue(1.0)
+            spin.setPrefix(f"{label} ")
+            spin.setSuffix(" µm")
+            spin.setToolTip(
+                "Voxel size of the atlas reference. Filled in automatically when the file "
+                "records one; type it in when it does not."
+            )
+            voxel_layout.addWidget(spin)
+            self._voxel_boxes[axis] = spin
+        form.addRow("Atlas voxel", voxel_row)
+
+        self._reference_edit.editingFinished.connect(self._read_reference_voxel_size)
+
         self._atlas_note = QLabel("")
         self._atlas_note.setWordWrap(True)
         form.addRow("", self._atlas_note)
@@ -399,32 +424,59 @@ class RegistrationWidget(QWidget):
         self._reference_edit.setText(str(spec.reference_path))
         self._labels_edit.setText(str(spec.label_path) if spec.label_path else "")
         self._names_edit.setText(str(spec.label_names_path) if spec.label_names_path else "")
+        self._read_reference_voxel_size()
+        detected = self._atlas_note.text()
 
         if spec.is_nuclear:
             self._atlas_note.setText(
-                f"Nuclear reference found ({spec.reference_channel}) — same modality as DAPI."
+                f"Nuclear reference found ({spec.reference_channel}) — same modality as DAPI. "
+                f"{detected}"
             )
         else:
             self._atlas_note.setText(
                 f"<b>No nuclear reference found.</b> Falling back to "
                 f"{spec.reference_path.name} ({spec.reference_channel}), so DAPI will be "
-                "registered across modalities. Check the overlay before trusting the region table."
+                "registered across modalities. Check the overlay before trusting the region "
+                f"table. {detected}"
             )
 
+    def _read_reference_voxel_size(self) -> None:
+        """Fill the voxel-size boxes from the reference file, when it records one."""
+        reference = self._reference_edit.text().strip()
+        if not reference:
+            return
+        spacing = rg.read_voxel_size(reference)
+        if spacing is None:
+            self._atlas_note.setText(
+                f"{Path(reference).name} records no voxel size — type the atlas voxel size "
+                "below, or every distance in the result will be wrong."
+            )
+            return
+        for axis, value in zip(("z", "y", "x"), spacing):
+            self._voxel_boxes[axis].setValue(float(value))
+        self._atlas_note.setText(
+            f"{Path(reference).name}: voxel size read from the file "
+            f"({spacing[0]:g} × {spacing[1]:g} × {spacing[2]:g} µm)."
+        )
+
+    def atlas_voxel_size(self) -> tuple[float, float, float]:
+        return tuple(float(self._voxel_boxes[axis].value()) for axis in ("z", "y", "x"))  # type: ignore[return-value]
+
     def atlas_spec(self) -> rg.AtlasSpec:
-        """The atlas as the three path boxes currently read."""
+        """The atlas as the path boxes and the voxel size currently read."""
         reference = self._reference_edit.text().strip()
         if not reference:
             raise ValueError("Choose an atlas reference volume first.")
         labels = self._labels_edit.text().strip()
         names = self._names_edit.text().strip()
-        nuclear = rg._score_reference(Path(reference).name)[0] >= 2
+        score, keyword = rg._score_reference(Path(reference).name)
         return rg.AtlasSpec(
             reference_path=Path(reference),
-            reference_channel=rg._score_reference(Path(reference).name)[1] or "unknown",
+            reference_channel=keyword or "unknown",
             label_path=Path(labels) if labels else None,
             label_names_path=Path(names) if names else None,
-            is_nuclear=nuclear,
+            voxel_size_um=self.atlas_voxel_size(),
+            is_nuclear=score >= 2,
         )
 
     def settings(self) -> rg.RegistrationSettings:

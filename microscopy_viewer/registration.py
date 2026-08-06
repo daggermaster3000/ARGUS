@@ -522,6 +522,55 @@ def read_volume(path: str | Path) -> tuple[np.ndarray, tuple[float, float, float
     return _read_with_backend(path)
 
 
+def read_voxel_size(path: str | Path) -> tuple[float, float, float] | None:
+    """The voxel size of an atlas file, from its header alone.
+
+    Reading the header rather than the volume: the panel wants to show the voxel
+    size the moment a file is picked, and an atlas reference is hundreds of
+    megabytes. Returns ``None`` when the format carries no spacing — plain TIFF
+    and HDF5 usually do not, which is why the panel lets it be typed in.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    suffix = _suffixes(path)
+
+    try:
+        if suffix in (".tif", ".tiff"):
+            import tifffile
+
+            with tifffile.TiffFile(str(path)) as handle:
+                return _tiff_spacing(handle)
+
+        if suffix == ".nrrd":
+            try:
+                import nrrd
+
+                return _nrrd_spacing(nrrd.read_header(str(path)))
+            except ImportError:
+                pass
+
+        if suffix in (".nii", ".nii.gz"):
+            try:
+                import nibabel
+
+                zooms = tuple(float(v) for v in nibabel.load(str(path)).header.get_zooms()[:3])
+                return (zooms[2], zooms[1], zooms[0]) if len(zooms) == 3 else None
+            except ImportError:
+                pass
+
+        if suffix not in (".h5", ".hdf5"):
+            import ants
+
+            info = ants.image_header_info(str(path))
+            spacing = tuple(float(v) for v in info.get("spacing", ()))
+            if len(spacing) == 3:
+                return spacing
+    except Exception:
+        logger.debug("could not read the voxel size of %s from its header", path, exc_info=True)
+    return None
+
+
 def _read_with_backend(path: Path) -> tuple[np.ndarray, tuple[float, float, float] | None]:
     """Last resort: let ANTs (or nibabel) read a format we have no reader for."""
     try:
