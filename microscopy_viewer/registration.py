@@ -104,6 +104,29 @@ LABEL_KEYWORDS = ("mask", "label", "anatomy", "segmentation", "region")
 #: Volume formats an atlas download realistically arrives in.
 VOLUME_SUFFIXES = (".nrrd", ".nii", ".nii.gz", ".tif", ".tiff", ".h5", ".hdf5", ".mha", ".mhd")
 
+#: Region masks may also arrive as a MATLAB v7.3 file — Z-Brain's MaskDatabase.mat.
+LABEL_SUFFIXES = VOLUME_SUFFIXES + (".mat",)
+
+#: Everything in this module works in ``(z, y, x)``, matching the array order the
+#: readers produce and the order ``layer.scale`` is in. Atlas files do not agree
+#: with each other about this, so each source declares what its own order is and
+#: is permuted into that convention once, on the way in. Getting it wrong does not
+#: raise anything — it silently asks the optimiser to find a 90° rotation, which
+#: it will not — so it is worth being explicit about.
+#:
+#: The three that turn up in one Z-Brain download alone:
+#: ``Ref20131120pt14pl2.nrrd`` is ``xyz``, ``AnatomyLabelDatabase.hdf5`` is
+#: ``zxy`` (MATLAB writes ``y x z`` and HDF5 reverses it), and
+#: ``MaskDatabase.mat`` is ``yxz``.
+CANONICAL_ORDER = "zyx"
+
+#: Axis order of an ITK-read volume (NRRD, NIfTI, MHA): fastest axis first.
+ITK_ORDER = "xyz"
+#: Axis order of a 3D array written by MATLAB and read back through h5py.
+MATLAB_HDF5_ORDER = "zxy"
+#: Axis order of a MATLAB array reshaped column-major from its own linear indices.
+MATLAB_LINEAR_ORDER = "yxz"
+
 #: Percentile above which a voxel counts as "signal" for the per-region overlap
 #: fraction, when the caller does not name a threshold.
 DEFAULT_THRESHOLD_PERCENTILE = 95.0
@@ -159,10 +182,20 @@ class AtlasSpec:
     #: False means the reference is not a nuclear stain, so DAPI is being
     #: registered across modalities. Warned about, never silently accepted.
     is_nuclear: bool = True
+    #: Dataset inside the reference file, when it holds more than one volume.
+    #: Z-Brain ships 29 averaged stacks in one HDF5, of which exactly one — the
+    #: H2B-RFP nuclear average — is the right thing to register DAPI against.
+    reference_dataset: str = ""
+    #: Overrides the axis order guessed for the reference file. See
+    #: :data:`CANONICAL_ORDER`.
+    axis_order: str = ""
 
     def describe(self) -> str:
         modality = "nuclear" if self.is_nuclear else f"non-nuclear ({self.reference_channel or 'unknown'})"
-        return f"{self.reference_path.name} [{modality}]"
+        name = self.reference_path.name
+        if self.reference_dataset:
+            name = f"{name}::{self.reference_dataset}"
+        return f"{name} [{modality}]"
 
 
 @dataclass
@@ -485,13 +518,61 @@ def _suffixes(path: Path) -> str:
     return ".nii.gz" if name.endswith(".nii.gz") else path.suffix.lower()
 
 
-def read_volume(path: str | Path) -> tuple[np.ndarray, tuple[float, float, float] | None]:
-    """Read an atlas volume. Returns ``(array, voxel size in µm or None)``.
+def to_canonical(
+    array: np.ndarray, spacing: Sequence[float] | None, order: str
+) -> tuple[np.ndarray, tuple[float, float, float] | None]:
+    """Permute a volume and its spacing from *order* into ``(z, y, x)``.
+
+    The one place axis conventions are reconciled. Everything downstream — the
+    metric, the voxel sizes, the region masks, the scale on the layers that come
+    back — assumes ``(z, y, x)``, so a file that disagrees is turned around here
+    and nowhere else.
+    """
+    order = (order or CANONICAL_ORDER).lower()
+    if sorted(order) != sorted(CANONICAL_ORDER):
+        raise ValueError(f"axis order must be a permutation of {CANONICAL_ORDER!r}, got {order!r}")
+    if array.ndim != 3:
+        return array, tuple(spacing) if spacing is not None else None  # type: ignore[return-value]
+
+    permutation = tuple(order.index(axis) for axis in CANONICAL_ORDER)
+    if permutation == (0, 1, 2):
+        return array, tuple(float(v) for v in spacing) if spacing is not None else None  # type: ignore[return-value]
+
+    permuted = np.transpose(array, permutation)
+    if spacing is None:
+        return permuted, None
+    return permuted, tuple(float(spacing[index]) for index in permutation)  # type: ignore[return-value]
+
+
+def _is_matlab_hdf5(handle) -> bool:
+    """Whether an HDF5 file was written by MATLAB, which reverses its axes.
+
+    MATLAB v7.3 files carry a ``#refs#`` group and ``MATLAB_class`` attributes.
+    Z-Brain's stacks are stored 1406 × 621 × 138 in MATLAB and therefore read
+    back as 138 × 621 × 1406 — z, x, y rather than z, y, x, which is a
+    transposition no optimiser is going to find on its own.
+    """
+    try:
+        if "#refs#" in handle:
+            return True
+        for node in handle.values():
+            if "MATLAB_class" in getattr(node, "attrs", {}):
+                return True
+    except Exception:
+        logger.debug("could not test for a MATLAB HDF5 signature", exc_info=True)
+    return False
+
+
+def read_volume(
+    path: str | Path, dataset: str | None = None, axis_order: str = ""
+) -> tuple[np.ndarray, tuple[float, float, float] | None]:
+    """Read an atlas volume as ``(array in (z, y, x), voxel size in µm or None)``.
 
     Each format is read by whatever library is already a dependency where one
     exists — tifffile and h5py are core here — falling back to the backend's own
     reader for the neuroimaging formats, which is why ``.nrrd`` works without
-    ``pynrrd`` when antspyx is installed.
+    ``pynrrd`` when antspyx is installed. *dataset* names the volume to take when
+    the file holds several.
     """
     path = Path(path)
     if not path.exists():
@@ -504,22 +585,26 @@ def read_volume(path: str | Path) -> tuple[np.ndarray, tuple[float, float, float
         with tifffile.TiffFile(str(path)) as handle:
             array = handle.asarray()
             spacing = _tiff_spacing(handle)
-        return np.asarray(array), spacing
+        return to_canonical(np.asarray(array), spacing, axis_order or CANONICAL_ORDER)
 
-    if suffix in (".h5", ".hdf5"):
-        array, spacing = _read_hdf5_volume(path)
-        return array, spacing
+    if suffix in (".h5", ".hdf5", ".mat"):
+        array, spacing, guessed = _read_hdf5_volume(path, dataset)
+        return to_canonical(array, spacing, axis_order or guessed)
 
-    if suffix in (".nrrd",):
+    if suffix == ".nrrd":
         try:
             import nrrd
 
             array, header = nrrd.read(str(path))
-            return np.asarray(array), _nrrd_spacing(header)
+            # pynrrd hands back the array in the file's own axis order, and the
+            # spacing helper already returns (z, y, x) for it.
+            array, _spacing = to_canonical(np.asarray(array), None, axis_order or ITK_ORDER)
+            return array, _nrrd_spacing(header)
         except ImportError:
             logger.debug("pynrrd is not installed; falling back to the backend reader")
 
-    return _read_with_backend(path)
+    array, spacing = _read_with_backend(path)
+    return to_canonical(array, spacing, axis_order or ITK_ORDER)
 
 
 def read_voxel_size(path: str | Path) -> tuple[float, float, float] | None:
@@ -559,13 +644,14 @@ def read_voxel_size(path: str | Path) -> tuple[float, float, float] | None:
             except ImportError:
                 pass
 
-        if suffix not in (".h5", ".hdf5"):
+        if suffix not in (".h5", ".hdf5", ".mat"):
             import ants
 
             info = ants.image_header_info(str(path))
             spacing = tuple(float(v) for v in info.get("spacing", ()))
             if len(spacing) == 3:
-                return spacing
+                # ITK reports spacing fastest-axis-first; ours is (z, y, x).
+                return (spacing[2], spacing[1], spacing[0])
     except Exception:
         logger.debug("could not read the voxel size of %s from its header", path, exc_info=True)
     return None
@@ -656,16 +742,42 @@ def _hdf5_volume_keys(handle) -> list[str]:
     return sorted(found)
 
 
-def _read_hdf5_volume(path: Path) -> tuple[np.ndarray, tuple[float, float, float] | None]:
+def _read_hdf5_volume(
+    path: Path, dataset: str | None = None
+) -> tuple[np.ndarray, tuple[float, float, float] | None, str]:
+    """One volume out of an HDF5 file, with the axis order it is stored in."""
     import h5py
 
     with h5py.File(str(path), "r") as handle:
+        order = MATLAB_HDF5_ORDER if _is_matlab_hdf5(handle) else CANONICAL_ORDER
         keys = _hdf5_volume_keys(handle)
         if not keys:
             raise ValueError(f"{path.name} holds no 3D dataset")
-        if len(keys) > 1:
-            logger.info("%s holds %d volumes; using %s", path.name, len(keys), keys[0])
-        return np.asarray(handle[keys[0]][()]), None
+        if dataset:
+            if dataset not in handle:
+                available = ", ".join(keys[:6])
+                raise ValueError(f"{path.name} has no dataset {dataset!r} (has: {available}…)")
+            chosen = dataset
+        else:
+            chosen = keys[0]
+            if len(keys) > 1:
+                logger.info("%s holds %d volumes; using %s", path.name, len(keys), chosen)
+        return np.asarray(handle[chosen][()]), None, order
+
+
+def hdf5_volume_names(path: str | Path) -> list[str]:
+    """Every 3D dataset in an HDF5 file, for the panel to offer as a reference."""
+    path = Path(path)
+    if not path.exists() or _suffixes(path) not in (".h5", ".hdf5", ".mat"):
+        return []
+    try:
+        import h5py
+
+        with h5py.File(str(path), "r") as handle:
+            return [key for key in _hdf5_volume_keys(handle) if not key.startswith("#refs#")]
+    except Exception:
+        logger.debug("could not list the datasets in %s", path, exc_info=True)
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -675,38 +787,69 @@ def _read_hdf5_volume(path: Path) -> tuple[np.ndarray, tuple[float, float, float
 
 @dataclass
 class LabelSet:
-    """The atlas's regions, in whichever of the two forms the download uses.
+    """The atlas's regions, in whichever of the three forms downloads use.
 
-    Z-Brain ships one binary mask per region in an HDF5, and its regions overlap
-    — a voxel belongs to a major subdivision *and* to a neuropil inside it — so
-    they cannot be collapsed into a single integer volume without throwing that
-    away. Other atlases ship exactly such an integer volume. Both are supported,
-    and masks are read one at a time rather than held together: three hundred
-    regions at atlas resolution is far more memory than the machine has.
+    Z-Brain ships its 294 regions as one sparse logical matrix in a MATLAB v7.3
+    file, one column per region over a flattened 1406 × 621 × 138 grid. Its
+    regions overlap — a voxel belongs to a major subdivision *and* to a neuropil
+    inside it — so they can never be collapsed into a single integer volume.
+    Other atlases ship exactly such an integer volume, or one binary mask per
+    region as separate datasets. All three are supported.
+
+    Nothing is held in memory across regions. A single Z-Brain mask is 120
+    million voxels; the sparse form is measured through its own indices without
+    ever building the mask at all.
     """
 
     names: dict[int, str] = field(default_factory=dict)
     #: Integer label volume, when the atlas is in that form.
     volume: np.ndarray | None = None
-    #: Source file and dataset keys, when it is one binary mask per region.
+    #: Source file and dataset keys, when it is one binary mask per dataset.
     path: Path | None = None
     mask_keys: list[str] = field(default_factory=list)
     shape: tuple[int, ...] = ()
+    #: Dataset holding a MATLAB sparse matrix, one column per region.
+    sparse_key: str = ""
+    #: Axis order the mask indices are expressed in, before canonicalisation.
+    axis_order: str = CANONICAL_ORDER
+
+    def __post_init__(self) -> None:
+        # An integer label volume knows its own grid. Leaving ``shape`` empty
+        # would let a caller build a set whose grid silently reads as unknown,
+        # and the grid is what every alignment check keys on.
+        if not self.shape and self.volume is not None:
+            self.shape = tuple(int(n) for n in np.asarray(self.volume).shape)
 
     @property
     def overlapping(self) -> bool:
-        """True when regions may overlap, i.e. the one-mask-per-region form."""
+        """True when regions may overlap, i.e. anything but an integer volume."""
         return self.volume is None
 
     def __len__(self) -> int:
-        return len(self.mask_keys) if self.overlapping else len(self.names)
+        if self.volume is not None:
+            return len(self.names)
+        if self.sparse_key:
+            return len(self.names)
+        return len(self.mask_keys)
 
     def iter_regions(self) -> Iterator[tuple[int, str, np.ndarray]]:
-        """Yield ``(id, name, boolean mask)`` one region at a time."""
+        """Yield ``(id, name, boolean mask)`` one region at a time.
+
+        For the sparse form this materialises each mask, which costs a full
+        volume of ``bool`` per region — :meth:`values_in` is the way to measure
+        one without paying that.
+        """
         if self.volume is not None:
             for region_id in sorted(int(v) for v in np.unique(self.volume) if int(v) != 0):
                 name = self.names.get(region_id, f"Region {region_id}")
                 yield region_id, name, self.volume == region_id
+            return
+
+        if self.sparse_key:
+            for region_id, name, indices in self._iter_sparse_indices():
+                mask = np.zeros(int(np.prod(self.shape)), dtype=bool)
+                mask[indices] = True
+                yield region_id, name, mask.reshape(self.shape)
             return
 
         if self.path is None:
@@ -715,40 +858,176 @@ class LabelSet:
 
         with h5py.File(str(self.path), "r") as handle:
             for index, key in enumerate(self.mask_keys, start=1):
-                mask = np.asarray(handle[key][()])
+                mask, _spacing = to_canonical(np.asarray(handle[key][()]), None, self.axis_order)
                 yield index, self.names.get(index, key), mask > 0
+
+    def _iter_sparse_indices(self) -> Iterator[tuple[int, str, np.ndarray]]:
+        """Yield ``(id, name, flat indices)`` into a canonical ``(z, y, x)`` volume.
+
+        The stored indices run down a MATLAB column-major ``(y, x, z)`` grid, so
+        they are turned into subscripts and re-flattened for the canonical array
+        rather than the volume being rebuilt and transposed.
+        """
+        import h5py
+
+        depth, height, width = self.shape  # canonical (z, y, x)
+        with h5py.File(str(self.path), "r") as handle:
+            group = handle[self.sparse_key]
+            row_index = group["ir"]
+            column_start = np.asarray(group["jc"][()]).astype(np.int64)
+            for column in range(len(column_start) - 1):
+                start, stop = int(column_start[column]), int(column_start[column + 1])
+                region_id = column + 1
+                name = self.names.get(region_id, f"Region {region_id}")
+                if stop <= start:
+                    yield region_id, name, np.empty(0, dtype=np.int64)
+                    continue
+                linear = np.asarray(row_index[start:stop]).astype(np.int64)
+                # MATLAB stores (y, x, z) column-major: y varies fastest.
+                y = linear % height
+                x = (linear // height) % width
+                z = linear // (height * width)
+                yield region_id, name, (z * height + y) * width + x
+
+    def values_in(self, signal: np.ndarray) -> Iterator[tuple[int, str, np.ndarray]]:
+        """Yield ``(id, name, the signal's values inside that region)``.
+
+        The sparse form indexes the flattened signal directly, so measuring 294
+        Z-Brain regions never allocates a mask.
+        """
+        values = np.asarray(signal)
+        if self.sparse_key:
+            flat = values.reshape(-1)
+            for region_id, name, indices in self._iter_sparse_indices():
+                yield region_id, name, flat[indices]
+            return
+        for region_id, name, mask in self.iter_regions():
+            yield region_id, name, values[np.asarray(mask)]
+
+
+def _read_matlab_sparse_labels(path: Path, names_path: str | Path | None) -> LabelSet | None:
+    """Z-Brain's ``MaskDatabase.mat``: 294 regions as one sparse logical matrix.
+
+    Returns ``None`` when the file holds no such matrix, so the caller can fall
+    through to the other forms.
+    """
+    import h5py
+
+    with h5py.File(str(path), "r") as handle:
+        key = next(
+            (
+                name
+                for name in handle
+                if isinstance(handle[name], h5py.Group)
+                and {"data", "ir", "jc"} <= set(handle[name])
+                and "outline" not in str(name).lower()
+            ),
+            None,
+        )
+        if key is None:
+            return None
+
+        # MATLAB records the grid the columns were flattened from beside them.
+        def scalar(name: str) -> int | None:
+            node = handle.get(name)
+            return int(np.asarray(node[()]).ravel()[0]) if node is not None else None
+
+        height, width, depth = scalar("height"), scalar("width"), scalar("Zs")
+        rows = int(handle[key].attrs.get("MATLAB_sparse", 0))
+        if not (height and width and depth):
+            raise ValueError(
+                f"{path.name} holds a sparse mask matrix but no height/width/Zs to reshape it by"
+            )
+        if rows and rows != height * width * depth:
+            raise ValueError(
+                f"{path.name}: the sparse matrix has {rows} rows but height x width x Zs is "
+                f"{height * width * depth}"
+            )
+
+        names = read_label_names(names_path) or _read_matlab_names(handle)
+        count = int(np.asarray(handle[key]["jc"][()]).size - 1)
+        names = names or {index: f"Region {index}" for index in range(1, count + 1)}
+        logger.info("%s: %d sparse regions on a %d x %d x %d grid", path.name, count, depth, height, width)
+        return LabelSet(
+            names=names,
+            path=path,
+            sparse_key=key,
+            # Canonical (z, y, x); the indices are converted in _iter_sparse_indices.
+            shape=(depth, height, width),
+            axis_order=MATLAB_LINEAR_ORDER,
+        )
+
+
+def _read_matlab_names(handle) -> dict[int, str]:
+    """Region names from a MATLAB cell array of char arrays."""
+    node = next((handle[key] for key in handle if "name" in str(key).lower()), None)
+    if node is None or not hasattr(node, "shape"):
+        return {}
+    names: dict[int, str] = {}
+    try:
+        references = np.asarray(node[()]).ravel()
+        for index, reference in enumerate(references, start=1):
+            try:
+                codes = np.asarray(handle[reference][()]).ravel()
+                names[index] = "".join(chr(int(code)) for code in codes).strip()
+            except Exception:
+                continue
+    except Exception:
+        logger.debug("could not read MATLAB region names", exc_info=True)
+    return names
 
 
 def read_labels(
     path: str | Path, names_path: str | Path | None = None, max_masks: int | None = None
 ) -> LabelSet:
-    """Load an atlas's regions from either an integer volume or a mask stack."""
+    """Load an atlas's regions, in whichever form the download ships them."""
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"atlas label file not found: {path}")
 
-    if _suffixes(path) in (".h5", ".hdf5"):
+    if _suffixes(path) in (".h5", ".hdf5", ".mat"):
         import h5py
 
+        sparse = _read_matlab_sparse_labels(path, names_path)
+        if sparse is not None:
+            return sparse
+
         with h5py.File(str(path), "r") as handle:
+            order = MATLAB_HDF5_ORDER if _is_matlab_hdf5(handle) else CANONICAL_ORDER
             keys = _hdf5_volume_keys(handle)
             if not keys:
                 raise ValueError(f"{path.name} holds no 3D dataset")
-            shape = tuple(int(n) for n in handle[keys[0]].shape)
-            first = np.asarray(handle[keys[0]][: min(4, shape[0])])
+            stored = tuple(int(n) for n in handle[keys[0]].shape)
+            first = np.asarray(handle[keys[0]][: min(4, stored[0])])
+
+        distinct = int(np.unique(first).size)
         # One dataset that is not binary is an integer label volume that happens
         # to live in HDF5; many datasets is the one-mask-per-region form.
-        if len(keys) == 1 and np.unique(first).size > 2:
-            volume, _spacing = _read_hdf5_volume(path)
+        if len(keys) == 1 and distinct > 2:
+            volume, _spacing, guessed = _read_hdf5_volume(path)
+            volume, _ = to_canonical(volume, None, guessed)
             return LabelSet(
                 names=read_label_names(names_path), volume=volume, path=path, shape=volume.shape
+            )
+        if len(keys) > 1 and distinct > 2:
+            # Z-Brain's AnatomyLabelDatabase.hdf5 is 29 averaged *intensity*
+            # stacks, not masks. Measured as masks every voxel counts as inside
+            # every region, so this has to be refused rather than averaged over.
+            raise ValueError(
+                f"{path.name} holds {len(keys)} volumes whose values are not 0/1, so they are "
+                f"images rather than region masks (for example “{keys[0]}”). If this is Z-Brain, "
+                "the region masks are in MaskDatabase.mat and this file is the anatomy stacks — "
+                "one of which makes a good registration reference."
             )
         if max_masks is not None:
             keys = keys[:max_masks]
         names = read_label_names(names_path) or {
             index: _tidy_region_name(key) for index, key in enumerate(keys, start=1)
         }
-        return LabelSet(names=names, path=path, mask_keys=keys, shape=shape)
+        shape, _spacing = to_canonical(np.empty(stored, dtype=bool), None, order)
+        return LabelSet(
+            names=names, path=path, mask_keys=keys, shape=shape.shape, axis_order=order
+        )
 
     volume, _spacing = read_volume(path)
     volume = np.asarray(volume)
@@ -813,6 +1092,30 @@ def _score_reference(name: str) -> tuple[int, str]:
     return (0, "")
 
 
+def _pick_labels(candidates: Sequence[Path], reference: Path, dataset: str) -> Path | None:
+    """The region-mask file, preferring one that says "mask" over one that says "label".
+
+    Z-Brain has both: ``MaskDatabase.mat`` holds the 294 regions, and
+    ``AnatomyLabelDatabase.hdf5`` holds averaged anatomy stacks despite having
+    "label" in its name. Picking on the first keyword match gets that backwards.
+    """
+    ranked: list[tuple[int, Path]] = []
+    for path in candidates:
+        lowered = path.name.lower()
+        # Only skip the reference file when the whole file is the reference; a
+        # dataset inside it may sit beside masks in the same file.
+        if path == reference and not dataset:
+            continue
+        if "mask" in lowered:
+            ranked.append((0, path))
+        elif any(word in lowered for word in LABEL_KEYWORDS):
+            ranked.append((1, path))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (item[0], str(item[1])))
+    return ranked[0][1]
+
+
 def discover_atlas(root: str | Path) -> AtlasSpec:
     """Work out which files in an atlas download to register against.
 
@@ -831,32 +1134,33 @@ def discover_atlas(root: str | Path) -> AtlasSpec:
     candidates = sorted(
         path
         for path in root.rglob("*")
-        if path.is_file() and _suffixes(path) in VOLUME_SUFFIXES
+        if path.is_file() and _suffixes(path) in LABEL_SUFFIXES
     )
     if not candidates:
-        raise ValueError(f"no atlas volumes found under {root} (looked for {', '.join(VOLUME_SUFFIXES)})")
+        raise ValueError(f"no atlas volumes found under {root} (looked for {', '.join(LABEL_SUFFIXES)})")
 
-    best: tuple[int, str, Path] | None = None
+    best: tuple[int, str, Path, str] | None = None
     for path in candidates:
         score, keyword = _score_reference(path.name)
-        if score < 0:
-            continue
-        if best is None or score > best[0]:
-            best = (score, keyword, path)
+        if score >= 0 and (best is None or score > best[0]):
+            best = (score, keyword, path, "")
+
+        # A multi-volume file has to be looked inside: Z-Brain's nuclear
+        # reference is one of 29 datasets in a file whose own name says nothing
+        # about it, and registering DAPI to a nuclear average rather than to
+        # tERK is the difference between a same-modality fit and a hard one.
+        for name in hdf5_volume_names(path):
+            inner_score, inner_keyword = _score_reference(name)
+            if inner_score >= 2 and (best is None or inner_score > best[0]):
+                best = (inner_score, inner_keyword, path, name)
+
     if best is None:
         raise ValueError(
             f"every volume under {root} looks like region masks; none is usable as a reference"
         )
 
-    score, keyword, reference = best
-    labels = next(
-        (
-            path
-            for path in candidates
-            if any(word in path.name.lower() for word in LABEL_KEYWORDS) and path != reference
-        ),
-        None,
-    )
+    score, keyword, reference, dataset = best
+    labels = _pick_labels(candidates, reference, dataset)
     names_file = next(
         (
             path
@@ -873,9 +1177,10 @@ def discover_atlas(root: str | Path) -> AtlasSpec:
         label_path=labels,
         label_names_path=names_file,
         is_nuclear=score >= 2,
+        reference_dataset=dataset,
     )
     if spec.is_nuclear:
-        logger.info("atlas reference: %s (nuclear, matched %r)", reference.name, keyword)
+        logger.info("atlas reference: %s (nuclear, matched %r)", spec.describe(), keyword)
     else:
         logger.warning(
             "no nuclear reference found under %s; falling back to %s. DAPI will be registered "
@@ -1013,7 +1318,27 @@ def register_to_atlas(
 
     if progress is not None:
         progress(f"reading the atlas reference ({atlas.reference_path.name})…")
-    reference, reference_spacing = read_volume(atlas.reference_path)
+    reference, reference_spacing = read_volume(
+        atlas.reference_path, atlas.reference_dataset or None, atlas.axis_order
+    )
+
+    # An HDF5 of stacks carries no clue about its axis order, and a reference
+    # left transposed asks the optimiser to find a 90° rotation — which it does
+    # not, it just converges somewhere wrong. The masks state their grid, so when
+    # they are present they settle it.
+    if not atlas.axis_order and atlas.label_path is not None:
+        grid = label_grid_shape(atlas.label_path)
+        reference, reference_spacing, permuted = align_to_grid(reference, reference_spacing, grid)
+        if permuted:
+            logger.info(
+                "transposed %s onto the %s grid the region masks are defined on",
+                atlas.reference_path.name, grid,
+            )
+            result.warnings.append(
+                f"{atlas.reference_path.name} was stored in a different axis order from "
+                f"{Path(atlas.label_path).name}; it was transposed onto the masks' {grid} grid."
+            )
+
     if reference_spacing is None:
         reference_spacing = atlas.voxel_size_um or (1.0, 1.0, 1.0)
         size = f"{reference_spacing[0]:g} × {reference_spacing[1]:g} × {reference_spacing[2]:g} µm"
@@ -1134,7 +1459,9 @@ def apply_transform(
     if not transforms:
         raise ValueError("this result carries no transform in that direction")
 
-    reference, spacing = read_volume(atlas.reference_path)
+    reference, spacing = read_volume(
+        atlas.reference_path, atlas.reference_dataset or None, atlas.axis_order
+    )
     if spacing is None:
         spacing = atlas.voxel_size_um or result.atlas_voxel_size_um
 
@@ -1167,6 +1494,102 @@ def signal_threshold(
     return float(np.percentile(finite, float(percentile)))
 
 
+def label_grid_shape(path: str | Path) -> tuple[int, int, int] | None:
+    """The canonical ``(z, y, x)`` grid a label file is defined on, read cheaply.
+
+    Used to settle the axis order of the reference volume. Two files from the
+    same atlas must describe the same grid, and the masks are the ones that say
+    outright what theirs is — Z-Brain records height, width and Zs beside them —
+    whereas an HDF5 of stacks says nothing at all and cannot always be told apart
+    from a file written in a different order.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    if _suffixes(path) not in (".h5", ".hdf5", ".mat"):
+        return None
+    try:
+        import h5py
+
+        with h5py.File(str(path), "r") as handle:
+            height = handle.get("height")
+            width = handle.get("width")
+            depth = handle.get("Zs")
+            if height is not None and width is not None and depth is not None:
+                return (
+                    int(np.asarray(depth[()]).ravel()[0]),
+                    int(np.asarray(height[()]).ravel()[0]),
+                    int(np.asarray(width[()]).ravel()[0]),
+                )
+            keys = _hdf5_volume_keys(handle)
+            if not keys:
+                return None
+            order = MATLAB_HDF5_ORDER if _is_matlab_hdf5(handle) else CANONICAL_ORDER
+            stored = tuple(int(n) for n in handle[keys[0]].shape)
+            permutation = tuple(order.index(axis) for axis in CANONICAL_ORDER)
+            return tuple(stored[index] for index in permutation)  # type: ignore[return-value]
+    except Exception:
+        logger.debug("could not read the label grid of %s", path, exc_info=True)
+    return None
+
+
+def align_to_grid(
+    array: np.ndarray,
+    spacing: Sequence[float] | None,
+    target: Sequence[int] | None,
+) -> tuple[np.ndarray, tuple[float, float, float] | None, bool]:
+    """Transpose *array* onto *target*'s axis order when the two are permutations.
+
+    Returns ``(array, spacing, permuted)``. Only unambiguous cases are touched:
+    when two axes are the same length there is no way to tell which way round
+    they belong, and guessing would be worse than leaving it alone.
+    """
+    spacing_out = tuple(float(v) for v in spacing) if spacing is not None else None
+    if target is None or array.ndim != 3:
+        return array, spacing_out, False  # type: ignore[return-value]
+    target = tuple(int(n) for n in target)
+    if tuple(array.shape) == target:
+        return array, spacing_out, False  # type: ignore[return-value]
+    if sorted(array.shape) != sorted(target) or len(set(target)) != len(target):
+        return array, spacing_out, False  # type: ignore[return-value]
+
+    permutation = tuple(array.shape.index(size) for size in target)
+    permuted = np.transpose(array, permutation)
+    if spacing_out is not None:
+        spacing_out = tuple(spacing_out[index] for index in permutation)  # type: ignore[assignment]
+    return permuted, spacing_out, True  # type: ignore[return-value]
+
+
+def _match_label_grid(signal: np.ndarray, labels: LabelSet) -> np.ndarray:
+    """Put *signal* on the same grid as the labels, or explain why it cannot be.
+
+    A mismatch that is a pure permutation is an axis-order disagreement between
+    two atlas files, and it is repaired here — with a warning, because it means
+    one of the files declared its order wrongly and the fit itself may have been
+    run against a transposed reference. Anything else is a real mismatch: the
+    signal was never resampled onto the atlas grid, and measuring it would
+    produce numbers for regions it was never aligned to.
+    """
+    target = tuple(int(n) for n in labels.shape)
+    if not target or signal.shape == target:
+        return signal
+
+    if sorted(signal.shape) == sorted(target) and len(set(target)) == len(target):
+        permutation = tuple(signal.shape.index(size) for size in target)
+        logger.warning(
+            "the warped signal is %s but the regions are %s; transposing by %s. "
+            "The two atlas files disagree about axis order — check the overlay.",
+            signal.shape, target, permutation,
+        )
+        return np.transpose(signal, permutation)
+
+    raise ValueError(
+        f"the regions are {target} but the warped signal is {signal.shape}; the signal was not "
+        "resampled onto the atlas grid. The region masks and the reference volume have to come "
+        "from the same atlas and be on the same grid."
+    )
+
+
 def region_table(
     signal: np.ndarray,
     labels: LabelSet,
@@ -1183,15 +1606,11 @@ def region_table(
     if threshold is None:
         threshold = signal_threshold(values)
 
+    values = _match_label_grid(values, labels)
+
     stats: list[RegionStat] = []
-    for region_id, name, mask in labels.iter_regions():
-        mask = np.asarray(mask)
-        if mask.shape != values.shape:
-            raise ValueError(
-                f"region “{name}” has shape {mask.shape} but the warped signal is {values.shape}; "
-                "the signal was not resampled onto the atlas grid"
-            )
-        inside = values[mask]
+    for region_id, name, inside in labels.values_in(values):
+        inside = np.asarray(inside)
         inside = inside[np.isfinite(inside)]
         if inside.size == 0:
             continue

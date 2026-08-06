@@ -159,8 +159,22 @@ class RegistrationWidget(QWidget):
         )
         form.addRow("Reference", reference_row)
 
+        # Z-Brain's nuclear reference is one of 29 stacks inside a single HDF5,
+        # so which volume to take has to be selectable, not just which file.
+        self._dataset_box = QComboBox()
+        self._dataset_box.setToolTip(
+            "Which volume inside the reference file to register against. Only shown for files "
+            "that hold more than one — Z-Brain's anatomy database holds 29."
+        )
+        self._dataset_box.setVisible(False)
+        form.addRow("Reference volume", self._dataset_box)
+        self._dataset_label = form.labelForField(self._dataset_box)
+        if self._dataset_label is not None:
+            self._dataset_label.setVisible(False)
+
         self._labels_edit, labels_row = self._path_row(
-            "Region masks: an integer label volume, or one binary mask per region in an HDF5.",
+            "Region masks: an integer label volume, one binary mask per region in an HDF5, "
+            "or Z-Brain's MaskDatabase.mat.",
             LABEL_FILTER,
         )
         form.addRow("Region masks", labels_row)
@@ -424,8 +438,11 @@ class RegistrationWidget(QWidget):
         self._reference_edit.setText(str(spec.reference_path))
         self._labels_edit.setText(str(spec.label_path) if spec.label_path else "")
         self._names_edit.setText(str(spec.label_names_path) if spec.label_names_path else "")
+        self._refresh_datasets(spec.reference_dataset)
         self._read_reference_voxel_size()
         detected = self._atlas_note.text()
+        if spec.reference_dataset:
+            detected = f"Using “{spec.reference_dataset}”. {detected}"
 
         if spec.is_nuclear:
             self._atlas_note.setText(
@@ -440,11 +457,28 @@ class RegistrationWidget(QWidget):
                 f"table. {detected}"
             )
 
+    def _refresh_datasets(self, selected: str = "") -> None:
+        """Offer the volumes inside a multi-volume reference file."""
+        reference = self._reference_edit.text().strip()
+        names = rg.hdf5_volume_names(reference) if reference else []
+        show = len(names) > 1
+        self._dataset_box.blockSignals(True)
+        self._dataset_box.clear()
+        if show:
+            self._dataset_box.addItems(names)
+            if selected and selected in names:
+                self._dataset_box.setCurrentText(selected)
+        self._dataset_box.blockSignals(False)
+        self._dataset_box.setVisible(show)
+        if self._dataset_label is not None:
+            self._dataset_label.setVisible(show)
+
     def _read_reference_voxel_size(self) -> None:
         """Fill the voxel-size boxes from the reference file, when it records one."""
         reference = self._reference_edit.text().strip()
         if not reference:
             return
+        self._refresh_datasets(self._dataset_box.currentText())
         spacing = rg.read_voxel_size(reference)
         if spacing is None:
             self._atlas_note.setText(
@@ -469,7 +503,14 @@ class RegistrationWidget(QWidget):
             raise ValueError("Choose an atlas reference volume first.")
         labels = self._labels_edit.text().strip()
         names = self._names_edit.text().strip()
-        score, keyword = rg._score_reference(Path(reference).name)
+        dataset = self._dataset_box.currentText() if self._dataset_box.isVisible() else ""
+        # The chosen volume names the modality when the file itself does not:
+        # "Elavl3-H2BRFP_6dpf_MeanImageOf10Fish" inside a file called
+        # AnatomyLabelDatabase.hdf5 is a nuclear reference, and the fit is a
+        # same-modality one because of the dataset, not the filename.
+        score, keyword = rg._score_reference(dataset or Path(reference).name)
+        if score < 2 and dataset:
+            score, keyword = rg._score_reference(Path(reference).name)
         return rg.AtlasSpec(
             reference_path=Path(reference),
             reference_channel=keyword or "unknown",
@@ -477,6 +518,7 @@ class RegistrationWidget(QWidget):
             label_names_path=Path(names) if names else None,
             voxel_size_um=self.atlas_voxel_size(),
             is_nuclear=score >= 2,
+            reference_dataset=dataset,
         )
 
     def settings(self) -> rg.RegistrationSettings:

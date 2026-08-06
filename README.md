@@ -324,10 +324,41 @@ allowed, but it is reported on the panel and recorded in the result, because tha
 fit is the one to check before believing its output. All three paths can be set
 by hand.
 
-Region masks are read in both forms atlases ship them: an integer label volume,
-and Z-Brain's one-binary-mask-per-region HDF5 — whose regions *overlap*, so they
-are never collapsed into a single volume. Masks are read one at a time; three
-hundred at atlas resolution do not fit in memory at once.
+Region masks are read in all three forms atlases ship them: an integer label
+volume, one binary mask per HDF5 dataset, and Z-Brain's `MaskDatabase.mat` — a
+MATLAB v7.3 sparse logical matrix, one column per region. Those regions *overlap*
+(a voxel is in a subdivision *and* in a neuropil inside it), so they are never
+collapsed into a single volume. Nothing is held across regions: one Z-Brain mask
+is 120 million voxels, and the sparse form is measured through its own indices
+without building a mask at all.
+
+#### Working with the Z-Brain download
+
+The three files do not agree with each other, and two of them are named
+misleadingly:
+
+| File | What it is | Axis order |
+|---|---|---|
+| `AnatomyLabelDatabase.hdf5` | 29 averaged **anatomy stacks**, not labels. One of them, `Elavl3-H2BRFP_6dpf_MeanImageOf10Fish`, is the **nuclear reference you want for DAPI**. | `z, x, y` |
+| `MaskDatabase.mat` | The actual 294 **region masks**, sparse. | `y, x, z` |
+| `Ref20131120pt14pl2.nrrd` | The tERK reference — the cross-modality fallback. | `x, y, z` |
+
+*Detect from a folder…* handles this: it looks **inside** multi-volume files, so
+it finds the H2B nuclear stack rather than settling for tERK, and it prefers
+`MaskDatabase.mat` over the anatomy database despite the latter's name. When the
+reference file holds several volumes, a **Reference volume** dropdown appears for
+picking a different one.
+
+Axis order is reconciled on the way in — everything works in `(z, y, x)`. Where a
+file gives no clue (a bare HDF5 of stacks), the reference is transposed onto the
+grid the masks declare, and the panel says it did so. This matters more than it
+sounds: a transposed reference does not raise anything, it just asks the
+optimiser to find a 90° rotation, which it will not — it converges somewhere
+confident and wrong.
+
+Pointing **Region masks** at `AnatomyLabelDatabase.hdf5` is refused with a message
+saying where the masks actually are: measured as masks, those intensity stacks
+put every voxel inside every region.
 
 Other behaviour worth knowing:
 

@@ -244,6 +244,203 @@ def test_reading_labels() -> None:
         check(reg.read_label_names(None) == {}, "no sidecar is not an error")
 
 
+def _write_matlab_sparse(
+    path: Path, height: int, width: int, depth: int, columns: list[list[int]], names: list[str]
+) -> Path:
+    """A stand-in for Z-Brain's MaskDatabase.mat.
+
+    One sparse logical matrix, one column per region, rows being MATLAB linear
+    indices down a column-major ``(height, width, Zs)`` grid, plus the region
+    names as a cell array of char arrays behind object references.
+    """
+    import h5py
+
+    indices: list[int] = []
+    starts = [0]
+    for column in columns:
+        indices.extend(column)
+        starts.append(len(indices))
+
+    with h5py.File(str(path), "w") as handle:
+        refs = handle.create_group("#refs#")
+        group = handle.create_group("MaskDatabase")
+        group.create_dataset("data", data=np.ones(len(indices), dtype=np.uint8))
+        group.create_dataset("ir", data=np.asarray(indices, dtype=np.uint64))
+        group.create_dataset("jc", data=np.asarray(starts, dtype=np.uint64))
+        group.attrs["MATLAB_class"] = np.bytes_(b"logical")
+        group.attrs["MATLAB_sparse"] = np.uint64(height * width * depth)
+
+        handles = []
+        for index, name in enumerate(names):
+            dataset = refs.create_dataset(
+                f"n{index}", data=np.asarray([ord(c) for c in name], dtype=np.uint16)
+            )
+            handles.append(dataset.ref)
+        handle.create_dataset(
+            "MaskDatabaseNames",
+            data=np.asarray(handles, dtype=h5py.ref_dtype).reshape(len(handles), 1),
+        )
+        handle.create_dataset("height", data=np.asarray([[float(height)]]))
+        handle.create_dataset("width", data=np.asarray([[float(width)]]))
+        handle.create_dataset("Zs", data=np.asarray([[float(depth)]]))
+    return path
+
+
+def test_axis_orders() -> None:
+    print("axis orders are reconciled on the way in")
+    array = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
+
+    same, spacing = reg.to_canonical(array, (1.0, 2.0, 3.0), "zyx")
+    check(same.shape == (2, 3, 4) and spacing == (1.0, 2.0, 3.0), "a canonical volume is untouched")
+
+    # An ITK volume is (x, y, z): the z axis is last and has to come first.
+    itk, itk_spacing = reg.to_canonical(array, (0.8, 0.8, 2.0), reg.ITK_ORDER)
+    check(itk.shape == (4, 3, 2), f"an xyz volume becomes zyx ({itk.shape})")
+    check(itk_spacing == (2.0, 0.8, 0.8), f"and its spacing follows ({itk_spacing})")
+
+    # MATLAB writes (y, x, z) and HDF5 reverses it to (z, x, y).
+    matlab, _spacing = reg.to_canonical(array, None, reg.MATLAB_HDF5_ORDER)
+    check(matlab.shape == (2, 4, 3), f"a zxy volume becomes zyx ({matlab.shape})")
+    check(
+        float(matlab[1, 2, 0]) == float(array[1, 0, 2]),
+        "and the voxels move with it rather than being reinterpreted",
+    )
+
+    try:
+        reg.to_canonical(array, None, "zzz")
+        check(False, "a nonsense axis order is refused")
+    except ValueError as exc:
+        check("permutation" in str(exc), f"a nonsense axis order is refused ({exc})")
+
+
+def test_grid_alignment() -> None:
+    print("a reference stored in a different order from its masks")
+    array = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
+
+    aligned, spacing, permuted = reg.align_to_grid(array, (1.0, 2.0, 3.0), (2, 4, 3))
+    check(permuted and aligned.shape == (2, 4, 3), f"it is transposed onto the masks' grid ({aligned.shape})")
+    check(spacing == (1.0, 3.0, 2.0), f"the spacing is permuted with it ({spacing})")
+
+    _same, _spacing, untouched = reg.align_to_grid(array, None, (2, 3, 4))
+    check(not untouched, "a volume already on the grid is left alone")
+
+    # Two axes of equal length make the permutation ambiguous, and a guess would
+    # be worse than doing nothing.
+    square = np.zeros((4, 4, 2), dtype=np.float32)
+    _out, _sp, guessed = reg.align_to_grid(square, None, (2, 4, 4))
+    check(not guessed, "an ambiguous permutation is refused rather than guessed")
+
+    _out, _sp, mismatched = reg.align_to_grid(array, None, (5, 6, 7))
+    check(not mismatched, "a genuine size mismatch is not papered over")
+
+    # The same repair, applied where the failure was actually reported from.
+    labels = reg.LabelSet(names={1: "x"}, volume=np.ones((2, 4, 3), dtype=np.int32))
+    signal = np.zeros((2, 3, 4), dtype=np.float32)
+    signal[1, 2, 3] = 5.0
+    matched = reg._match_label_grid(signal, labels)
+    check(matched.shape == (2, 4, 3), f"a permuted signal is transposed to the regions ({matched.shape})")
+    check(float(matched[1, 3, 2]) == 5.0, "and its voxels move with it")
+
+
+def test_matlab_sparse_masks() -> None:
+    print("Z-Brain's sparse mask database")
+    height, width, depth = 4, 3, 2  # MATLAB (y, x, z); canonical is (2, 4, 3)
+    # Region 1: the whole first z-plane. Region 2: one voxel at y=1, x=2, z=1.
+    plane = list(range(height * width))
+    single = [1 + 2 * height + 1 * height * width]
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = _write_matlab_sparse(
+            root / "MaskDatabase.mat", height, width, depth, [plane, single], ["Forebrain", "Tectum"]
+        )
+
+        labels = reg.read_labels(path)
+        check(labels.shape == (2, 4, 3), f"the grid is canonical (z, y, x) ({labels.shape})")
+        check(len(labels) == 2, f"both regions are found ({len(labels)})")
+        check(labels.overlapping, "sparse regions are treated as possibly overlapping")
+        check(
+            labels.names == {1: "Forebrain", 2: "Tectum"},
+            f"names are read out of the MATLAB cell array ({labels.names})",
+        )
+        check(reg.label_grid_shape(path) == (2, 4, 3), "the grid can be read without the masks")
+
+        regions = {name: mask for _id, name, mask in labels.iter_regions()}
+        check(
+            bool(regions["Forebrain"][0].all()) and not bool(regions["Forebrain"][1].any()),
+            "the first region is exactly the first z-plane",
+        )
+        check(
+            int(regions["Tectum"].sum()) == 1 and bool(regions["Tectum"][1, 1, 2]),
+            "and the single voxel lands at the right (z, y, x)",
+        )
+
+        # values_in is the path that measures 294 regions without building one
+        # mask, so it has to agree with the masks exactly.
+        signal = np.arange(2 * 4 * 3, dtype=np.float32).reshape(2, 4, 3)
+        by_name = {name: values for _id, name, values in labels.values_in(signal)}
+        check(
+            sorted(by_name["Forebrain"].tolist()) == sorted(signal[0].ravel().tolist()),
+            "values_in returns the same voxels the mask does",
+        )
+        check(
+            by_name["Tectum"].tolist() == [float(signal[1, 1, 2])],
+            f"including for a single-voxel region ({by_name['Tectum'].tolist()})",
+        )
+
+        stats = reg.region_table(signal, labels, voxel_volume_um3=1.0, threshold=0.0)
+        check(len(stats) == 2, f"the region table runs off the sparse form ({len(stats)})")
+        forebrain = next(s for s in stats if s.name == "Forebrain")
+        check(forebrain.n_voxels == 12, f"with the right voxel count ({forebrain.n_voxels})")
+        check(abs(forebrain.mean - float(signal[0].mean())) < 1e-5, "and the right mean")
+
+
+def test_anatomy_stacks_are_not_masks() -> None:
+    print("an anatomy database is refused as a mask file")
+    # Z-Brain's AnatomyLabelDatabase.hdf5 is 29 averaged intensity stacks whose
+    # name says "Label". Measured as masks, every voxel is inside every region.
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        stacks = {
+            "6.7FRhcrtR-Gal4-uasKaede_6dpf_MeanImageOf12Fish": (_blob(shape=(6, 5, 4)) * 100).astype(np.uint16),
+            "Elavl3-H2BRFP_6dpf_MeanImageOf10Fish": (_blob(shape=(6, 5, 4)) * 80).astype(np.uint16),
+        }
+        path = _write_hdf5(root / "AnatomyLabelDatabase.hdf5", stacks)
+        try:
+            reg.read_labels(path)
+            check(False, "intensity stacks are refused as masks")
+        except ValueError as exc:
+            message = str(exc)
+            check("images rather than region masks" in message, "intensity stacks are refused as masks")
+            check("MaskDatabase.mat" in message, f"and the message says where the masks are ({message[:70]}…)")
+
+        # The same file is a perfectly good reference, via its nuclear dataset.
+        names = reg.hdf5_volume_names(path)
+        check(len(names) == 2, f"its datasets can be listed for the panel ({len(names)})")
+        spec = reg.discover_atlas(root)
+        check(
+            spec.reference_dataset == "Elavl3-H2BRFP_6dpf_MeanImageOf10Fish",
+            f"discovery looks inside the file and picks the nuclear stack ({spec.reference_dataset})",
+        )
+        check(spec.is_nuclear, "and reports it as the same-modality case")
+
+
+def test_discovery_prefers_masks_over_anatomy() -> None:
+    print("picking the mask file when two files claim the name")
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _write_tiff(root / "Ref20131120pt14pl2.tif", _blob())
+        _write_hdf5(root / "AnatomyLabelDatabase.hdf5", {"Anti-5HT_6dpf": _blob(shape=(4, 4, 4))})
+        _write_matlab_sparse(root / "MaskDatabase.mat", 4, 4, 4, [[0, 1, 2]], ["Region"])
+
+        spec = reg.discover_atlas(root)
+        check(
+            spec.label_path is not None and spec.label_path.name == "MaskDatabase.mat",
+            f"the mask database wins over the anatomy database ({spec.label_path})",
+        )
+        check(not spec.is_nuclear, "a tERK-only reference is still reported as the fallback")
+
+
 def test_region_table() -> None:
     print("signal per region")
     signal = np.zeros((6, 6, 6), dtype=np.float32)
@@ -569,6 +766,11 @@ def main() -> int:
         test_roles_and_volumes,
         test_intensity_preparation,
         test_decimation,
+        test_axis_orders,
+        test_grid_alignment,
+        test_matlab_sparse_masks,
+        test_anatomy_stacks_are_not_masks,
+        test_discovery_prefers_masks_over_anatomy,
         test_voxel_size_from_headers,
         test_atlas_discovery,
         test_reading_labels,
