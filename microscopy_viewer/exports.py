@@ -146,6 +146,32 @@ def export_measurements(
     return path
 
 
+def export_table(frame, path: str | Path, sheet_name: str = "Results") -> Path:
+    """Write any already-built dataframe to ``.xlsx`` or ``.csv``.
+
+    The measurements workbook knows the shape of a :class:`Measurement`; this is
+    for tables that do not have one — the per-region signal readout, in
+    particular. Same column autofit and frozen header, so the two exports look
+    like they came from the same program, which they did.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if path.suffix.lower() == ".csv":
+        frame.to_csv(path, index=False)
+    else:
+        if path.suffix.lower() != ".xlsx":
+            path = path.with_suffix(".xlsx")
+        import pandas as pd
+
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+            frame.to_excel(writer, sheet_name=sheet_name, index=False)
+            _autofit(writer.sheets[sheet_name], frame)
+
+    logger.info("wrote %d row(s) to %s", len(frame), path)
+    return path
+
+
 def _metadata_frame(pd, metadata: Sequence[AcquisitionMetadata]):
     """One long-format table of every dataset's acquisition settings."""
     rows = []

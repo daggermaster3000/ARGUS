@@ -55,6 +55,12 @@ jobs:
       - name: Overview stitching and the locator slide
         run: python tests/test_overview.py
 
+      # antspyx is deliberately not installed here: this also checks that the
+      # engine degrades cleanly when the backend is absent, which is what most
+      # people cloning this will have.
+      - name: Atlas registration engine
+        run: python tests/test_registration.py
+
     env:
       # Windows runners default to cp1252, which cannot encode the µm and arrows
       # the checks print.

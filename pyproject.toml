@@ -47,6 +47,18 @@ dependencies = [
 # install_shortcut.py falls back to cscript when pywin32 is absent.
 shortcut = ["pywin32>=304 ; sys_platform == 'win32'"]
 
+# Atlas registration. Deliberately not a core dependency: antspyx is a large
+# platform-specific wheel that does not build everywhere — Apple Silicon in
+# particular may need a source build — and the viewer is fully usable without it.
+# The panel reports what to install rather than failing to appear.
+# pynrrd and nibabel are only needed for atlas downloads that ship .nrrd or
+# .nii volumes; ANTs can read both itself when it is present.
+registration = [
+    "antspyx>=0.4",
+    "pynrrd>=1.0",
+    "nibabel>=4.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/daggermaster3000/ARGUS"
 Issues = "https://github.com/daggermaster3000/ARGUS/issues"
