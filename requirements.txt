@@ -1,0 +1,42 @@
+# Microscopy Viewer dependencies.
+#
+# Installing the project itself is the supported route and gets these anyway:
+#
+#   python -m pip install .
+#
+# This file stays for installing into an environment you already keep napari in:
+#
+#   python -m pip install -r requirements.txt
+
+# Viewer and Qt. napari[all] rather than a bare napari plus a pinned binding: it
+# resolves to Qt wheels that exist for the platform being installed on, which is
+# what makes this work on macOS and Linux as well as Windows. If you already have
+# a working napari with its own Qt binding, plain `napari>=0.4.19` is enough.
+napari[all]>=0.4.19
+qtpy>=2.0
+
+# Array handling and lazy loading of large stacks.
+numpy>=1.22
+dask[array]>=2022.1
+
+# File formats
+h5py>=3.6          # Imaris .ims (HDF5 container)
+tifffile>=2022.5   # TIFF, ImageJ TIFF, OME-TIFF
+imageio>=2.19      # PNG/JPEG snapshot writing
+zarr>=2.12         # optional: OME-Zarr / NGFF stores
+
+# Measurement export
+pandas>=1.4
+openpyxl>=3.0
+
+# PowerPoint figure slides
+python-pptx>=0.6.21
+pillow>=9.0         # PNG encoding and high-quality downsampling for the slide
+
+# ROI intensity comparison panel
+matplotlib>=3.5     # histogram canvas, and ROI polygon rasterisation
+scipy>=1.8          # Mann-Whitney U for the non-parametric separation metric
+
+# Desktop shortcut creation, Windows only and optional even there:
+# install_shortcut.py falls back to cscript when this is absent.
+pywin32>=304 ; sys_platform == "win32"

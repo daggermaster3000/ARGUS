@@ -1,0 +1,8 @@
+# Normalise line endings in the repository so a checkout on Windows, macOS and
+# Linux produces the same files. Text is stored as LF and checked out with the
+# platform's own convention.
+* text=auto eol=lf
+
+*.ico binary
+*.pptx binary
+*.xlsx binary

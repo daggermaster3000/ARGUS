@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Generated test fixtures — rebuild with `python tests/make_sample_data.py`
+tests/sample_data/
+
+# Exports and logs produced while using the viewer
+*.pptx
+*.xlsx
+*.log
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Stray duplicate of assets/microscopy_viewer.ico, left in the loaders package
+microscopy_viewer/loaders/favicon*.ico

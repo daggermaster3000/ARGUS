@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "microscopy-viewer"
+version = "1.0.0"
+description = "A customised napari viewer for Imaris, TIFF and OME-Zarr microscopy data: metadata, calibrated measurement, and PowerPoint figure export."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Quillan Favey", email = "quillan.favey@mls.uzh.ch" }]
+keywords = ["microscopy", "napari", "imaris", "ims", "ome-zarr", "ome-tiff", "imaging"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+# napari[all] rather than a bare napari plus a pinned Qt binding: it is what pulls
+# in the Qt wheels that actually exist for the platform being installed on, which
+# is the whole difference between this working on macOS and Linux and not.
+dependencies = [
+    "napari[all]>=0.4.19",
+    "qtpy>=2.0",
+    "numpy>=1.22",
+    "dask[array]>=2022.1",
+    "h5py>=3.6",          # Imaris .ims (HDF5 container)
+    "tifffile>=2022.5",   # TIFF, ImageJ TIFF, OME-TIFF
+    "imageio>=2.19",      # PNG/JPEG snapshot writing
+    "zarr>=2.12",         # OME-Zarr / NGFF stores
+    "pandas>=1.4",        # measurement tables
+    "openpyxl>=3.0",      # Excel export
+    "python-pptx>=0.6.21",# PowerPoint figure slides
+    "pillow>=9.0",        # PNG encoding and high-quality downsampling
+    "matplotlib>=3.5",    # histogram canvas and ROI rasterisation
+    "scipy>=1.8",         # Mann-Whitney U for the separation metric
+]
+
+[project.optional-dependencies]
+# Desktop and Start Menu shortcuts. Windows only, and optional even there:
+# install_shortcut.py falls back to cscript when pywin32 is absent.
+shortcut = ["pywin32>=304 ; sys_platform == 'win32'"]
+
+[project.urls]
+Homepage = "https://github.com/daggermaster3000/ARGUS"
+Issues = "https://github.com/daggermaster3000/ARGUS/issues"
+
+[project.scripts]
+microscopy-viewer = "microscopy_viewer.__main__:main"
+
+[project.gui-scripts]
+# Same entry point without a console window attached, which is what a double-click
+# on Windows should get. Kept alongside the console script rather than replacing
+# it: a console is exactly what you want when something fails to start.
+microscopy-viewer-gui = "microscopy_viewer.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["microscopy_viewer*"]
+
+[tool.setuptools.package-data]
+microscopy_viewer = ["*.ico"]
