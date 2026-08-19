@@ -243,6 +243,109 @@ def main() -> int:
         check(acquisition.max_row > 5, f"acquisition sheet populated ({acquisition.max_row} rows)")
     print(flush=True)
 
+    print("time series playback", flush=True)
+    from microscopy_viewer import movie, timeseries
+    from microscopy_viewer import volume_cache
+
+    player = app.timeseries_widget
+    check(player is not None, "the time-series panel was built")
+    axis = timeseries.viewer_time_axis(app.viewer)
+    check(axis == 0, f"the time axis is the first slider ({axis})")
+    # The sample .ims has three timepoints; the OME-TIFF beside it has more, and
+    # napari's slider spans the widest dataset, so the count is read rather than
+    # assumed.
+    count = player.count
+    check(count >= 3, f"the time slider spans {count} timepoints")
+    player.use_full_range()
+    check(player.range() == (0, count - 1), f"Full range covers the whole series {player.range()}")
+
+    timeseries.set_index(app.viewer, 0, axis)
+    player.step_forward()
+    check(timeseries.current_index(app.viewer, axis) == 1, "the step button moves one timepoint")
+    player.go_last()
+    check(timeseries.current_index(app.viewer, axis) == count - 1, "and the end button jumps to the last one")
+    player.step_forward()
+    check(timeseries.current_index(app.viewer, axis) == 0, "stepping past the end wraps round")
+
+    player._fps.setValue(30.0)
+    player.play()
+    check(player.playing, "playback started")
+    from qtpy.QtWidgets import QApplication
+
+    started = timeseries.current_index(app.viewer, axis)
+    deadline = time.monotonic() + 3.0
+    while timeseries.current_index(app.viewer, axis) == started and time.monotonic() < deadline:
+        QApplication.instance().processEvents()
+        time.sleep(0.01)
+    check(
+        timeseries.current_index(app.viewer, axis) != started,
+        "and the clock advanced the slider without anyone touching it",
+    )
+    player.pause()
+    check(not player.playing, "pause stops the timer")
+
+    # The sample data is far below the cache's size floor, so lower it to check
+    # the copy actually happens rather than being skipped as not worth it.
+    ims_timeline = next(layer for layer in app.viewer.layers if timeseries.has_timeline(layer))
+    floor = volume_cache.MIN_CACHE_BYTES
+    volume_cache.MIN_CACHE_BYTES = 0
+    try:
+        before_shapes = [tuple(level.shape) for level in ims_timeline.data]
+        before_scale = tuple(ims_timeline.scale)
+        local = timeseries.TimelineManager(app.viewer, threaded=False)
+        local.cache_layer(ims_timeline, force=True)
+        check(local.is_cached(ims_timeline), "the time series was copied to the local cache")
+        check(
+            [tuple(level.shape) for level in ims_timeline.data] == before_shapes,
+            "the cached levels have the shapes they replaced, so nothing about the view changed",
+        )
+        check(tuple(ims_timeline.scale) == before_scale, "and the voxel size is untouched")
+        check(
+            "local" in local.describe(ims_timeline),
+            f"the panel reports where frames come from ({local.describe(ims_timeline)})",
+        )
+        local.stop()
+    finally:
+        volume_cache.MIN_CACHE_BYTES = floor
+    app.timeline_manager.stop()
+    print(flush=True)
+
+    print("movie export", flush=True)
+    encoder_ok, encoder_message = movie.encoder_available()
+    if not gl_available:
+        print("  skip movie checks — no OpenGL context", flush=True)
+    else:
+        with tempfile.TemporaryDirectory() as directory:
+            spec = movie.MovieSpec(
+                path=Path(directory) / "series.mov" if encoder_ok else Path(directory) / "series.gif",
+                fps=4, start=0, stop=2, scale=1, timestamp=True, interval_s=2.0,
+            )
+            if not encoder_ok:
+                print(f"  skip .mov — {encoder_message}; writing a GIF instead", flush=True)
+            seen: list[int] = []
+            before_export = timeseries.current_index(app.viewer, axis)
+            written = movie.export_movie(app.viewer, spec, on_progress=lambda done, total: seen.append(done))
+            check(written.exists() and written.stat().st_size > 500, f"{written.name} written ({written.stat().st_size} bytes)")
+            check(seen == [1, 2, 3], f"progress was reported per frame ({seen})")
+            check(
+                timeseries.current_index(app.viewer, axis) == before_export,
+                "the viewer was put back on the timepoint it started on",
+            )
+
+        # Cancelling has to leave nothing behind rather than a truncated file.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cancelled.mov"
+            try:
+                movie.export_movie(
+                    app.viewer,
+                    movie.MovieSpec(path=path, fps=4, start=0, stop=2, scale=1),
+                    should_cancel=lambda: True,
+                )
+                check(False, "a cancelled export should raise")
+            except movie.MovieCancelled:
+                check(not path.exists(), "a cancelled export writes nothing")
+    print(flush=True)
+
     print("toolbar actions", flush=True)
     visible = app.viewer.scale_bar.visible
     app.toolbar.toggle_scale_bar()
@@ -255,6 +358,11 @@ def main() -> int:
     app.toggle_metadata_panel()
     check(not app._metadata_dock.isHidden(), "metadata dock shown again")
     check("slide" in app.toolbar._buttons, "the slide export button is on the toolbar")
+    check("movie" in app.toolbar._buttons, "and the movie export button")
+    app.toolbar.toggle_play()
+    check(app.timeseries_widget.playing, "the toolbar's play button starts playback")
+    app.toolbar.toggle_play()
+    check(not app.timeseries_widget.playing, "and stops it again")
     print(flush=True)
 
     print("PowerPoint slide export", flush=True)
@@ -339,7 +447,9 @@ def main() -> int:
     check("metadata" in identifiers, f"metadata panel registered ({identifiers})")
     check("measurements" in identifiers, "measurements panel registered")
     check("intensity_comparison" in identifiers, "intensity comparison panel registered")
+    check("timeseries" in identifiers, "time-series panel registered")
     check("atlas_registration" in identifiers, "atlas registration panel registered")
+    check("segmentation" in identifiers, "segmentation panel registered")
     for identifier in identifiers:
         check(identifier in app.panels, f"{identifier} built and tracked in app.panels")
         check(identifier in app.docks, f"{identifier} has a dock")
@@ -347,6 +457,7 @@ def main() -> int:
     check(app.measurements_widget is not None, "measurements_widget attribute still populated")
     check(app.intensity_widget is not None, "intensity_widget attribute populated")
     check(app.registration_widget is not None, "registration_widget attribute populated")
+    check(app.segmentation_widget is not None, "segmentation_widget attribute populated")
     print(flush=True)
 
     print("atlas registration panel", flush=True)
@@ -398,6 +509,43 @@ def main() -> int:
         check(panel._run_button.isEnabled(), "antspyx is installed, so Register is live")
     else:
         check(not panel._run_button.isEnabled(), "without antspyx, Register is disabled")
+        check(not panel._backend_notice.isHidden(), "and the panel says what to install")
+    print(flush=True)
+
+    print("segmentation panel", flush=True)
+    from microscopy_viewer import segmentation as sg
+
+    panel = app.segmentation_widget
+    panel.refresh_layers()
+    check(panel._channel_box.count() > 0, f"the channel list holds {panel._channel_box.count()} layer(s)")
+    check(
+        panel._measure_box.itemData(0) == "",
+        "the measure list offers the segmented channel as its first entry",
+    )
+    panel.refresh_device()
+    check(bool(panel._device_label.text()), f"the device is shown before any run ({panel._device_label.text()})")
+
+    settings = panel.settings()
+    check(settings.mode in sg.MODES, f"the mode combo yields a real mode ({settings.mode})")
+    check(settings.diameter_um == 0.0, "the diameter starts on automatic rather than a made-up number")
+
+    layer = app.viewer.layers[str(panel._channel_box.currentData())]
+    image, voxel, problem = panel._snapshot(layer)
+    if image is not None:
+        check(image.ndim in (2, 3), f"a snapshot is 2D or 3D, whatever the layer was ({image.shape})")
+        check(len(voxel) == image.ndim and all(size > 0 for size in voxel), f"with a voxel size ({voxel})")
+    else:
+        check("2D or 3D" in problem, f"an unusable layer is reported rather than snapshotted ({problem})")
+
+    # Deliberately not calling run(): with cellpose installed it would download
+    # model weights and segment for minutes, which is not what a smoke check is.
+    panel.export_objects()
+    check("Nothing to export" in panel._status.text(), "exporting with no result is refused politely")
+
+    if sg.backend_available("cellpose"):
+        check(panel._run_button.isEnabled(), "cellpose is installed, so Segment is live")
+    else:
+        check(not panel._run_button.isEnabled(), "without cellpose, Segment is disabled")
         check(not panel._backend_notice.isHidden(), "and the panel says what to install")
     print(flush=True)
 

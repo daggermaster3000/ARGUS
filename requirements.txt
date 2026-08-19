@@ -23,6 +23,11 @@ dask[array]>=2022.1
 h5py>=3.6          # Imaris .ims (HDF5 container)
 tifffile>=2022.5   # TIFF, ImageJ TIFF, OME-TIFF
 imageio>=2.19      # PNG/JPEG snapshot writing
+
+# Time-lapse movie export. imageio-ffmpeg ships an ffmpeg binary, so nothing has
+# to be installed separately; without it the viewer still plays time series and
+# writes GIFs, and the export dialog says what is missing.
+imageio-ffmpeg>=0.4.7
 zarr>=2.12         # optional: OME-Zarr / NGFF stores
 
 # Measurement export

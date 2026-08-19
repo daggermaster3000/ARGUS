@@ -8,6 +8,7 @@ does not drag in their dependencies (matplotlib, in the intensity panel's case).
 from .measurements_widget import MeasurementsWidget
 from .metadata_widget import MetadataWidget, metadata_for_layer
 from .registry import PanelSpec, get_panel, iter_panels, register_panel, unregister_panel
+from .timeseries_widget import TimeSeriesWidget
 from .toolbar import ViewerToolbar
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "MeasurementsWidget",
     "MetadataWidget",
     "PanelSpec",
+    "TimeSeriesWidget",
     "ViewerToolbar",
     "get_panel",
     "iter_panels",

@@ -50,6 +50,8 @@ class ViewerToolbar(QWidget):
             ("snapshot", "Export Snapshot", "Save the current view as PNG or TIFF (Ctrl+S)", self.export_snapshot),
             ("measurements", "Export Measurements", "Write all ROI measurements to an Excel workbook (Ctrl+E)", self.export_measurements),
             ("slide", "Export Slide", "Build a PowerPoint figure: one row per dataset, one column per channel, plus the merge (Ctrl+P)", self.export_slide),
+            ("movie", "Export Movie", "Write the time series as a .mov for PowerPoint (Ctrl+Shift+M)", self.export_movie),
+            ("play", "Play / Pause", "Play the time series (Ctrl+Space)", self.toggle_play),
             ("auto", "Auto Contrast", "Stretch contrast to the visible data (Ctrl+Shift+A)", self.auto_contrast),
             ("reset", "Reset Contrast", "Restore the full intensity range", self.reset_contrast),
             ("ndisplay", "2D / 3D (MIP)", "Switch between slice view and 3D maximum-intensity projection (Ctrl+D)", self.toggle_ndisplay),
@@ -124,6 +126,35 @@ class ViewerToolbar(QWidget):
             return
         self._app.last_directory = Path(dialog.written).parent
         self.set_status(f"Slide saved to {dialog.written}")
+
+    def export_movie(self) -> None:
+        """Write the time series out as a movie.
+
+        Goes through the panel when it is there, so the range being played is
+        the range that gets exported; otherwise the dialog is opened directly,
+        which is what happens if the panel failed to build.
+        """
+        panel = getattr(self._app, "timeseries_widget", None)
+        if panel is not None:
+            panel.export_movie()
+            return
+
+        from .movie_dialog import MovieExportDialog
+
+        dialog = MovieExportDialog(self._viewer, self._app.last_directory, parent=self)
+        if not dialog.exec_() or dialog.written is None:
+            return
+        self._app.last_directory = Path(dialog.written).parent
+        self.set_status(f"Movie saved to {dialog.written}")
+
+    def toggle_play(self) -> None:
+        """Start or stop time-series playback."""
+        panel = getattr(self._app, "timeseries_widget", None)
+        if panel is None:
+            self.set_status("The time-series panel is not available.")
+            return
+        panel.toggle_play()
+        self.set_status("Playing…" if panel.playing else "Paused.")
 
     def auto_contrast(self) -> None:
         count = auto_contrast(self._viewer)

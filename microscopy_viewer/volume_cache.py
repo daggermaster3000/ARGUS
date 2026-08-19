@@ -90,6 +90,17 @@ def cache_key(source: Any, role: str, shape: Iterable[int], dtype: Any) -> str:
     return hashlib.sha1("::".join(parts).encode("utf-8")).hexdigest()
 
 
+def layer_key(source: Any, layer_name: str, level: int, shape: Iterable[int], dtype: Any) -> str:
+    """Key for one pyramid level of one layer.
+
+    The 3D view and time-series playback share it on purpose: both want the same
+    array on local disk, so keying them separately would pull the same bytes
+    across the network twice and store two copies of them. Whichever asks first
+    does the copy; the other finds it already there.
+    """
+    return cache_key(source, f"{layer_name}|level{int(level)}", shape, dtype)
+
+
 def cache_path(key: str) -> Path:
     return cache_root() / f"{key}.npy"
 

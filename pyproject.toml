@@ -33,6 +33,7 @@ dependencies = [
     "h5py>=3.6",          # Imaris .ims (HDF5 container)
     "tifffile>=2022.5",   # TIFF, ImageJ TIFF, OME-TIFF
     "imageio>=2.19",      # PNG/JPEG snapshot writing
+    "imageio-ffmpeg>=0.4.7",  # H.264 encoder for .mov / .mp4 time-lapse export
     "zarr>=2.12",         # OME-Zarr / NGFF stores
     "pandas>=1.4",        # measurement tables
     "openpyxl>=3.0",      # Excel export
@@ -57,6 +58,15 @@ registration = [
     "antspyx>=0.4",
     "pynrrd>=1.0",
     "nibabel>=4.0",
+]
+
+# Cellpose segmentation. Optional for the same reason as registration: cellpose
+# pulls in torch, which is a multi-gigabyte install, and the wheel pip resolves by
+# default is CPU-only. For GPU segmentation install a CUDA build of torch from
+# https://pytorch.org *first*, then this extra — the panel reports which device it
+# found, so a silent fall back to the CPU is visible rather than merely slow.
+segmentation = [
+    "cellpose>=3.0",
 ]
 
 [project.urls]

@@ -78,8 +78,13 @@ class MicroscopyViewer:
         # Must exist before any image is added: it registers each pyramid the
         # first time it sees the layer.
         from .rendering import MultiscaleDepthManager
+        from .timeseries import TimelineManager
 
         self.depth_manager = MultiscaleDepthManager(self.viewer, on_status=self.toolbar.set_status)
+        # Caches time series onto local disk so playback stops reading the NAS.
+        # It writes its cached arrays back into the same ``mv_pyramid`` list the
+        # depth manager restores from, so a trip through 3D keeps them.
+        self.timeline_manager = TimelineManager(self.viewer, on_status=self.toolbar.set_status)
 
     # -- construction ---------------------------------------------------------
 
@@ -155,6 +160,8 @@ class MicroscopyViewer:
             ("Control-B", self.toolbar.toggle_scale_bar),
             ("Control-M", self.toggle_metadata_panel),
             ("Control-R", self.toolbar.reset_contrast),
+            ("Control-Space", self.toolbar.toggle_play),
+            ("Control-Shift-M", self.toolbar.export_movie),
         )
         for key, handler in bindings:
             try:
@@ -221,6 +228,8 @@ class MicroscopyViewer:
         # New layers arrive as full pyramids; if the viewer is already in 3D they
         # need collapsing to a single level straight away.
         self.depth_manager.apply()
+        # Starts the local copy of any time series that was just opened.
+        self.timeline_manager.apply()
 
         if reset_view:
             self.viewer.reset_view()
@@ -230,6 +239,8 @@ class MicroscopyViewer:
 
         self.metadata_widget.refresh()
         self.measurements_widget.refresh_layer_list()
+        if self.timeseries_widget is not None:
+            self.timeseries_widget.refresh()
 
     # -- panels ---------------------------------------------------------------
 

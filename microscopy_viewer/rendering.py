@@ -209,7 +209,9 @@ class MultiscaleDepthManager:
 
         meta = layer.metadata.get("mv_metadata")
         source = getattr(meta, "file_path", None) if meta is not None else None
-        key = volume_cache.cache_key(source, f"{layer.name}|level{level}", array.shape, array.dtype)
+        # Same key the time-series cache uses, so a dataset that is both played
+        # and viewed in 3D is copied once rather than once per feature.
+        key = volume_cache.layer_key(source, layer.name, level, array.shape, array.dtype)
 
         existing = volume_cache.load(key, array.shape, array.dtype)
         if existing is not None:

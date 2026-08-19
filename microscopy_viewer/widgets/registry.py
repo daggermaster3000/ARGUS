@@ -91,6 +91,18 @@ def _register_builtin_panels() -> None:
 
         return RegistrationWidget(app.viewer)
 
+    def _segmentation(app):
+        from .segmentation_widget import SegmentationWidget
+
+        return SegmentationWidget(app.viewer)
+
+    def _timeseries(app):
+        from .timeseries_widget import TimeSeriesWidget
+
+        # Takes the app rather than the viewer: playback reads the local-cache
+        # state off ``app.timeline_manager`` and exports remember the directory.
+        return TimeSeriesWidget(app)
+
     register_panel(
         PanelSpec(
             identifier="metadata",
@@ -121,12 +133,34 @@ def _register_builtin_panels() -> None:
     )
     register_panel(
         PanelSpec(
+            identifier="timeseries",
+            title="Time series",
+            factory=_timeseries,
+            attribute="timeseries_widget",
+            # Transport controls belong under the canvas, not beside it: the
+            # panel is one row of buttons and would waste a whole right-hand dock.
+            area="bottom",
+            order=35,
+        )
+    )
+    register_panel(
+        PanelSpec(
             identifier="atlas_registration",
             title="Atlas registration",
             factory=_registration,
             attribute="registration_widget",
             tabify_with="intensity_comparison",
             order=40,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="segmentation",
+            title="Segmentation",
+            factory=_segmentation,
+            attribute="segmentation_widget",
+            tabify_with="intensity_comparison",
+            order=50,
         )
     )
 

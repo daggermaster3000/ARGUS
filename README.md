@@ -7,7 +7,8 @@
 A customised [napari](https://napari.org) viewer for rapid microscopy image inspection.
 It opens Imaris `.ims`, TIFF, OME-TIFF and OME-Zarr datasets, shows the acquisition
 metadata alongside the image, and lets you measure and annotate in calibrated
-micrometres — then export a snapshot for slides and the measurements as a spreadsheet.
+micrometres — then export a snapshot for slides, a time lapse as a movie, and the
+measurements as a spreadsheet.
 
 It stays a plain Python project: no bundling, no standalone executable. Windows also
 gets a script that drops a desktop shortcut pointing at the launcher, so the viewer
@@ -116,6 +117,8 @@ extend `_BRIGHTFIELD_TOKENS` in
 | Export Snapshot | `Ctrl+S` | save the current view as PNG / TIFF / JPEG |
 | Export Measurements | `Ctrl+E` | write all ROI measurements to `.xlsx` |
 | Export Slide | `Ctrl+P` | build a PowerPoint figure: a row per dataset, a column per channel, plus the merge. Also batch mode — works with nothing open |
+| Export Movie | `Ctrl+Shift+M` | write the time series as a `.mov` for PowerPoint, or `.mp4` / `.gif` |
+| Play / Pause | `Ctrl+Space` | play the time series at the rate set in the **Time series** panel |
 | Auto Contrast | `Ctrl+Shift+A` | stretch each visible layer to the 0.5–99.5 percentile of what is on screen |
 | Reset Contrast | `Ctrl+R` | back to the full data range |
 | 2D / 3D (MIP) | `Ctrl+D` | switch the canvas between slice view and a 3D maximum-intensity projection (a *view* — to draw ROIs on a projection use **Create projection layers** in the ROI intensity comparison panel) |
@@ -152,7 +155,9 @@ GPU cannot be queried the old conservative 128M default applies.
 Source data usually lives on a NAS, where re-reading a stack dominates the wait.
 The first time a volume is shown in 3D it is copied to a local `.npy` under
 `%LOCALAPPDATA%\MicroscopyViewer\volume_cache\` and memory-mapped, on a worker
-thread so the viewer stays usable. Everything afterwards reads from local disk.
+thread so the viewer stays usable. Everything afterwards reads from local disk,
+[time-series playback](#time-series) included — the two share one entry per
+pyramid level rather than keeping a copy each.
 
 Measured on a 17 × 2040 × 2040 deconvolved stack over the network:
 
@@ -170,6 +175,119 @@ open layer is skipped rather than forced. Set `MICROSCOPY_VIEWER_CACHE_LIMIT` (i
 bytes) to change the cap, or `MICROSCOPY_VIEWER_NO_CACHE=1` to switch it off — the
 viewer works identically either way, just slower. Deleting the folder is safe at
 any time.
+
+### Time series
+
+A time lapse gets its own dock under the canvas — **Time series** — with the
+transport controls, the range being played, and a line saying where the frames
+are being read from.
+
+| Control | Does |
+|---|---|
+| Transport buttons | first timepoint, back one, play / pause, forward one, last timepoint |
+| **fps** | playback rate, 0.5 to 60 |
+| **Loop** | wrap at the end of the range instead of stopping |
+| **Play from … to …** | the range that plays, and the range an export defaults to |
+| **Cache locally** | start the copy described below without waiting for playback |
+| **Export movie…** | the dialog described further down |
+
+**The rate is kept, not the frame count.** Playing at 20 fps means twenty
+timepoints a second whether or not every frame was ready in time: a tick that
+arrives late advances by however many frame periods actually elapsed, so a slow
+read drops a frame rather than stretching the whole clip out. napari's own
+slider does the opposite, which is why a time lapse played from a network share
+runs in slow motion there. Frames are never queued up behind a slow read either
+— while a slice is still loading the clock keeps counting but nothing new is
+requested, so the backlog cannot grow.
+
+#### Why playback stutters, and what is done about it
+
+The pixels are not slow to draw; they are slow to arrive. A timepoint is a
+separate read, and the source is usually a NAS, so the frame rate is really the
+round-trip rate of the share.
+
+So every pyramid level of a time series that fits the budget is copied once to
+a local `.npy` and memory-mapped, through the same cache the 3D view uses.
+Unlike the 3D path the levels are replaced *in place*: same shapes, same voxel
+size, same number of levels, so multiscale rendering carries on exactly as
+before and nothing about how the image looks changes. Only where the bytes come
+from does.
+
+**The copy starts when you press play**, on a worker thread, with the status bar
+saying what is being copied — not when the file is opened. Opening is when the
+viewer is busiest, reading the first slice and building the first volume, and a
+background thread pulling a whole time lapse over the same share at that moment
+makes everything else slower, 3D included. Opening a file still *adopts* any
+copy that already exists, which costs nothing. **Cache locally** in the panel
+forces it at any time.
+
+The entry is shared with the 3D view — same key, same file — so a dataset that
+has been rotated in 3D is already local when you play it, and one that has been
+played is already local when you switch to 3D. Nothing is copied twice.
+
+A second thread walks ahead of the playhead, touching one byte per memory page
+of the timepoints about to be shown, so they are resident in the operating
+system's page cache before napari asks for them. It does one pass per frame and
+then sleeps — it never reads on a timer of its own — and it does nothing at all
+for arrays that are not already local, or while the viewer is in 3D, where
+reading ahead would evict the pages the volume on screen was built from.
+
+The budget is **8 GB per layer** (`MICROSCOPY_VIEWER_TIMELINE_BUDGET`, in
+bytes). Levels are taken finest first, and one that does not fit is skipped
+while the coarser ones are still cached — which is the useful outcome for a
+series too big to hold: playback zoomed out, which is how a time lapse is
+watched, comes off local disk, while a zoomed-in view still reads its small crop
+from the source. Everything else about the cache — the 32 GB total cap, the LRU
+pruning, the fingerprinting that stops a changed file resolving to a stale copy,
+and `MICROSCOPY_VIEWER_NO_CACHE=1` to switch it all off — is as described under
+[Local volume cache](#local-volume-cache).
+
+Note the budget is *per layer*, and each channel is its own layer, so a
+four-channel time lapse can ask for four times it. The total cache cap still
+applies, and an entry a layer currently has open is skipped by the pruner rather
+than pulled out from under it.
+
+#### Movies for PowerPoint
+
+**Export Movie** writes the range being played as a video. The frames are canvas
+screenshots — the same thing **Export Snapshot** saves — so the file shows what
+was on screen: the contrast you set, the layers you had visible, the ROIs, the
+scale bar, and a 3D view if that is what you were looking at. Nothing is
+re-rendered from the data with settings of its own.
+
+| Setting | Notes |
+|---|---|
+| **File** | `.mov` (default), `.mp4` or `.gif` |
+| **Timepoints … to …**, **Every nth** | inclusive range; a stride shortens a long series |
+| **Frames/s** | playback rate of the file, independent of the panel's own rate |
+| **Resolution** | canvas oversampling: 1×, 2× (sharp in PowerPoint) or 3× |
+| **Quality** | encoder quality 0–10; 8 is enough for a slide |
+| **Burn in the time** | draws the elapsed acquisition time into the corner, or the timepoint number when the file records no interval |
+
+`.mov` and `.mp4` are both H.264 in `yuv420p`, which is what PowerPoint,
+QuickTime and browsers can all decode. The two differ only in the container:
+`.mov` is what was asked for here and plays inside a slide, `.mp4` is the safer
+choice on an old PowerPoint. `.gif` needs no encoder at all and loops forever,
+which suits a chat window better than a deck.
+
+Frames are cropped to an even width and height, because H.264 cannot encode an
+odd-sized 4:2:0 frame. Cropping loses a row of pixels; the alternative — letting
+the encoder rescale the frame, which is what imageio does by default — would
+resample the image and leave the burnt-in scale bar wrong.
+
+Each frame is waited on before it is grabbed. napari loads slices on a worker
+thread, so a screenshot taken the moment the slider moves shows the *previous*
+timepoint, and a movie made that way is off by one frame throughout. **Cancel**
+becomes **Stop** during a render, and a stopped or failed export deletes its
+half-written file rather than leaving one to be dropped into a slide.
+
+Writing `.mov` and `.mp4` needs `imageio-ffmpeg`, which ships its own ffmpeg
+binary and installs with everything else. Without it playback and GIF export
+still work and the dialog says what is missing:
+
+```bash
+python -m pip install imageio-ffmpeg
+```
 
 ### Metadata panel
 
@@ -397,11 +515,80 @@ One thing the software cannot do for you: an atlas is a *brain*, so a field
 holding a whole larva has to be cropped to the head, or the fit will spend itself
 matching yolk and trunk to a brain-shaped reference.
 
+### Cellpose segmentation
+
+**Segmentation** labels cells or nuclei with [Cellpose](https://cellpose.readthedocs.io)
+and measures every object it finds, on the GPU when there is one.
+
+Two things are handled that a bare `model.eval` call is not:
+
+**The device is decided and shown before the run, not after.** Cellpose falls back
+to the CPU without complaining, and on a 3D stack that is tens of seconds against
+tens of minutes. The panel names the card it will use — `NVIDIA GeForce RTX 4090 —
+24.6 GB, CUDA` — and when it says `CPU`, the tooltip says why that usually happens
+(the default torch wheel is CPU-only). The batch size is sized from free video
+memory rather than left at Cellpose's default of 8, which leaves a big card idle.
+
+**Sizes are in µm, not pixels.** Cellpose's `diameter` is in XY pixels and its
+`anisotropy` is the Z/XY voxel ratio; both are derived from the calibrated voxel
+size the reader already put on the layer. A 5 µm nucleus stays 5 µm whether the
+stack is 0.13 µm/px or 0.6 µm/px, and it stays right after a large volume has been
+decimated — the conversion happens after the decimation, not before.
+
+| Setting | What it does |
+|---|---|
+| **Segment** | The channel that is labelled. A nuclear stain with the `nuclei` model is the reliable case. |
+| **Measure** | The channel intensities are read from. Segment on DAPI, measure on the reporter, and every row is signal per nucleus. |
+| **Mode** | `2D + stitch` segments each plane and joins overlapping masks between planes — faster, and usually better on an anisotropic stack where a nucleus is four planes tall. `3D` computes flows in 3D. `2D per plane` leaves labels unconnected between planes. |
+| **Diameter** | Expected object diameter in µm. The setting that matters most; automatic is worth overriding. |
+| **Segment at most** | Volumes above this are decimated **laterally** before segmentation — Z is left alone, since that is where objects are already only a few planes tall. The labels always come back on the original grid. |
+
+**The model list is discovered, not hard-coded.** It holds three kinds of entry,
+and the tooltip says which is which:
+
+- what the installed cellpose ships — Cellpose 4.2 has `cpsam`, `cpsam_v2` and the
+  two `cpdino` models; Cellpose 3 has the `nuclei` / `cyto3` zoo and a size model
+  that estimates diameters for you;
+- models you trained in the Cellpose GUI, listed by name and loaded by their path;
+- loose weights in `~/.cellpose/models`.
+
+The ↻ button rescans, so a model trained mid-session shows up without a restart,
+and **Custom model** takes any file directly. Weights the installed version cannot
+load are filtered out rather than offered — Cellpose 4 is one architecture and
+cannot read a v3 zoo file, which otherwise fails minutes into a run with a tensor
+shape mismatch. The filter matches whole zoo names, so a model of your own called
+`nuclei_finetuned` still appears. The starting selection prefers a model already
+downloaded, so the first Segment does not silently fetch a gigabyte of weights.
+
+What comes back is a Labels layer at the source layer's own scale, and a table with
+one row per object: voxel count, volume in µm³, equivalent diameter, centroid in µm,
+and mean / median / std / max / integrated intensity from the measure channel. It
+exports through the same writer as the measurements workbook. Objects are measured
+through the indices of the labelled voxels rather than a loop over labels, so the
+memory it takes scales with the segmented fraction of the volume, not the volume.
+
+The run is on a `thread_worker`, so the window stays usable while it goes.
+
+Segmentation needs `cellpose`, which pulls in torch, so it is an optional extra
+rather than a dependency:
+
+```bash
+# GPU: install a CUDA build of torch first, from https://pytorch.org
+python -m pip install ".[segmentation]"
+```
+
+Without it the panel still appears and says exactly that, the way the atlas panel
+reports a missing `antspyx`. `Backend` is a three-method interface here too, so
+StarDist or micro-SAM can be added beside Cellpose.
+
 ### Exports
 
 **Export Snapshot** saves what is on the canvas at 2× oversampling, so it stays
 sharp in PowerPoint. The scale bar is included. A `.tif` target writes lossless
 pixels and tags the file with its on-screen resolution.
+
+**Export Movie** writes a time series out as a video — see
+[Time series](#time-series).
 
 **Export Measurements** writes an `.xlsx` with two sheets:
 
@@ -553,12 +740,16 @@ microscopy_viewer/
   metadata.py               metadata model and the vendor-key synonym matching
   measurements.py           Shapes -> calibrated distances and areas
   intensity.py              ROI statistics, AUC / overlap; no Qt, runs off-thread
+  registration.py           atlas registration and the per-region readout; no Qt
+  segmentation.py           Cellpose segmentation, the GPU device, per-object stats; no Qt
   exports.py                snapshots and the Excel workbook
   slides.py                 channel/merge rendering and the PowerPoint slide; no Qt
   contrast.py               auto / reset contrast
   rendering.py              full-resolution 3D / MIP for multiscale layers
   gpu.py                    GPU limits and the 3D voxel budget
   volume_cache.py           local disk cache for volumes read from slow storage
+  timeseries.py             the playback clock, and local caching of a time lapse
+  movie.py                  canvas frames -> .mov / .mp4 / .gif; no Qt
   dragdrop.py               application-wide drop handling
   widgets/
     registry.py             the panel manifest
@@ -566,7 +757,11 @@ microscopy_viewer/
     metadata_widget.py
     measurements_widget.py
     intensity_comparison.py
+    timeseries_widget.py    transport controls, the cache status, playback
+    registration_widget.py  channel roles, the atlas, the region table
+    segmentation_widget.py  channel, model and diameter; the object table
     slide_dialog.py         pick samples, name the stainings, write the .pptx
+    movie_dialog.py         pick a range and a rate, render the frames
   utils.py                  logging, unit conversion, geometry helpers
 tests/
   make_sample_data.py       synthetic .ims / TIFF / OME-Zarr samples
@@ -609,9 +804,12 @@ python tests/make_sample_data.py    # writes tests/sample_data/
 python tests/test_readers.py        # readers, measurement maths, Excel export — no Qt needed
 python tests/test_intensity.py      # ROI statistics, AUC / overlap, CSV export — no Qt needed
 python tests/test_rendering.py      # GPU voxel budget and the volume cache — no Qt needed
+python tests/test_timeseries.py     # the playback clock, level budget, timeline cache — no Qt needed
+python tests/test_movie.py          # frame selection, the overlay, the written movie — no Qt needed
 python tests/test_slides.py         # channel/merge rendering and the .pptx table — no Qt needed
 python tests/test_overview.py       # overview detection, stitching, the locator slide — no Qt needed
 python tests/test_registration.py   # atlas registration engine — no Qt; ANTs checks skip without antspyx
+python tests/test_segmentation.py   # segmentation engine, units, object table — no Qt; cellpose is never run
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 

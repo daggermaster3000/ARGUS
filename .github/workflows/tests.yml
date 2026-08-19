@@ -61,6 +61,12 @@ jobs:
       - name: Atlas registration engine
         run: python tests/test_registration.py
 
+      # cellpose is deliberately not installed here either, for the same reason:
+      # the engine runs through a stub backend, so this checks the units, the
+      # decimation and the object table without downloading model weights.
+      - name: Segmentation engine
+        run: python tests/test_segmentation.py
+
     env:
       # Windows runners default to cp1252, which cannot encode the µm and arrows
       # the checks print.

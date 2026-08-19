@@ -214,6 +214,7 @@ def _check_environment() -> list[str]:
         ("pandas", "required for Excel export"),
         ("openpyxl", "required for Excel export"),
         ("zarr", "optional — OME-Zarr support"),
+        ("imageio_ffmpeg", "optional — .mov / .mp4 movie export"),
     ):
         try:
             __import__(module)
