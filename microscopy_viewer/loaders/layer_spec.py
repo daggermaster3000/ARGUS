@@ -48,6 +48,23 @@ def is_brightfield(name: str | None) -> bool:
     return bool(tokens & _BRIGHTFIELD_TOKENS)
 
 
+def squeeze_plan(shape: tuple[int, ...], axes: str) -> list[int]:
+    """Axis indices worth keeping: singleton ``T``/``Z`` axes give useless sliders.
+
+    The plan is computed once from the full-resolution level and reused for every
+    pyramid level, otherwise a level whose Z has collapsed to 1 would end up with
+    a different number of dimensions than its parent.
+    """
+    return [i for i, axis in enumerate(axes) if not (axis in "TZ" and shape[i] == 1)]
+
+
+def apply_squeeze(array, keep: list[int], ndim: int):
+    """Index *array* down to the axes named by :func:`squeeze_plan`."""
+    if len(keep) == ndim:
+        return array
+    return array[tuple(slice(None) if i in keep else 0 for i in range(ndim))]
+
+
 def channel_appearance(
     channel_name: str | None,
     color: tuple[float, float, float] | None,
@@ -115,6 +132,10 @@ class LayerSpec:
     multiscale: bool = False
     contrast_limits: tuple[float, float] | None = None
     units: tuple[str, ...] = ()
+    #: ``image`` or ``labels``. A segmentation stored beside the pixels it came
+    #: from is not an image: napari has to be told, or the label values are shown
+    #: as grey levels and cannot be picked, hidden or recoloured per object.
+    layer_type: str = "image"
     extra_kwargs: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -124,7 +145,7 @@ class LayerSpec:
         return self.metadata.channel(self.channel_index).display_name
 
     def to_kwargs(self) -> dict[str, Any]:
-        """Keyword arguments for :meth:`napari.Viewer.add_image`.
+        """Keyword arguments for ``add_image`` — or ``add_labels``, see :attr:`layer_type`.
 
         The ``metadata`` dict carries our own objects through to the layer so the
         dock widgets can recover them from ``layer.metadata``.
@@ -132,8 +153,6 @@ class LayerSpec:
         kwargs: dict[str, Any] = {
             "name": self.name,
             "scale": tuple(self.scale),
-            "colormap": napari_colormap(self.color, self.name) or self.colormap,
-            "blending": self.blending,
             "multiscale": self.multiscale,
             "metadata": {
                 "mv_metadata": self.metadata,
@@ -143,9 +162,14 @@ class LayerSpec:
                 "mv_units": self.units,
             },
         }
-        if self.contrast_limits is not None:
-            low, high = self.contrast_limits
-            if high > low:
-                kwargs["contrast_limits"] = (float(low), float(high))
+        # A Labels layer colours itself from the label values and takes neither a
+        # colormap nor contrast limits; passing them is a TypeError, not a hint.
+        if self.layer_type != "labels":
+            kwargs["colormap"] = napari_colormap(self.color, self.name) or self.colormap
+            kwargs["blending"] = self.blending
+            if self.contrast_limits is not None:
+                low, high = self.contrast_limits
+                if high > low:
+                    kwargs["contrast_limits"] = (float(low), float(high))
         kwargs.update(self.extra_kwargs)
         return kwargs

@@ -57,6 +57,8 @@ MODEL_FILTER = "Cellpose models (*);;All files (*)"
 
 #: Shown in the "measure" box for "whatever was segmented".
 SAME_CHANNEL = "— the segmented channel —"
+#: Entry for "segment one channel on its own", the default.
+NO_NUCLEI = "— none —"
 
 
 def _short_name(layer) -> str:
@@ -133,6 +135,15 @@ class SegmentationWidget(QWidget):
             "case; a membrane or cytoplasmic stain wants a cyto model."
         )
         form.addRow("Segment", self._channel_box)
+
+        self._nuclei_box = QComboBox()
+        self._nuclei_box.setToolTip(
+            "Optional second stain, handed to Cellpose alongside the segmented one. Segment a "
+            "membrane or cytoplasmic channel and give it the nuclear stain here to get whole "
+            "cells: the nuclei separate cells that touch, and every mask has one nucleus. "
+            "Leave it at “none” to segment a single channel on its own."
+        )
+        form.addRow("Nuclei", self._nuclei_box)
 
         self._measure_box = QComboBox()
         self._measure_box.setToolTip(
@@ -232,6 +243,23 @@ class SegmentationWidget(QWidget):
         self._min_size.setSuffix(" px")
         self._min_size.setToolTip("Objects smaller than this are dropped by Cellpose itself.")
         form.addRow("Minimum size", self._min_size)
+
+        self._max_solidity = QDoubleSpinBox()
+        self._max_solidity.setRange(0.0, 1.0)
+        self._max_solidity.setDecimals(3)
+        self._max_solidity.setSingleStep(0.005)
+        self._max_solidity.setValue(0.0)
+        self._max_solidity.setSpecialValueText("off")
+        self._max_solidity.setToolTip(
+            "Drop objects whose solidity — area over the area of the convex hull — is above "
+            "this. It is a way of throwing out false positives that come back as clean round "
+            "discs: debris, beads and out-of-focus blobs are convex, while a real nucleus "
+            "packed against its neighbours is dented by them.\n\n"
+            "Set it to 1.000 to measure the shape of every object without dropping any, look "
+            "at the Solidity column in the Objects tab, and pick the cut from what is there. "
+            "Needs scikit-image, which comes with cellpose."
+        )
+        form.addRow("Max solidity", self._max_solidity)
 
         self._normalize = QCheckBox("Percentile-normalise before segmenting")
         self._normalize.setChecked(True)
@@ -379,7 +407,11 @@ class SegmentationWidget(QWidget):
             names = [str(layer.name) for layer in layers]
             labels = [_short_name(layer) for layer in layers]
 
-            for box, extra in ((self._channel_box, None), (self._measure_box, SAME_CHANNEL)):
+            for box, extra in (
+                (self._channel_box, None),
+                (self._nuclei_box, NO_NUCLEI),
+                (self._measure_box, SAME_CHANNEL),
+            ):
                 previous = box.currentData()
                 box.clear()
                 if extra is not None:
@@ -451,6 +483,7 @@ class SegmentationWidget(QWidget):
             cellprob_threshold=float(self._cellprob.value()),
             stitch_threshold=float(self._stitch.value()),
             min_size=int(self._min_size.value()),
+            max_solidity=float(self._max_solidity.value()),
             normalize=self._normalize.isChecked(),
             use_gpu=self._use_gpu.isChecked(),
             batch_size=int(self._batch_size.value()),
@@ -516,10 +549,21 @@ class SegmentationWidget(QWidget):
             self._status.setText(problem)
             return
 
+        problems: list[str] = []
+        nuclei_name = str(self._nuclei_box.currentData() or "")
+        nuclei = None
+        if nuclei_name and nuclei_name != source_name:
+            nuclei, _nuclei_voxel, nuclei_problem = self._snapshot(self._layer_named(nuclei_name))
+            if nuclei is None:
+                problems.append(nuclei_problem or f"“{nuclei_name}” could not be read.")
+        elif nuclei_name == source_name:
+            problems.append(
+                "The nuclear channel is the channel being segmented; it was segmented on its own."
+            )
+
         measure_name = str(self._measure_box.currentData() or "") or source_name
         measure_layer = self._layer_named(measure_name)
         signal, _signal_voxel, signal_problem = self._snapshot(measure_layer)
-        problems: list[str] = []
         if signal is None or signal.shape != image.shape:
             if measure_name != source_name:
                 problems.append(
@@ -532,9 +576,10 @@ class SegmentationWidget(QWidget):
 
         settings = self.settings()
         self._run_button.setEnabled(False)
+        with_nuclei = "" if nuclei is None else f" with nuclei from {nuclei_name}"
         self._status.setText(
-            f"Segmenting {_short_name(source)} ({'×'.join(str(n) for n in image.shape)}) "
-            f"on {self._device_label.text()}…"
+            f"Segmenting {_short_name(source)} ({'×'.join(str(n) for n in image.shape)})"
+            f"{with_nuclei} on {self._device_label.text()}…"
         )
 
         def _progress(text: str) -> None:
@@ -543,8 +588,17 @@ class SegmentationWidget(QWidget):
             logger.info("segmentation: %s", text)
 
         def _work():
-            result = sg.segment_volume(image, voxel, settings=settings, progress=_progress)
-            stats = sg.object_table(result.masks, signal, result.voxel_size_um[-image.ndim:])
+            result = sg.segment_volume(
+                image, voxel, settings=settings, progress=_progress, nuclei=nuclei
+            )
+            # The shapes are already measured when the filter ran; measuring them
+            # again for the table would double the cost of the slowest step.
+            stats = sg.object_table(
+                result.masks,
+                signal,
+                result.voxel_size_um[-image.ndim:],
+                shapes=result.shapes,
+            )
             return result, stats
 
         try:
@@ -593,7 +647,14 @@ class SegmentationWidget(QWidget):
         )
         if result.diameter_px:
             summary += f", diameter {result.diameter_px:.0f} px"
+        if result.used_nuclear_channel:
+            summary += ", two channels"
         summary += ")."
+        if result.n_dropped:
+            summary += (
+                f" {result.n_dropped} dropped above solidity "
+                f"{self._max_solidity.value():g}."
+            )
         if measure_name and measure_name != source_name:
             summary += f" Intensities measured on {measure_name}."
         messages = list(problems) + list(result.warnings)
@@ -645,11 +706,14 @@ class SegmentationWidget(QWidget):
         if not totals.get("count"):
             self._summary.setText("No objects found. Try a larger cell probability, or a diameter.")
             return
-        self._summary.setText(
+        text = (
             f"{int(totals['count'])} object(s); median volume "
             f"{format_number(totals['median_volume_um3'])} µm³, median equivalent diameter "
             f"{format_number(totals['median_diameter_um'])} µm."
         )
+        if "median_solidity" in totals:
+            text += f" Median solidity {format_number(totals['median_solidity'])}."
+        self._summary.setText(text)
 
     def export_objects(self) -> None:
         """Write the object table out, through the same writer the measurements use."""

@@ -44,7 +44,11 @@ def is_supported(path: str | Path) -> bool:
     candidate = Path(path)
     if candidate.suffix.lower() in SUPPORTED_SUFFIXES:
         return True
-    return candidate.is_dir() and (candidate / ".zattrs").exists()
+    # A Zarr store is a folder, and need not be named ".zarr": zarr 2 marks the
+    # root with .zattrs, zarr 3 with zarr.json.
+    return candidate.is_dir() and (
+        (candidate / ".zattrs").exists() or (candidate / "zarr.json").exists()
+    )
 
 
 class LoadError(Exception):
@@ -108,9 +112,12 @@ def expand_inputs(paths: Sequence[str | Path]) -> list[Path]:
     out: list[Path] = []
     for entry in paths:
         candidate = Path(entry)
-        if candidate.is_dir() and candidate.suffix.lower() not in (".zarr", ".ngff") and not (
-            candidate / ".zattrs"
-        ).exists():
+        if (
+            candidate.is_dir()
+            and candidate.suffix.lower() not in (".zarr", ".ngff")
+            and not (candidate / ".zattrs").exists()
+            and not (candidate / "zarr.json").exists()
+        ):
             out.extend(sorted(child for child in candidate.iterdir() if is_supported(child)))
         else:
             out.append(candidate)

@@ -200,6 +200,19 @@ def write_plain_tiff(path: Path, shape=(200, 240)) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _create_array(group, name: str, data: np.ndarray, chunks=None):
+    """Write one array into a Zarr group, on either zarr 2 or zarr 3.
+
+    ``Group.create_dataset`` is gone in zarr 3, and ``create_array`` does not
+    exist in zarr 2, so pick whichever the installed version has.
+    """
+    if hasattr(group, "create_array"):
+        return group.create_array(
+            name, data=data, chunks=chunks or "auto", overwrite=True
+        )
+    return group.create_dataset(name, data=data, chunks=chunks, overwrite=True)
+
+
 def write_ome_zarr(path: Path, shape=(2, 5, 96, 128)) -> Path:
     """A minimal NGFF store: two channels, two pyramid levels, CZYX axes."""
     import zarr
@@ -211,7 +224,7 @@ def write_ome_zarr(path: Path, shape=(2, 5, 96, 128)) -> Path:
         factor = 2**level
         level_shape = (n_c, n_z, max(n_y // factor, 1), max(n_x // factor, 1))
         array = _blobs((n_c * n_z, level_shape[2], level_shape[3]), seed=level).reshape(level_shape)
-        root.create_dataset(str(level), data=array, chunks=(1, 1, 64, 64), overwrite=True)
+        _create_array(root, str(level), array, chunks=(1, 1, 64, 64))
         datasets.append(
             {
                 "path": str(level),
@@ -244,6 +257,210 @@ def write_ome_zarr(path: Path, shape=(2, 5, 96, 128)) -> Path:
     return path
 
 
+def _write_ngff_image(group, shape, axes, scale, seed: int = 0, levels: int = 2) -> None:
+    """Write a small multiscale image into an open Zarr group.
+
+    *axes* is one NGFF axis dict per dimension and *scale* the level-0 scale
+    vector; both must match ``shape``. Only Y and X are downsampled, which is
+    what real pyramids do.
+    """
+    datasets = []
+    for level in range(levels):
+        factor = 2**level
+        level_shape = tuple(
+            max(size // factor, 1) if index >= len(shape) - 2 else size
+            for index, size in enumerate(shape)
+        )
+        _create_array(group, str(level), _blobs(level_shape, seed=seed + level))
+        datasets.append(
+            {
+                "path": str(level),
+                "coordinateTransformations": [
+                    {
+                        "type": "scale",
+                        "scale": [
+                            value * (factor if index >= len(shape) - 2 else 1)
+                            for index, value in enumerate(scale)
+                        ],
+                    }
+                ],
+            }
+        )
+    group.attrs["multiscales"] = [{"version": "0.4", "axes": axes, "datasets": datasets}]
+
+
+#: Axes and level-0 scale shared by the plate and bioformats2raw samples.
+_CYX_AXES = [
+    {"name": "c", "type": "channel"},
+    {"name": "y", "type": "space", "unit": "micrometer"},
+    {"name": "x", "type": "space", "unit": "micrometer"},
+]
+_CYX_SCALE = [1.0, 0.25, 0.25]
+
+
+def write_ome_zarr_plate(path: Path, rows=("A",), columns=("1", "2"), fields: int = 2) -> Path:
+    """An HCS plate: one row of two wells, two fields each, two channels."""
+    import zarr
+
+    root = zarr.open_group(str(path), mode="w")
+    wells = []
+    for row_index, row in enumerate(rows):
+        for column_index, column in enumerate(columns):
+            well_path = f"{row}/{column}"
+            well = root.require_group(well_path)
+            well.attrs["well"] = {"images": [{"path": str(f)} for f in range(fields)]}
+            for field in range(fields):
+                image = well.require_group(str(field))
+                _write_ngff_image(
+                    image,
+                    (2, 32, 48),
+                    _CYX_AXES,
+                    _CYX_SCALE,
+                    seed=10 * (row_index + 1) + 3 * column_index + field,
+                )
+                image.attrs["omero"] = {
+                    "channels": [
+                        {"label": "GFP", "color": "00FF00"},
+                        {"label": "mCherry", "color": "FF0000"},
+                    ]
+                }
+            wells.append(
+                {"path": well_path, "rowIndex": row_index, "columnIndex": column_index}
+            )
+
+    root.attrs["plate"] = {
+        "version": "0.4",
+        "name": path.stem,
+        "rows": [{"name": row} for row in rows],
+        "columns": [{"name": column} for column in columns],
+        "wells": wells,
+        "field_count": fields,
+    }
+    return path
+
+
+#: Axes and level-0 scale of a Fractal-style plate: CZYX with one Z plane.
+_CZYX_AXES = [
+    {"name": "c", "type": "channel"},
+    {"name": "z", "type": "space", "unit": "micrometer"},
+    {"name": "y", "type": "space", "unit": "micrometer"},
+    {"name": "x", "type": "space", "unit": "micrometer"},
+]
+_CZYX_SCALE = [1.0, 1.0, 0.25, 0.25]
+
+
+def write_fractal_plate(
+    path: Path, rows=("B", "C"), columns=("02", "03"), cycles: int = 2
+) -> Path:
+    """A plate as Fractal writes one, which is what the batch runner is aimed at.
+
+    Two things distinguish it from :func:`write_ome_zarr_plate`: the images in a
+    well are *acquisitions* (4i cycles) rather than fields, and the channel labels
+    change from cycle to cycle while ``wavelength_id`` stays put. Matching a
+    channel across the plate is only interesting because of that, so the sample
+    has to reproduce it.
+    """
+    import zarr
+
+    root = zarr.open_group(str(path), mode="w")
+    wells = []
+    for row_index, row in enumerate(rows):
+        for column_index, column in enumerate(columns):
+            well_path = f"{row}/{column}"
+            well = root.require_group(well_path)
+            well.attrs["well"] = {
+                "version": "0.4",
+                "images": [{"acquisition": c + 1, "path": str(c)} for c in range(cycles)],
+            }
+            for cycle in range(cycles):
+                image = well.require_group(str(cycle))
+                _write_ngff_image(
+                    image,
+                    (2, 1, 32, 48),
+                    _CZYX_AXES,
+                    _CZYX_SCALE,
+                    seed=10 * (row_index + 1) + 3 * column_index + cycle,
+                )
+                image.attrs["omero"] = {
+                    "channels": [
+                        {"label": f"Ab{cycle + 1}_DAPI", "wavelength_id": "A01_C01",
+                         "color": "FFFF00"},
+                        {"label": f"Green488-x{cycle + 1}", "wavelength_id": "A02_C02",
+                         "color": "00FF00"},
+                    ]
+                }
+            wells.append(
+                {"path": well_path, "rowIndex": row_index, "columnIndex": column_index}
+            )
+
+    root.attrs["plate"] = {
+        "version": "0.4",
+        "name": path.stem,
+        "rows": [{"name": row} for row in rows],
+        "columns": [{"name": column} for column in columns],
+        "wells": wells,
+        "acquisitions": [{"id": c + 1} for c in range(cycles)],
+    }
+    return path
+
+
+def write_ome_zarr_sparse_plate(path: Path) -> Path:
+    """A plate declaring a full 4x12 layout but holding only two wells.
+
+    This is how plates arrive in practice — the layout comes from the plate type,
+    the wells from what was actually acquired — and the reader has to assemble
+    the acquired region rather than the nominal plate.
+    """
+    import zarr
+
+    write_ome_zarr_plate(path)
+    root = zarr.open_group(str(path), mode="r+")
+    plate = dict(root.attrs["plate"])
+    plate["rows"] = [{"name": name} for name in ("A", "B", "C", "D")]
+    plate["columns"] = [{"name": str(number)} for number in range(1, 13)]
+    plate["wells"] = [
+        {"path": "A/1", "rowIndex": 0, "columnIndex": 0},
+        {"path": "A/2", "rowIndex": 0, "columnIndex": 1},
+        {"path": "C/9", "rowIndex": 2, "columnIndex": 8},  # listed, never written
+    ]
+    root.attrs["plate"] = plate
+    return path
+
+
+def write_bioformats2raw(path: Path, series: int = 2) -> Path:
+    """A converter-style store: numbered series groups under a layout=3 root."""
+    import zarr
+
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs["bioformats2raw.layout"] = 3
+    for index in range(series):
+        _write_ngff_image(
+            root.require_group(str(index)),
+            (1, 40, 56),
+            _CYX_AXES,
+            _CYX_SCALE,
+            seed=50 + index,
+        )
+
+    ome = root.require_group("OME")
+    ome.attrs["series"] = [str(index) for index in range(series)]
+    images = "".join(
+        f'<Image ID="Image:{index}" Name="Well {index}"><Pixels ID="Pixels:{index}" '
+        'DimensionOrder="XYZCT" Type="uint16" SizeX="56" SizeY="40" SizeZ="1" '
+        'SizeC="1" SizeT="1"/></Image>'
+        for index in range(series)
+    )
+    xml_path = path / "OME" / "METADATA.ome.xml"
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    xml_path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">'
+        f"{images}</OME>",
+        encoding="utf-8",
+    )
+    return path
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -260,6 +477,10 @@ def write_all(directory: Path) -> list[Path]:
     ]
     try:
         written.append(write_ome_zarr(directory / "sample.zarr"))
+        written.append(write_ome_zarr_plate(directory / "sample_plate.zarr"))
+        written.append(write_ome_zarr_sparse_plate(directory / "sample_plate_sparse.zarr"))
+        written.append(write_bioformats2raw(directory / "sample_series.zarr"))
+        written.append(write_fractal_plate(directory / "sample_fractal_plate.zarr"))
     except Exception as exc:  # zarr is optional
         print(f"skipped OME-Zarr sample: {exc}")
     return written

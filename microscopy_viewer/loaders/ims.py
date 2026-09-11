@@ -32,7 +32,7 @@ from ..utils import (
     parse_float,
     parse_float_list,
 )
-from .layer_spec import LayerSpec, channel_appearance
+from .layer_spec import LayerSpec, apply_squeeze, channel_appearance, squeeze_plan
 
 logger = get_logger("ims")
 
@@ -337,22 +337,6 @@ def _level_stack(
     return stacks, len(timepoints), tuple(zip(crop, stored))
 
 
-def _squeeze_plan(shape: tuple[int, ...], axes: str) -> list[int]:
-    """Axis indices worth keeping: singleton ``T``/``Z`` axes give useless sliders.
-
-    The plan is computed once from the full-resolution level and reused for every
-    pyramid level, otherwise a level whose Z has collapsed to 1 would end up with
-    a different number of dimensions than its parent.
-    """
-    return [i for i, axis in enumerate(axes) if not (axis in "TZ" and shape[i] == 1)]
-
-
-def _apply_squeeze(array, keep: list[int], ndim: int):
-    if len(keep) == ndim:
-        return array
-    return array[tuple(slice(None) if i in keep else 0 for i in range(ndim))]
-
-
 def _is_downsample(new: tuple[int, ...], old: tuple[int, ...]) -> bool:
     """True when every axis of *new* is no larger than *old* and at least one shrank."""
     return all(n <= o for n, o in zip(new, old)) and any(n < o for n, o in zip(new, old))
@@ -437,7 +421,7 @@ def read(path: Path) -> list[LayerSpec]:
     )
 
     multiscale = len(per_level) > 1
-    keep = _squeeze_plan(full[0].shape, axes)
+    keep = squeeze_plan(full[0].shape, axes)
     layer_axes = "".join(axes[i] for i in keep)
     layer_scale = tuple(scale[i] for i in keep)
     layer_units = tuple(units[i] for i in keep)
@@ -445,7 +429,7 @@ def read(path: Path) -> list[LayerSpec]:
     specs: list[LayerSpec] = []
     for index in range(n_channels):
         channel = meta.channel(index)
-        arrays = [_apply_squeeze(level[index], keep, len(axes)) for level in per_level]
+        arrays = [apply_squeeze(level[index], keep, len(axes)) for level in per_level]
         data: Any = arrays if multiscale else arrays[0]
         colormap, color, blending = channel_appearance(
             channel.display_name, channel.color, index, n_channels

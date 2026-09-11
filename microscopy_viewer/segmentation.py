@@ -111,6 +111,10 @@ OBJECT_COLUMNS = (
     "centroid_z_um",
     "centroid_y_um",
     "centroid_x_um",
+    "solidity",
+    "circularity",
+    "eccentricity",
+    "extent",
     "mean",
     "median",
     "std",
@@ -118,8 +122,21 @@ OBJECT_COLUMNS = (
     "integrated",
 )
 
+#: Shape descriptors read from scikit-image, and what they are for.
+#:
+#: ``solidity`` is the object's area divided by the area of its convex hull: 1.0
+#: for anything convex, lower the more ragged or dented the outline. It is what
+#: :attr:`SegmentationSettings.max_solidity` filters on, because a debris speck or
+#: a bubble that Cellpose has labelled comes out as a clean convex disc while a
+#: real nucleus in a packed organoid is pressed out of shape by its neighbours.
+SHAPE_COLUMNS = ("solidity", "circularity", "eccentricity", "extent")
+
 OBJECT_HEADERS = {
     "label": "Label",
+    "solidity": "Solidity",
+    "circularity": "Circularity",
+    "eccentricity": "Eccentricity",
+    "extent": "Extent",
     "n_voxels": "Voxels",
     "volume_um3": "Volume (µm³)",
     "equivalent_diameter_um": "Equivalent diameter (µm)",
@@ -171,6 +188,10 @@ class SegmentationSettings:
     #: Override the Z/XY ratio instead of taking it from the voxel size. Rarely
     #: wanted; it exists because a badly written file can carry a wrong Z step.
     anisotropy: float | None = None
+    #: Drop objects whose solidity is **above** this, and measure the shape of the
+    #: rest. Zero switches the whole step off, and 1.0 measures without dropping
+    #: anything — which is how you look at the numbers before choosing a cut.
+    max_solidity: float = 0.0
 
     def resolved_model(self) -> str:
         """What to hand the backend: a path if one is set, else the model name."""
@@ -200,6 +221,15 @@ class SegmentationResult:
     scale_factors: tuple[float, float, float] = (1.0, 1.0, 1.0)
     elapsed_s: float = 0.0
     warnings: list[str] = field(default_factory=list)
+    #: Whether a nuclear channel was passed alongside the segmented one.
+    used_nuclear_channel: bool = False
+    #: Labels removed by the solidity filter, and the shape of everything measured.
+    dropped_labels: list[int] = field(default_factory=list)
+    shapes: dict[int, dict[str, float]] = field(default_factory=dict)
+
+    @property
+    def n_dropped(self) -> int:
+        return len(self.dropped_labels)
 
     @property
     def voxel_volume_um3(self) -> float:
@@ -250,6 +280,12 @@ class ObjectStat:
     std: float
     maximum: float
     integrated: float
+    #: Shape descriptors, or NaN when they were not measured. See
+    #: :data:`SHAPE_COLUMNS` and :func:`shape_properties`.
+    solidity: float = float("nan")
+    circularity: float = float("nan")
+    eccentricity: float = float("nan")
+    extent: float = float("nan")
 
     def as_row(self) -> dict[str, Any]:
         z, y, x = self.centroid_um
@@ -261,6 +297,10 @@ class ObjectStat:
             "centroid_z_um": z,
             "centroid_y_um": y,
             "centroid_x_um": x,
+            "solidity": self.solidity,
+            "circularity": self.circularity,
+            "eccentricity": self.eccentricity,
+            "extent": self.extent,
             "mean": self.mean,
             "median": self.median,
             "std": self.std,
@@ -413,8 +453,14 @@ class Backend:
         anisotropy: float | None,
         device: DeviceInfo,
         progress: Callable[[str], None] | None = None,
+        channel_axis: int | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
-        """Label *image*. Returns ``(masks, info)``."""
+        """Label *image*. Returns ``(masks, info)``.
+
+        ``channel_axis`` is set when *image* carries more than one stain — the
+        cell channel first, the nuclear channel second — and is None for the
+        single-channel case, where *image* is purely spatial.
+        """
         raise NotImplementedError
 
 
@@ -436,11 +482,22 @@ class CellposeBackend(Backend):
     )
 
     def available(self) -> bool:
+        return self.import_error() is None
+
+    @staticmethod
+    def import_error() -> BaseException | None:
+        """Why ``import cellpose`` fails, or None when it works.
+
+        Kept apart from :meth:`available` because "not installed" and "installed
+        but will not load" want different sentences: torch failing to load its
+        own DLLs is a common second case on Windows, and telling someone to
+        install a package they already have sends them the wrong way.
+        """
         try:
             import cellpose  # noqa: F401
-        except Exception:
-            return False
-        return True
+        except Exception as exc:
+            return exc
+        return None
 
     @staticmethod
     def major_version() -> int:
@@ -576,6 +633,7 @@ class CellposeBackend(Backend):
         anisotropy,
         device,
         progress=None,
+        channel_axis=None,
     ):
         model = self._model(settings, device)
         batch_size = int(settings.batch_size) or estimate_batch_size(device)
@@ -590,19 +648,26 @@ class CellposeBackend(Backend):
         }
         if diameter_px:
             kwargs["diameter"] = float(diameter_px)
-        if np.asarray(image).ndim == 3:
+
+        # The spatial part of the image, with any channel axis discounted: it is
+        # what decides whether this is a stack.
+        spatial_ndim = np.asarray(image).ndim - (0 if channel_axis is None else 1)
+        if spatial_ndim == 3:
             # Say which axis is Z rather than letting cellpose guess: on a stack
             # with few planes it can take Z for a channel axis.
             kwargs["z_axis"] = 0
-            kwargs["channel_axis"] = None
             if settings.mode == MODE_3D and anisotropy:
                 kwargs["anisotropy"] = float(anisotropy)
             if settings.mode == MODE_STITCH:
                 kwargs["stitch_threshold"] = float(settings.stitch_threshold)
+        kwargs["channel_axis"] = None if channel_axis is None else int(channel_axis)
+
         if self.major_version() < 4:
-            # v3 reads one grayscale channel when told [0, 0]; v4 warns about the
-            # argument existing at all.
-            kwargs["channels"] = [0, 0]
+            # v3 is told which stain is which by index, counting from 1 with 0
+            # meaning "grayscale": [0, 0] is one channel, [1, 2] is "segment the
+            # first channel, use the second as its nuclei". v4 infers it from the
+            # array and warns about the argument existing at all.
+            kwargs["channels"] = [0, 0] if channel_axis is None else [1, 2]
 
         if progress is not None:
             progress(f"cellpose {settings.mode}, batch {batch_size}")
@@ -657,7 +722,21 @@ def missing_backend_message(name: str = "cellpose") -> str | None:
         backend = get_backend(name)
     except ValueError as exc:
         return str(exc)
-    return None if backend.available() else backend.install_hint
+    if backend.available():
+        return None
+
+    # An import that fails for any reason other than the package being absent is
+    # a different problem with a different fix, so say which one it is.
+    failure = getattr(backend, "import_error", lambda: None)()
+    if failure is not None and not isinstance(failure, ImportError):
+        return (
+            f"{name} is installed but could not be imported:\n\n"
+            f"    {type(failure).__name__}: {failure}\n\n"
+            "On Windows this is usually torch failing to load its own DLLs. Check that "
+            "the torch build matches the installed CUDA runtime, and that the viewer is "
+            "started through microscopy_viewer rather than by importing Qt first."
+        )
+    return backend.install_hint
 
 
 def model_choices(name: str = "cellpose") -> tuple[ModelChoice, ...]:
@@ -806,16 +885,171 @@ def restore_masks(masks: np.ndarray, shape: Sequence[int]) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Shape, and throwing away what is the wrong shape
+# ---------------------------------------------------------------------------
+
+
+def shape_error() -> str | None:
+    """Why shape descriptors cannot be measured, or ``None`` when they can.
+
+    scikit-image is not a dependency of the viewer but it *is* one of cellpose's,
+    so on any machine that can segment it is already there. Saying which of those
+    two is missing beats a bare ImportError out of the middle of a plate run.
+    """
+    try:
+        from skimage.measure import regionprops_table  # noqa: F401
+    except ImportError as exc:
+        return (
+            "Shape measurements need scikit-image, which is normally installed "
+            f"alongside cellpose:\n\n    python -m pip install scikit-image\n\n({exc})"
+        )
+    return None
+
+
+def _spatial_masks(masks: np.ndarray) -> np.ndarray:
+    """The label map with leading singleton axes dropped.
+
+    A plate mask arrives as ``(1, y, x)``. Measured as a volume, every object is a
+    slab one voxel thick, its convex hull is degenerate and its solidity is not
+    the number anyone means — so the axis comes off before regionprops sees it.
+    """
+    array = np.asarray(masks)
+    while array.ndim > 2 and array.shape[0] == 1:
+        array = array[0]
+    return array
+
+
+def shape_properties(masks: np.ndarray) -> dict[int, dict[str, float]]:
+    """Per-object shape descriptors, keyed by label, from scikit-image.
+
+    Returns :data:`SHAPE_COLUMNS` for every label present. ``circularity`` is
+    derived — ``4 pi A / P**2``, 1.0 for a perfect disc — because scikit-image does
+    not offer it directly; ``eccentricity`` and the perimeter it needs are 2D-only
+    measurements, so a genuine volume comes back with those two left out.
+    """
+    message = shape_error()
+    if message is not None:
+        raise ImportError(message)
+    from skimage.measure import regionprops_table
+
+    labels = _spatial_masks(masks)
+    flat_2d = labels.ndim == 2
+    wanted = ["label", "area", "solidity", "extent"]
+    if flat_2d:
+        wanted += ["perimeter", "eccentricity"]
+
+    table = regionprops_table(labels, properties=tuple(wanted))
+    ids = np.asarray(table["label"], dtype=np.int64)
+    area = np.asarray(table["area"], dtype=float)
+    if flat_2d:
+        perimeter = np.asarray(table["perimeter"], dtype=float)
+        # A single-pixel object has zero perimeter; guard rather than divide by it.
+        circularity = np.where(
+            perimeter > 0, 4.0 * np.pi * area / np.maximum(perimeter, 1e-9) ** 2, np.nan
+        )
+        # Digitised outlines make the ratio overshoot slightly on small discs.
+        circularity = np.minimum(circularity, 1.0)
+        eccentricity = np.asarray(table["eccentricity"], dtype=float)
+    else:
+        circularity = np.full(ids.shape, np.nan)
+        eccentricity = np.full(ids.shape, np.nan)
+
+    solidity = np.asarray(table["solidity"], dtype=float)
+    extent = np.asarray(table["extent"], dtype=float)
+    return {
+        int(label): {
+            "solidity": float(solidity[index]),
+            "circularity": float(circularity[index]),
+            "eccentricity": float(eccentricity[index]),
+            "extent": float(extent[index]),
+        }
+        for index, label in enumerate(ids)
+    }
+
+
+def round_labels(shapes: dict[int, dict[str, float]], max_solidity: float) -> list[int]:
+    """Labels whose solidity is above *max_solidity*, in order.
+
+    Above, not below: the objects being thrown out here are the ones that are *too*
+    clean — a speck of debris or an out-of-focus bead is a convex disc, while a real
+    nucleus packed against its neighbours is dented by them. A threshold of 1.0
+    therefore drops nothing, which is the way to measure without filtering.
+    """
+    cut = float(max_solidity)
+    return sorted(
+        label
+        for label, values in shapes.items()
+        if np.isfinite(values.get("solidity", np.nan)) and values["solidity"] > cut
+    )
+
+
+def drop_labels(masks: np.ndarray, labels: Sequence[int]) -> np.ndarray:
+    """A copy of *masks* with *labels* set to background.
+
+    The surviving objects keep their ids rather than being renumbered, so a label
+    in the object table is still the label in the image and in any table written
+    before the filter ran.
+    """
+    array = np.asarray(masks)
+    if not labels:
+        return array
+    highest = int(array.max()) if array.size else 0
+    keep = np.ones(highest + 2, dtype=bool)
+    for label in labels:
+        if 0 <= int(label) <= highest:
+            keep[int(label)] = False
+    keep[0] = False
+    return np.where(keep[array], array, 0).astype(array.dtype, copy=False)
+
+
+def count_labels(masks: np.ndarray) -> int:
+    """How many distinct objects are in a label map.
+
+    Not ``masks.max()``: Cellpose leaves holes in its numbering when it drops an
+    object below ``min_size``, and the solidity filter leaves more, so the highest
+    id stopped being the count some time ago.
+    """
+    flat = np.asarray(masks).reshape(-1)
+    if flat.size == 0:
+        return 0
+    highest = int(flat.max())
+    if highest <= 0:
+        return 0
+    return int(np.count_nonzero(np.bincount(flat, minlength=highest + 1)[1:]))
+
+
+def filter_round_objects(
+    masks: np.ndarray, max_solidity: float
+) -> tuple[np.ndarray, list[int], dict[int, dict[str, float]]]:
+    """Measure every object and drop the ones rounder than *max_solidity*.
+
+    Returns the filtered masks, the labels removed, and the shape of everything
+    that was measured — the measurements are kept for the object table so that
+    regionprops, which is the expensive part, runs once.
+    """
+    shapes = shape_properties(masks)
+    dropped = round_labels(shapes, max_solidity)
+    return drop_labels(masks, dropped), dropped, shapes
+
+
 def segment_volume(
     image: np.ndarray,
     voxel_size_um: Sequence[float] = (1.0, 1.0, 1.0),
     settings: SegmentationSettings | None = None,
     progress: Callable[[str], None] | None = None,
+    nuclei: np.ndarray | None = None,
 ) -> SegmentationResult:
     """Segment one 2D or 3D array and return its labels on the same grid.
 
     *image* is ``(z, y, x)`` or ``(y, x)``, and *voxel_size_um* is in the same
     order — the calibrated scale off the layer, not a guess.
+
+    *nuclei* is an optional second stain on the same grid. Given one, Cellpose
+    segments whole cells from *image* — a membrane or cytoplasmic stain — while
+    using the nuclear channel to tell touching cells apart and to guarantee one
+    mask per nucleus. It is the difference between "the fluorescent blobs" and
+    "the cells", and it is what the two-channel Cellpose models were trained on.
     """
     settings = settings or SegmentationSettings()
     message = missing_backend_message(settings.backend)
@@ -827,7 +1061,28 @@ def segment_volume(
     if array.ndim not in (2, 3):
         raise ValueError(f"segmentation needs a 2D or 3D array, got {array.ndim}D")
 
+    # A stack one plane deep is a 2D image, and segmenting it as a volume is not
+    # the same thing: the stitching path treats the single plane as a degenerate
+    # z-stack and returns a fraction of the objects a plain 2D run finds. Plate
+    # and slide-scanner data reaches us shaped this way all the time, so drop the
+    # axis for the run and put it back on the labels.
+    singleton_z = array.ndim == 3 and array.shape[0] == 1
+    if singleton_z:
+        array = array[0]
+        voxel_size_um = tuple(voxel_size_um)[-2:] or (1.0, 1.0)
+
     warnings: list[str] = []
+
+    nuclear = None if nuclei is None else np.asarray(nuclei)
+    if nuclear is not None and singleton_z and nuclear.ndim == 3 and nuclear.shape[0] == 1:
+        nuclear = nuclear[0]
+    if nuclear is not None and nuclear.shape != array.shape:
+        warnings.append(
+            f"The nuclear channel is {tuple(nuclear.shape)} and the segmented channel is "
+            f"{tuple(array.shape)}; they have to be on the same grid, so it was ignored."
+        )
+        nuclear = None
+
     device = compute_device(prefer_gpu=settings.use_gpu)
     if settings.use_gpu and not device.is_gpu:
         warnings.append(
@@ -855,17 +1110,28 @@ def segment_volume(
     if anisotropy is None and working.ndim == 3:
         anisotropy = anisotropy_from_voxel(working_voxel)
 
+    # Cellpose reads the two stains from one array: the cell channel first, the
+    # nuclear channel second. The channel axis goes last, where it cannot be
+    # mistaken for Z, and every shape decision above stays on the spatial array.
+    payload = working
+    channel_axis = None
+    if nuclear is not None:
+        payload = np.stack([working, rescale_image(nuclear, factors)], axis=-1)
+        channel_axis = payload.ndim - 1
+
     if progress is not None:
-        progress(f"segmenting {tuple(working.shape)} on {device.describe()}")
+        channels = "" if nuclear is None else " with a nuclear channel"
+        progress(f"segmenting {tuple(working.shape)}{channels} on {device.describe()}")
 
     started = time.perf_counter()
     masks, info = backend.segment(
-        working,
+        payload,
         settings=settings,
         diameter_px=diameter_px,
         anisotropy=anisotropy if settings.mode == MODE_3D else None,
         device=device,
         progress=progress,
+        channel_axis=channel_axis,
     )
     elapsed = time.perf_counter() - started
 
@@ -873,6 +1139,28 @@ def segment_volume(
     if tuple(masks.shape) != tuple(array.shape):
         masks = restore_masks(masks, array.shape)
     masks = masks.astype(np.int32, copy=False)
+    if singleton_z:
+        # Back onto the grid the caller handed in, so the labels line up with the
+        # layer they came from.
+        masks = masks[np.newaxis]
+
+    # Shape comes last, on the masks as the caller will get them, so the numbers in
+    # the table describe the objects that are actually in the layer.
+    shapes: dict[int, dict[str, float]] = {}
+    dropped: list[int] = []
+    if settings.max_solidity > 0:
+        if progress is not None:
+            progress("measuring object shape")
+        try:
+            masks, dropped, shapes = filter_round_objects(masks, settings.max_solidity)
+        except ImportError as exc:
+            warnings.append(str(exc).replace("\n\n", " "))
+        else:
+            if dropped:
+                warnings.append(
+                    f"{len(dropped)} object(s) above solidity {settings.max_solidity:g} "
+                    "were dropped as too round to be cells."
+                )
 
     estimated = info.get("estimated_diameter_px")
     if diameter_px is None and estimated:
@@ -883,7 +1171,7 @@ def segment_volume(
 
     result = SegmentationResult(
         masks=masks,
-        n_objects=int(masks.max()) if masks.size else 0,
+        n_objects=count_labels(masks),
         voxel_size_um=padded_voxel,  # type: ignore[arg-type]
         model=settings.resolved_model(),
         mode=settings.mode,
@@ -893,6 +1181,9 @@ def segment_volume(
         scale_factors=padded_factors,  # type: ignore[arg-type]
         elapsed_s=elapsed,
         warnings=warnings,
+        used_nuclear_channel=nuclear is not None,
+        dropped_labels=dropped,
+        shapes=shapes,
     )
     logger.info(
         "segmented %s in %.1f s: %d object(s), model %s, %s",
@@ -919,6 +1210,7 @@ def object_table(
     masks: np.ndarray,
     signal: np.ndarray | None = None,
     voxel_size_um: Sequence[float] = (1.0, 1.0, 1.0),
+    shapes: dict[int, dict[str, float]] | None = None,
 ) -> list[ObjectStat]:
     """Per-object size, position and intensity.
 
@@ -965,12 +1257,16 @@ def object_table(
     else:
         sums = means = stds = maxima = medians = np.zeros(highest + 1)
 
+    shape_by_label = shapes or {}
+    blank = {name: float("nan") for name in SHAPE_COLUMNS}
+
     stats: list[ObjectStat] = []
     for label in range(1, highest + 1):
         n_voxels = int(counts[label])
         if n_voxels == 0:  # a label cellpose dropped; the numbering has holes
             continue
         volume = n_voxels * voxel_volume
+        shape = shape_by_label.get(label, blank)
         stats.append(
             ObjectStat(
                 label=label,
@@ -987,6 +1283,10 @@ def object_table(
                 std=float(stds[label]),
                 maximum=float(maxima[label]),
                 integrated=float(sums[label]),
+                solidity=float(shape.get("solidity", float("nan"))),
+                circularity=float(shape.get("circularity", float("nan"))),
+                eccentricity=float(shape.get("eccentricity", float("nan"))),
+                extent=float(shape.get("extent", float("nan"))),
             )
         )
     return stats
@@ -1020,9 +1320,13 @@ def count_summary(stats: Sequence[ObjectStat]) -> dict[str, float]:
         return {"count": 0.0}
     volumes = np.array([stat.volume_um3 for stat in stats], dtype=float)
     diameters = np.array([stat.equivalent_diameter_um for stat in stats], dtype=float)
-    return {
+    totals = {
         "count": float(len(stats)),
         "median_volume_um3": float(np.median(volumes)),
         "median_diameter_um": float(np.median(diameters)),
         "total_volume_um3": float(volumes.sum()),
     }
+    solidity = np.array([stat.solidity for stat in stats], dtype=float)
+    if np.any(np.isfinite(solidity)):
+        totals["median_solidity"] = float(np.nanmedian(solidity))
+    return totals

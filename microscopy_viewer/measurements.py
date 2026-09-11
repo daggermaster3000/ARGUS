@@ -323,6 +323,10 @@ def new_roi_layer(viewer, image_layer=None, name: str | None = None):
     if image_layer is not None:
         kwargs["ndim"] = int(image_layer.ndim)
         kwargs["scale"] = tuple(float(s) for s in image_layer.scale)
+        # napari indexes the text translation by displayed axis, so on a layer
+        # with more than two dimensions a two-entry offset raises IndexError the
+        # moment a shape is drawn. The label is nudged in Y/X either way.
+        kwargs["text"]["translation"] = [0.0] * (kwargs["ndim"] - 2) + [-6.0, 0.0]
         kwargs["name"] = name or f"ROIs — {image_layer.name}"
         kwargs["metadata"] = {
             ROI_KEY: True,

@@ -12,10 +12,12 @@ or from a shell::
 
 from __future__ import annotations
 
-from .runtime import configure_numba_cache
+from .runtime import configure_numba_cache, preload_torch_libraries
 
 # Must run before anything imports napari: see runtime.configure_numba_cache.
 configure_numba_cache()
+# Must run before anything imports Qt: see runtime.preload_torch_libraries.
+preload_torch_libraries()
 
 __version__ = "1.0.0"
 __all__ = ["MicroscopyViewer", "launch", "main", "__version__"]

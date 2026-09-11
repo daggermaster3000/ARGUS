@@ -96,6 +96,13 @@ def _register_builtin_panels() -> None:
 
         return SegmentationWidget(app.viewer)
 
+    def _batch(app):
+        from .batch_widget import BatchSegmentationWidget
+
+        # Takes the app: the run reads its Cellpose settings off the Segmentation
+        # panel and opens finished images through the app's own loader.
+        return BatchSegmentationWidget(app)
+
     def _timeseries(app):
         from .timeseries_widget import TimeSeriesWidget
 
@@ -161,6 +168,17 @@ def _register_builtin_panels() -> None:
             attribute="segmentation_widget",
             tabify_with="intensity_comparison",
             order=50,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="batch_segmentation",
+            title="Batch segmentation",
+            factory=_batch,
+            attribute="batch_widget",
+            tabify_with="segmentation",
+            # After the Segmentation panel, which it reads its settings from.
+            order=60,
         )
     )
 

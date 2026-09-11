@@ -205,6 +205,32 @@ def test_level_budget() -> None:
     )
 
 
+def test_napari_pyramids_are_seen_as_pyramids() -> None:
+    """napari hands back ``MultiScaleData``, not the list the layer was built from.
+
+    It is a Sequence but neither a list nor a tuple, and it proxies level 0's
+    ``shape``, so a list-only test silently reports a whole pyramid as one level
+    and the cache never sees the coarse levels it is meant to keep local.
+    """
+    print("a napari multiscale layer reports all of its levels")
+    try:
+        from napari.layers._multiscale_data import MultiScaleData
+    except Exception:
+        print("  napari not importable — skipped")
+        return
+
+    levels = [_stack((4, 1, 64, 64)), _stack((4, 1, 32, 32))]
+    layer = _Layer(MultiScaleData(levels), multiscale=True)
+    seen = timeseries.pyramid_levels(layer)
+    check(len(seen) == 2, f"both levels are found (got {len(seen)})")
+    check(
+        [tuple(level.shape) for level in seen] == [(4, 1, 64, 64), (4, 1, 32, 32)],
+        "and in order, finest first",
+    )
+    check(timeseries.shape_of(layer) == (4, 1, 64, 64), "shape still comes from level 0")
+    check(timeseries.data_levels(levels[0]) == [levels[0]], "a plain array is a single level")
+
+
 def test_touch_reads_without_copying() -> None:
     print("prefetching touches a byte per page rather than copying the frame")
     array = _stack((2, 4, 64, 64))
@@ -447,6 +473,7 @@ def main() -> int:
             test_frame_clock()
             test_timestamps()
             test_level_budget()
+            test_napari_pyramids_are_seen_as_pyramids()
             test_touch_reads_without_copying()
             test_caching_swaps_levels_in_place(directory)
             test_cache_is_shared_with_the_3d_view(directory)

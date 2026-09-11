@@ -529,6 +529,33 @@ tens of minutes. The panel names the card it will use — `NVIDIA GeForce RTX 40
 (the default torch wheel is CPU-only). The batch size is sized from free video
 memory rather than left at Cellpose's default of 8, which leaves a big card idle.
 
+**Two stains at once, when the biology needs them.** A nuclear stain segments
+reliably but only ever gives you nuclei. Pointing **Segment** at a membrane or
+cytoplasmic channel and **Nuclei** at DAPI hands Cellpose both — cell channel
+first, nuclear channel second, which is the pairing the two-channel models were
+trained on — and what comes back is whole cells, with touching cells separated and
+one mask per nucleus. On a kidney-organoid well here, a weak cytoplasmic channel
+alone found 55 objects; the same channel with its DAPI found 626. Both stains are
+decimated together, so a large volume stays paired.
+
+**Round false positives can be thrown out by shape.** Cellpose labels debris,
+beads and out-of-focus blobs along with the cells, and what those have in common
+is that they come back as clean convex discs while a real nucleus packed against
+its neighbours is dented by them. **Max solidity** measures every object with
+scikit-image's `regionprops` and drops the ones above the cut — solidity being the
+object's area over the area of its convex hull, 1.0 for anything convex. Set it to
+`1.000` to measure without dropping anything: the **Solidity**, **Circularity**,
+**Eccentricity** and **Extent** columns fill in on the Objects tab, and the cut can
+be read off them rather than guessed. Objects that survive keep their original
+label numbers, so a label in the table is still the label in the image.
+
+Solidity measures *convexity*, which is not quite the same as roundness — a
+convex ellipse scores as highly as a disc. On one kidney-organoid well here the
+nuclei ran to a median solidity of 0.959 and a maximum of 0.991, and a cut at
+0.985 removed 3 objects whose circularity was 1.00, while a cut at 0.98 removed 76
+with a median eccentricity of 0.61 — elongated, not round. Start near the top of
+the distribution, and use the circularity column to check what is being removed.
+
 **Sizes are in µm, not pixels.** Cellpose's `diameter` is in XY pixels and its
 `anisotropy` is the Z/XY voxel ratio; both are derived from the calibrated voxel
 size the reader already put on the layer. A 5 µm nucleus stays 5 µm whether the
@@ -538,9 +565,11 @@ decimated — the conversion happens after the decimation, not before.
 | Setting | What it does |
 |---|---|
 | **Segment** | The channel that is labelled. A nuclear stain with the `nuclei` model is the reliable case. |
+| **Nuclei** | Optional second stain handed to Cellpose alongside the segmented one, which is how you get whole cells rather than nuclei: segment the membrane or cytoplasmic channel and point this at DAPI. The nuclei separate cells that touch and guarantee one mask per nucleus. Leave it at `— none —` for a single-channel run. |
 | **Measure** | The channel intensities are read from. Segment on DAPI, measure on the reporter, and every row is signal per nucleus. |
 | **Mode** | `2D + stitch` segments each plane and joins overlapping masks between planes — faster, and usually better on an anisotropic stack where a nucleus is four planes tall. `3D` computes flows in 3D. `2D per plane` leaves labels unconnected between planes. |
 | **Diameter** | Expected object diameter in µm. The setting that matters most; automatic is worth overriding. |
+| **Max solidity** | Objects rounder than this are dropped after the run: `0.985` throws out the convex discs that debris and beads produce and leaves the cells. `off` skips the measurement entirely; `1.000` measures every object and drops none, which is how you choose the cut. Needs scikit-image, which arrives with cellpose. |
 | **Segment at most** | Volumes above this are decimated **laterally** before segmentation — Z is left alone, since that is where objects are already only a few planes tall. The labels always come back on the original grid. |
 
 **The model list is discovered, not hard-coded.** It holds three kinds of entry,
@@ -562,7 +591,8 @@ downloaded, so the first Segment does not silently fetch a gigabyte of weights.
 
 What comes back is a Labels layer at the source layer's own scale, and a table with
 one row per object: voxel count, volume in µm³, equivalent diameter, centroid in µm,
-and mean / median / std / max / integrated intensity from the measure channel. It
+the four shape descriptors when they were measured, and mean / median / std / max /
+integrated intensity from the measure channel. It
 exports through the same writer as the measurements workbook. Objects are measured
 through the indices of the labelled voxels rather than a loop over labels, so the
 memory it takes scales with the segmented fraction of the volume, not the volume.
@@ -580,6 +610,78 @@ python -m pip install ".[segmentation]"
 Without it the panel still appears and says exactly that, the way the atlas panel
 reports a missing `antspyx`. `Backend` is a three-method interface here too, so
 StarDist or micro-SAM can be added beside Cellpose.
+
+### Batch segmentation
+
+**Batch segmentation** takes the settings you just got right on one image and runs
+them over a whole plate. A Fractal-converted 4i plate here is 46 wells × 7
+acquisitions = 320 images of 12 000 × 12 000 px; nobody is going to click through
+that one at a time.
+
+Point it at the `.zarr` store — or press **Use the loaded plate** to take the path
+off a layer already open — and press **Scan**. Reading the plate is metadata only,
+so it is instant even on a store of a few hundred gigabytes. What comes back is the
+well list, the acquisition list and the channels.
+
+**Channels are matched, not indexed.** In a 4i plate the channel label changes
+every cycle — `Ab1_DAPI`, `Ab2_DAPI`, … `Ab7_DAPI` — while `wavelength_id` does
+not. The picker matches on the key that survives the plate, so choosing DAPI in
+cycle 1 finds the right channel in cycle 7. A label match is a case-insensitive
+substring, with an exact hit preferred, for plates that carry no wavelength ids.
+
+**Masks are written back into the plate**, as NGFF `labels` groups:
+
+```
+AssayPlate_….zarr/B/02/0/
+  0 … 4                 the channels, never opened for writing
+  tables/               untouched
+  labels/
+    nuclei/
+      0 … 4             the masks, uint32, on the image's own pyramid
+```
+
+That is the layout Fractal and `ome-zarr-py` expect, so the result is readable by
+anything that reads the plate — including this viewer, which loads a label set
+beside the channels it came from as a proper Labels layer at the same scale. The
+label pyramid mirrors the image's own levels and is built by subsampling on a
+stride, not averaging: a label map has no meaningful mean.
+
+**The masks come back with the plate.** Opening the store assembles each label set
+into a mosaic of its own on the same grid as the channels, so a segmented plate
+opens with its segmentation on top of it — wells that have not been run yet are
+blank rather than missing, which is what tells you where the run got to. The same
+holds for a single well, and **Open the selected result** under the results table
+does it for one image.
+
+**An interrupted run is resumable.** An image that already has the named label set
+is skipped rather than redone, and the well list says which those are, so a plate
+that stopped overnight is restarted by pressing Run again. **Replace a label set
+that is already there** is the override. One image failing — out of video memory,
+a missing channel — is reported in the table as that image's outcome and the run
+carries on; a plate of three hundred is not lost to one bad well.
+
+By default only the *first* acquisition is selected. Every 4i cycle images the same
+cells, so segmenting all seven gives you the same nuclei seven times and takes
+seven times as long.
+
+| Setting | What it does |
+|---|---|
+| **Wells** / **Acquisitions** | What to run. Everything, one row, one cycle — ctrl-click and shift-click. Wells that already carry the label set are marked. |
+| **Segment** / **Nuclei** / **Measure** | As in the Segmentation panel, but resolved per image by wavelength or label. **Nuclei** gives whole cells instead of nuclei. |
+| **Label set** | Name written under `labels/`. Give a second run a different name to keep both. |
+| **Pyramid level** | Which level to segment. 0 is full resolution; each step up halves the image and quarters the time. The panel shows the resulting extent and µm/px. |
+| **Tables** | A per-image object table and a plate-level summary CSV — one row per image with counts, median size, median solidity, how many the shape filter dropped, and what went wrong. |
+
+Cellpose settings — model, diameter, mode, thresholds, the solidity filter, GPU —
+are read from the **Segmentation** panel when the run starts, and shown here as one
+line. There is no
+second copy to keep in step: get one image right there, then run the plate here.
+
+The run is on a `thread_worker` that yields one image at a time, so the window
+stays usable, the table fills as it goes, and **Stop** takes effect at the next
+image boundary with everything already finished safely on disk. On an RTX 4090 a
+12 000 × 12 000 well takes about 35 s including the read and the write, so a
+46-well cycle is roughly half an hour.
 
 ### Exports
 
@@ -715,7 +817,9 @@ Needs `python-pptx`; the export says so plainly if it is missing.
 |---|---|
 | **Imaris `.ims`** | primary format. Reads the resolution-level pyramid as a napari multiscale image, crops the chunk padding, and derives voxel size from the dataset extents. Channel colours and display ranges come from the file. |
 | **TIFF / OME-TIFF** | calibration from OME-XML, then the ImageJ description block, then the baseline resolution tags. Sub-resolution series load as a pyramid. |
-| **OME-Zarr / NGFF** | optional. Reads `multiscales`, the `axes` list and the `omero` rendering block directly, so no `ome-zarr` package is needed. A Zarr store is a *folder*, so open one by dropping it on the window or passing it on the command line — the file picker only lists files. |
+| **OME-Zarr / NGFF** | optional. Reads `multiscales`, the `axes` list and the `omero` rendering block directly, so no `ome-zarr` package is needed. A Zarr store is a *folder*, so open one by dropping it on the window or passing it on the command line — the file picker only lists files. Segmentations stored beside an image in a `labels` group come back as Labels layers on the same grid. |
+| **OME-Zarr HCS plate** | a store whose root carries a `plate` block is assembled into one lazy mosaic per channel: wells laid out in their plate rows and columns, and the fields of each well tiled inside their cell. **Acquisitions are channels, not places** — a 4i plate lists its staining cycles inside the well exactly as several fields would be listed, and only the `acquisition` id tells them apart, so each cycle is assembled on the plate grid of its own and comes back as a further set of channels registered on top of the rest, named `… :: cycle 3 :: Red568-pSMAD1-5`. Segmentations in a `labels` group are assembled the same way. The mosaic covers the wells that are actually in the store, not the nominal plate — a 96-well layout holding one acquired well opens as that well, not as a mostly-blank plate — and the pyramid is preserved, so nothing is read until it is on screen. A single well or field folder can be opened on its own, and a folder with no NGFF metadata at all (a plate row, a converter's output directory) is descended into. |
+| **OME-Zarr `bioformats2raw`** | a `bioformats2raw.layout` root loads every series as its own layer set, named from `OME/METADATA.ome.xml` when the converter wrote it. This is what `bioformats2raw` produces from `.czi`, `.lif`, `.nd2` and friends. |
 
 XY, XYZ, XYT, XYZT and multichannel layouts are all handled: the channel axis is
 split into separate layers, and singleton T/Z axes are dropped so 2D images do not
@@ -736,12 +840,13 @@ microscopy_viewer/
     layer_spec.py           the reader -> GUI contract
     ims.py                  Imaris
     tiff.py                 TIFF / ImageJ / OME-TIFF
-    ome_zarr.py             OME-Zarr / NGFF
+    ome_zarr.py             OME-Zarr / NGFF, HCS plates, bioformats2raw series
   metadata.py               metadata model and the vendor-key synonym matching
   measurements.py           Shapes -> calibrated distances and areas
   intensity.py              ROI statistics, AUC / overlap; no Qt, runs off-thread
   registration.py           atlas registration and the per-region readout; no Qt
   segmentation.py           Cellpose segmentation, the GPU device, per-object stats; no Qt
+  batch.py                  plate-wide segmentation: survey, run, NGFF label writing; no Qt
   exports.py                snapshots and the Excel workbook
   slides.py                 channel/merge rendering and the PowerPoint slide; no Qt
   contrast.py               auto / reset contrast
@@ -760,6 +865,7 @@ microscopy_viewer/
     timeseries_widget.py    transport controls, the cache status, playback
     registration_widget.py  channel roles, the atlas, the region table
     segmentation_widget.py  channel, model and diameter; the object table
+    batch_widget.py         plate, wells, cycles and channels; the run and its results
     slide_dialog.py         pick samples, name the stainings, write the .pptx
     movie_dialog.py         pick a range and a rate, render the frames
   utils.py                  logging, unit conversion, geometry helpers
@@ -810,6 +916,7 @@ python tests/test_slides.py         # channel/merge rendering and the .pptx tabl
 python tests/test_overview.py       # overview detection, stitching, the locator slide — no Qt needed
 python tests/test_registration.py   # atlas registration engine — no Qt; ANTs checks skip without antspyx
 python tests/test_segmentation.py   # segmentation engine, units, object table — no Qt; cellpose is never run
+python tests/test_batch.py          # plate survey, channel matching, NGFF label writing — no Qt; cellpose is never run
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 

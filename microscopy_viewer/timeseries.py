@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Sequence as _AbcSequence
 from typing import Callable, Iterable, Sequence
 
 import numpy as np
@@ -104,11 +105,23 @@ def layer_time_axis(layer) -> int | None:
     return index
 
 
+def data_levels(data) -> list:
+    """A layer's data as a list of pyramid levels, finest first.
+
+    napari does not hand back the list a multiscale layer was built from: it
+    wraps it in ``MultiScaleData``, a Sequence that is neither a list nor a tuple
+    and that proxies level 0's ``shape`` and ``dtype``. Testing for list-ness
+    alone therefore reports a whole pyramid as a single level.
+    """
+    if isinstance(data, _AbcSequence) and not isinstance(data, (str, bytes)):
+        return list(data)
+    return [data]
+
+
 def shape_of(layer) -> tuple[int, ...]:
     """Shape of the layer's full-resolution data, multiscale or not."""
-    data = layer.data
-    if isinstance(data, (list, tuple)) and data:
-        data = data[0]
+    levels = data_levels(layer.data)
+    data = levels[0] if levels else layer.data
     return tuple(int(n) for n in np.asarray(getattr(data, "shape", ()), dtype=int))
 
 
@@ -302,10 +315,7 @@ def pyramid_levels(layer) -> list:
         stored = None
     if stored:
         return list(stored)
-    data = layer.data
-    if isinstance(data, (list, tuple)):
-        return list(data)
-    return [data]
+    return data_levels(layer.data)
 
 
 def level_bytes(level) -> int:
@@ -767,7 +777,7 @@ class TimelineManager:
         self._prefetcher.stop()
 
     def _displayed_array(self, layer):
-        levels = list(layer.data) if isinstance(layer.data, (list, tuple)) else [layer.data]
+        levels = data_levels(layer.data)
         if not levels:
             return None
         index = int(getattr(layer, "_data_level", 0) or 0)

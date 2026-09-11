@@ -30,6 +30,10 @@ imageio>=2.19      # PNG/JPEG snapshot writing
 imageio-ffmpeg>=0.4.7
 zarr>=2.12         # optional: OME-Zarr / NGFF stores
 
+# Object shape descriptors for the segmentation panel (solidity, circularity).
+# Optional: it arrives with cellpose, and the panel says so when it is absent.
+scikit-image>=0.19
+
 # Measurement export
 pandas>=1.4
 openpyxl>=3.0

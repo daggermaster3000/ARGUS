@@ -72,19 +72,214 @@ class _StubBackend(seg.Backend):
     def model_choices(self) -> tuple[seg.ModelChoice, ...]:
         return (seg.ModelChoice(label="stub-model", value="stub-model"),)
 
-    def segment(self, image, settings, diameter_px, anisotropy, device, progress=None):
+    def segment(
+        self, image, settings, diameter_px, anisotropy, device, progress=None, channel_axis=None
+    ):
+        image = np.asarray(image)
         self.calls.append(
             {
-                "shape": tuple(np.asarray(image).shape),
+                "shape": tuple(image.shape),
                 "diameter_px": diameter_px,
                 "anisotropy": anisotropy,
                 "settings": settings,
                 "device": device,
+                "channel_axis": channel_axis,
+                "image": image,
             }
         )
-        masks = np.zeros(np.asarray(image).shape, dtype=np.int32)
+        if channel_axis is not None:
+            # Real backends return labels without the channel axis.
+            image = np.take(image, 0, axis=channel_axis)
+        masks = np.zeros(image.shape, dtype=np.int32)
         masks[..., :4, :4] = 1  # one object, so the count is not trivially zero
         return masks, {"batch_size": 8}
+
+
+def _disc(image, labels, centre, radius, label):
+    """Draw a filled disc — a convex shape, and what a false positive looks like."""
+    grids = np.ogrid[tuple(slice(0, n) for n in image.shape)]
+    inside = sum((grid - c) ** 2 for grid, c in zip(grids, centre)) <= radius**2
+    labels[inside] = label
+    image[inside] = 100.0 * label
+    return inside
+
+
+def _has_skimage() -> bool:
+    return seg.shape_error() is None
+
+
+def _close(first: float, second: float, tolerance: float = 1e-9) -> bool:
+    return abs(float(first) - float(second)) <= tolerance
+
+
+def test_shape_descriptors() -> None:
+    print("shape descriptors from scikit-image")
+
+    if not _has_skimage():
+        print("  skip scikit-image is not installed")
+        return
+
+    labels = np.zeros((80, 80), dtype=np.int32)
+    image = np.zeros((80, 80), dtype=np.float32)
+    _disc(image, labels, (20, 20), 12, 1)  # a clean disc
+    labels[50:75, 50:75] = 2  # a square with a bite out of it
+    labels[62:75, 62:75] = 0
+
+    shapes = seg.shape_properties(labels)
+    check(sorted(shapes) == [1, 2], f"one entry per label (got {sorted(shapes)})")
+    check(
+        set(shapes[1]) == set(seg.SHAPE_COLUMNS),
+        f"every descriptor is reported: {sorted(shapes[1])}",
+    )
+    check(
+        shapes[1]["solidity"] > shapes[2]["solidity"],
+        f"the disc is more solid than the dented square "
+        f"({shapes[1]['solidity']:.3f} vs {shapes[2]['solidity']:.3f})",
+    )
+    check(
+        shapes[1]["circularity"] > shapes[2]["circularity"],
+        f"and rounder ({shapes[1]['circularity']:.3f} vs {shapes[2]['circularity']:.3f})",
+    )
+    check(
+        shapes[1]["circularity"] <= 1.0,
+        f"circularity is capped at 1, not overshot by the digitised outline "
+        f"({shapes[1]['circularity']:.3f})",
+    )
+    check(
+        shapes[1]["eccentricity"] < 0.3,
+        f"a disc has almost no eccentricity ({shapes[1]['eccentricity']:.3f})",
+    )
+
+    # A plate mask is (1, y, x). Measured as a volume every object would be one
+    # voxel thick and its convex hull degenerate, so the axis has to come off.
+    stacked = seg.shape_properties(labels[np.newaxis])
+    check(
+        all(
+            _close(stacked[label][name], shapes[label][name])
+            for label in shapes
+            for name in ("solidity", "circularity")
+        ),
+        "a single-plane stack measures the same as the 2D image it is",
+    )
+
+
+def test_round_objects_are_filtered() -> None:
+    print("filtering out the round false positives")
+
+    if not _has_skimage():
+        print("  skip scikit-image is not installed")
+        return
+
+    labels = np.zeros((80, 80), dtype=np.int32)
+    image = np.zeros((80, 80), dtype=np.float32)
+    _disc(image, labels, (20, 20), 12, 1)
+    labels[50:75, 50:75] = 2
+    labels[62:75, 62:75] = 0
+    shapes = seg.shape_properties(labels)
+    cut = (shapes[1]["solidity"] + shapes[2]["solidity"]) / 2
+
+    dropped = seg.round_labels(shapes, cut)
+    check(dropped == [1], f"the disc is above the cut and the dented square is not ({dropped})")
+    check(
+        seg.round_labels(shapes, 1.0) == [],
+        "a cut of 1.0 drops nothing, so the shapes can be looked at before choosing one",
+    )
+
+    filtered, dropped, measured = seg.filter_round_objects(labels, cut)
+    check(int(filtered.max()) == 2, "the surviving object keeps its own label, unrenumbered")
+    check(not (filtered == 1).any(), "the dropped object is gone from the mask")
+    check((filtered == 2).sum() == (labels == 2).sum(), "the survivor is untouched")
+    check(len(measured) == 2, "the measurements of everything come back, dropped included")
+    check(seg.count_labels(filtered) == 1, "one object is left")
+    check(
+        seg.count_labels(labels) == 2 and seg.count_labels(np.zeros((4, 4), np.int32)) == 0,
+        "counting labels does not go by the highest id",
+    )
+
+    # Cellpose leaves holes in its numbering; the count has to survive them.
+    holed = np.zeros((10, 10), dtype=np.int32)
+    holed[0:3, 0:3] = 7
+    check(seg.count_labels(holed) == 1, "one object numbered 7 counts as one, not seven")
+
+
+def test_the_filter_runs_through_segment_volume() -> None:
+    print("the solidity setting reaches the run")
+
+    if not _has_skimage():
+        print("  skip scikit-image is not installed")
+        return
+
+    class _TwoShapes(_StubBackend):
+        """Returns one disc and one ragged object, whatever it is handed."""
+
+        def segment(self, image, settings, diameter_px, anisotropy, device, progress=None,
+                    channel_axis=None):
+            shape = np.asarray(image).shape
+            masks = np.zeros(shape, dtype=np.int32)
+            plane = np.zeros(shape[-2:], dtype=np.int32)
+            _disc(np.zeros(shape[-2:], dtype=np.float32), plane, (20, 20), 12, 1)
+            plane[50:75, 50:75] = 2
+            plane[62:75, 62:75] = 0
+            masks[...] = plane
+            return masks, {}
+
+    seg.register_backend(_TwoShapes())
+    image = np.zeros((80, 80), dtype=np.float32)
+
+    unfiltered = seg.segment_volume(
+        image, (1.0, 1.0), settings=seg.SegmentationSettings(backend="stub")
+    )
+    check(unfiltered.n_objects == 2, f"both objects survive with the filter off ({unfiltered.n_objects})")
+    check(not unfiltered.shapes, "and nothing is measured, so nothing is paid for")
+
+    shapes = seg.shape_properties(unfiltered.masks)
+    cut = (shapes[1]["solidity"] + shapes[2]["solidity"]) / 2
+    result = seg.segment_volume(
+        image,
+        (1.0, 1.0),
+        settings=seg.SegmentationSettings(backend="stub", max_solidity=cut),
+    )
+    check(result.n_objects == 1, f"the round one is gone ({result.n_objects} left)")
+    check(result.dropped_labels == [1], f"and is reported as dropped ({result.dropped_labels})")
+    check(result.n_dropped == 1, "the count is on the result")
+    check(
+        any("too round" in warning for warning in result.warnings),
+        f"the run says so rather than quietly losing objects: {result.warnings}",
+    )
+
+    stats = seg.object_table(result.masks, image, (1.0, 1.0), shapes=result.shapes)
+    check(len(stats) == 1, "the object table holds the survivor only")
+    check(
+        _close(stats[0].solidity, shapes[2]["solidity"]),
+        "and carries its solidity, measured once and reused",
+    )
+    row = stats[0].as_row()
+    check(
+        all(name in row for name in seg.SHAPE_COLUMNS),
+        f"the exported row carries every shape column: {sorted(row)}",
+    )
+    check(
+        "median_solidity" in seg.count_summary(stats),
+        "the summary reports the median solidity when it was measured",
+    )
+
+    plain = seg.object_table(result.masks, image, (1.0, 1.0))
+    check(
+        not np.isfinite(plain[0].solidity),
+        "without measurements the shape columns are blank rather than a made-up 0",
+    )
+
+    # A run on a single-plane stack, which is what plate data is.
+    stacked = seg.segment_volume(
+        image[np.newaxis],
+        (1.0, 1.0, 1.0),
+        settings=seg.SegmentationSettings(backend="stub", max_solidity=cut),
+    )
+    check(
+        stacked.masks.shape == (1, 80, 80) and stacked.n_objects == 1,
+        f"a (1, y, x) stack filters the same and keeps its axis ({stacked.masks.shape})",
+    )
+    seg.register_backend(_StubBackend())
 
 
 def test_physical_units() -> None:
@@ -329,6 +524,126 @@ def test_run_through_a_stub_backend() -> None:
         check("2D or 3D" in str(exc), f"a 4D array is refused with a readable message ({exc})")
 
 
+def test_broken_install_is_not_reported_as_missing() -> None:
+    """"Installed but will not import" and "not installed" need different advice."""
+    print("a backend that is installed but fails to import")
+
+    class _Broken(_StubBackend):
+        name = "broken"
+        install_hint = "pip install broken"
+
+        def available(self) -> bool:
+            return False
+
+        @staticmethod
+        def import_error():
+            return OSError("[WinError 1114] ... Error loading c10.dll")
+
+    seg.register_backend(_Broken())
+    message = seg.missing_backend_message("broken")
+    check("could not be imported" in message, f"the real failure is named ({message[:60]}…)")
+    check("c10.dll" in message, "including the error itself, so it can be searched for")
+    check("pip install broken" not in message, "and it does not tell you to install what you have")
+
+    class _Absent(_Broken):
+        name = "absent"
+
+        @staticmethod
+        def import_error():
+            return ImportError("No module named 'absent'")
+
+    seg.register_backend(_Absent())
+    check(
+        seg.missing_backend_message("absent") == "pip install broken",
+        "a genuinely missing package still gets the install hint",
+    )
+
+
+def test_torch_dll_preload() -> None:
+    """Torch's DLLs are claimed before Qt can take the process down the wrong path."""
+    print("the torch DLL preload")
+    from microscopy_viewer import runtime
+
+    result = runtime.preload_torch_libraries()
+    check(result is None or result.name == "lib", f"returns torch's lib directory or None ({result})")
+    if sys.platform == "win32" and _has_cellpose():
+        check(result is not None and result.exists(), "on Windows with torch present, it ran")
+    # Idempotent: the viewer imports the package more than once in a session.
+    check(runtime.preload_torch_libraries() == result, "calling it twice is harmless")
+
+
+def test_two_channel_run() -> None:
+    """A nuclear stain rides alongside the segmented channel, cell channel first."""
+    print("segmenting a cell channel together with a nuclear one")
+
+    stub = _StubBackend()
+    seg.register_backend(stub)
+
+    rng = np.random.default_rng(7)
+    cyto = rng.random((4, 32, 32)).astype(np.float32)
+    nuclei = rng.random((4, 32, 32)).astype(np.float32)
+    settings = seg.SegmentationSettings(backend="stub", diameter_um=5.0)
+
+    result = seg.segment_volume(cyto, (2.0, 0.5, 0.5), settings=settings, nuclei=nuclei)
+    call = stub.calls[-1]
+    check(call["channel_axis"] == 3, f"the channel axis is last and named ({call['channel_axis']})")
+    check(call["shape"] == (4, 32, 32, 2), f"both stains reach the backend ({call['shape']})")
+    check(
+        np.array_equal(call["image"][..., 0], cyto) and np.array_equal(call["image"][..., 1], nuclei),
+        "the segmented channel comes first, the nuclei second",
+    )
+    check(result.masks.shape == cyto.shape, "labels come back without the channel axis")
+    check(result.used_nuclear_channel, "the result records that two channels were used")
+
+    # Single channel is unchanged: no channel axis, purely spatial.
+    single = seg.segment_volume(cyto, (2.0, 0.5, 0.5), settings=settings)
+    check(stub.calls[-1]["channel_axis"] is None, "a one-channel run passes no channel axis")
+    check(stub.calls[-1]["shape"] == (4, 32, 32), "and hands over the spatial array alone")
+    check(not single.used_nuclear_channel, "and says so")
+
+    # A mismatched nuclear channel is reported rather than crashing the run.
+    odd = seg.segment_volume(cyto, (2.0, 0.5, 0.5), settings=settings, nuclei=nuclei[:, :16, :16])
+    check(stub.calls[-1]["channel_axis"] is None, "a mismatched nuclear channel is dropped")
+    check(
+        any("same grid" in warning for warning in odd.warnings),
+        f"and the reason is reported ({odd.warnings})",
+    )
+
+    # The pairing survives decimation, which happens before the two are stacked.
+    big = seg.SegmentationSettings(backend="stub", diameter_um=5.0, max_voxels=1_000)
+    seg.segment_volume(cyto, (2.0, 0.5, 0.5), settings=big, nuclei=nuclei)
+    call = stub.calls[-1]
+    check(
+        call["shape"][-1] == 2 and call["shape"][:3] == stub.calls[-1]["image"].shape[:3],
+        f"both channels are decimated together ({call['shape']})",
+    )
+    check(call["shape"][1] < 32, f"and really were decimated ({call['shape']})")
+
+
+def test_single_plane_stack_is_segmented_as_2d() -> None:
+    """A ``(1, y, x)`` layer is a 2D image, and must not go down the stitch path.
+
+    Plate and slide-scanner stores keep their Z axis even when it is one plane
+    deep. Handing that to Cellpose as a volume makes it stitch a degenerate
+    z-stack, which on real plate data found 16 objects where the same crop
+    segmented flat found 679.
+    """
+    print("a single-plane stack is segmented as a 2D image")
+
+    stub = _StubBackend()
+    seg.register_backend(stub)
+
+    image = np.random.default_rng(3).random((1, 40, 40)).astype(np.float32)
+    settings = seg.SegmentationSettings(backend="stub", diameter_um=5.0)
+    result = seg.segment_volume(image, (1.0, 0.5, 0.5), settings=settings)
+
+    call = stub.calls[-1]
+    check(len(call["shape"]) == 2, f"the backend is handed a 2D image ({call['shape']})")
+    check(call["diameter_px"] == 10.0, "the XY voxel size still drives the diameter")
+    check(result.masks.shape == image.shape, "the labels come back on the (1, y, x) grid")
+    check(result.voxel_size_um == (1.0, 0.5, 0.5), "the voxel size is reported in full")
+
+
 def test_decimation_inside_a_run() -> None:
     print("decimation inside a run")
 
@@ -417,6 +732,9 @@ def test_cellpose_call_shape() -> None:
 def main() -> int:
     for test in (
         test_physical_units,
+        test_shape_descriptors,
+        test_round_objects_are_filtered,
+        test_the_filter_runs_through_segment_volume,
         test_decimation_plan,
         test_object_table,
         test_table_edge_cases,
@@ -425,6 +743,10 @@ def main() -> int:
         test_model_filtering,
         test_model_choices_are_labelled,
         test_run_through_a_stub_backend,
+        test_broken_install_is_not_reported_as_missing,
+        test_torch_dll_preload,
+        test_two_channel_run,
+        test_single_plane_stack_is_segmented_as_2d,
         test_decimation_inside_a_run,
         test_gpu_request_is_reported,
         test_cellpose_call_shape,

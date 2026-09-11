@@ -223,6 +223,182 @@ def test_ome_zarr() -> None:
     check(meta.channel_names == ["GFP", "RFP"], f"channel names {meta.channel_names}")
 
 
+def test_ome_zarr_plate() -> None:
+    store = SAMPLES / "sample_plate.zarr"
+    if not store.exists():
+        print("sample_plate.zarr — skipped (not generated)")
+        return
+    print("sample_plate.zarr (HCS plate, 1x2 wells, 2 fields, 2 channels)")
+    specs = load_path(store)
+    check(len(specs) == 2, f"one layer per channel (got {len(specs)})")
+    spec = specs[0]
+    meta = spec.metadata
+    check(meta.file_format == "OME-Zarr (HCS plate)", f"format = {meta.file_format}")
+    check(spec.axes == "YX", f"channel axis split out, axes = {spec.axes}")
+    # 1 row x 2 columns of wells, each holding 2 fields side by side: 32 x (48*4).
+    check(spec.data[0].shape == (32, 192), f"mosaic shape = {spec.data[0].shape}")
+    check(spec.multiscale and len(spec.data) == 2, "two mosaic levels")
+    check(spec.data[1].shape == (16, 96), f"level 1 mosaic shape = {spec.data[1].shape}")
+    check(meta.channel_names == ["GFP", "mCherry"], f"channel names {meta.channel_names}")
+    check(close(meta.pixel_size_x_um, 0.25), f"pixel size = {meta.pixel_size_x_um}")
+    check(
+        meta.extra.get("Wells assembled") == "2 (A/1 – A/2)",
+        f"wells and plate region recorded = {meta.extra}",
+    )
+    tile = np.asarray(spec.data[0][:, :48])
+    check(tile.max() > 0, "first field carries data")
+
+
+def test_roi_layer_text_matches_the_layer_ndim() -> None:
+    """The ROI label offset must have one entry per axis, not always two.
+
+    napari indexes the text translation by displayed axis, so a two-entry offset
+    on a 3D or 4D layer raises ``IndexError: index 2 is out of bounds`` as soon as
+    a shape is drawn — the layer only has to be one plane deep to hit it.
+    """
+    print("ROI layers carry a text offset shaped like the image")
+    import microscopy_viewer.measurements as mm
+
+    class _Image:
+        def __init__(self, ndim):
+            self.ndim = ndim
+            self.name = f"{ndim}D image"
+            self.scale = tuple(1.0 for _ in range(ndim))
+            self.metadata = {"mv_axes": "TZYX"[-ndim:], "mv_channel_name": "GFP"}
+
+    class _Viewer:
+        def __init__(self):
+            self.captured = {}
+
+        def add_shapes(self, **kwargs):
+            self.captured = kwargs
+
+            class _Layer:
+                mode = ""
+                name = kwargs["name"]
+
+            return _Layer()
+
+    for ndim in (2, 3, 4):
+        viewer = _Viewer()
+        mm.new_roi_layer(viewer, _Image(ndim))
+        translation = viewer.captured["text"]["translation"]
+        check(
+            len(translation) == ndim,
+            f"{ndim}D image -> {ndim}-entry translation (got {translation})",
+        )
+        check(
+            list(translation[-2:]) == [-6.0, 0.0],
+            f"and the label is still nudged in Y/X ({translation})",
+        )
+
+
+def test_ome_zarr_acquisitions_are_channels() -> None:
+    """A 4i plate's cycles are further channels, not further places.
+
+    The images of a well are listed the same way whether they are fields of view
+    or staining cycles; only the ``acquisition`` id tells them apart. Tiling the
+    cycles the way fields are tiled would lay the same cells out side by side and
+    inflate the mosaic, so this pins the distinction down.
+    """
+    store = SAMPLES / "sample_fractal_plate.zarr"
+    if not store.exists():
+        print("sample_fractal_plate.zarr — skipped (not generated)")
+        return
+    print("sample_fractal_plate.zarr (2x2 wells, 2 cycles, 2 channels)")
+    specs = load_path(store)
+
+    check(len(specs) == 4, f"two cycles of two channels (got {len(specs)})")
+    # 2 rows x 2 columns of wells, one field each: (32*2) x (48*2). A cycle tiled
+    # as if it were a second field would double one of those.
+    check(
+        all(spec.data[0].shape == (64, 96) for spec in specs),
+        f"every cycle covers the plate once: {[spec.data[0].shape for spec in specs]}",
+    )
+    check(
+        [spec.name.split(" :: ", 1)[1] for spec in specs]
+        == ["cycle 1 :: Ab1_DAPI", "cycle 1 :: Green488-x1",
+            "cycle 2 :: Ab2_DAPI", "cycle 2 :: Green488-x2"],
+        f"the cycle is in the layer name: {[spec.name for spec in specs]}",
+    )
+    check(
+        specs[0].metadata.extra.get("Fields per well") == "1",
+        f"one field per well, not seven: {specs[0].metadata.extra.get('Fields per well')}",
+    )
+    check(
+        specs[0].metadata.extra.get("Acquisitions") == "2",
+        f"the acquisition count is recorded: {specs[0].metadata.extra.get('Acquisitions')}",
+    )
+
+    well = load_path(store / "B" / "02")
+    check(len(well) == 4, f"the well opens its 2 cycles x 2 channels (got {len(well)})")
+    check(
+        well[0].name == "B/02 :: cycle 1 :: Ab1_DAPI",
+        f"a well layer names its cycle rather than the omero placeholder: {well[0].name}",
+    )
+
+
+def test_ome_zarr_sparse_plate_is_trimmed() -> None:
+    """A 4x12 layout holding two wells assembles those two, not the whole plate."""
+    store = SAMPLES / "sample_plate_sparse.zarr"
+    if not store.exists():
+        print("sample_plate_sparse.zarr — skipped (not generated)")
+        return
+    print("sample_plate_sparse.zarr (4x12 declared, 2 wells present)")
+    specs = load_path(store)
+    spec = specs[0]
+    check(spec.data[0].shape == (32, 192), f"mosaic covers the acquired wells only {spec.data[0].shape}")
+    extra = spec.metadata.extra
+    check(extra.get("Plate layout") == "1 rows x 2 columns", f"layout = {extra.get('Plate layout')}")
+    check(
+        extra.get("Wells assembled") == "2 (A/1 – A/2)",
+        f"the assembled region is named: {extra.get('Wells assembled')}",
+    )
+
+
+def test_ome_zarr_well_and_descent() -> None:
+    """A well, a field and a plain row folder are all openable on their own."""
+    store = SAMPLES / "sample_plate.zarr"
+    if not store.exists():
+        print("sample_plate.zarr — skipped (not generated)")
+        return
+    print("sample_plate.zarr subgroups (well, field, row)")
+
+    well = load_path(store / "A" / "1")
+    check(len(well) == 4, f"well opens its 2 fields x 2 channels (got {len(well)})")
+    check(
+        well[0].name == "A/1 :: field 0 :: GFP",
+        f"well layer named by well and field, not by the store: {well[0].name}",
+    )
+    check(well[0].data[0].shape == (32, 48), f"field shape = {well[0].data[0].shape}")
+
+    field = load_path(store / "A" / "1" / "0")
+    check(len(field) == 2, f"a single field opens as its channels (got {len(field)})")
+    check(field[0].name == "sample_plate :: A/1/0 :: GFP", f"field name {field[0].name}")
+
+    # A row folder carries no NGFF metadata at all — the reader descends into it.
+    row = load_path(store / "A")
+    check(len(row) == 8, f"row folder descends to 2 wells x 2 fields x 2 channels (got {len(row)})")
+
+
+def test_bioformats2raw_series() -> None:
+    store = SAMPLES / "sample_series.zarr"
+    if not store.exists():
+        print("sample_series.zarr — skipped (not generated)")
+        return
+    print("sample_series.zarr (bioformats2raw layout, 2 series)")
+    specs = load_path(store)
+    check(len(specs) == 2, f"one layer per series (got {len(specs)})")
+    check(
+        [spec.name for spec in specs]
+        == ["sample_series :: Well 0", "sample_series :: Well 1"],
+        f"series named from METADATA.ome.xml: {[spec.name for spec in specs]}",
+    )
+    spec = specs[0]
+    check(spec.axes == "YX", f"single channel axis split out, axes = {spec.axes}")
+    check(spec.data[0].shape == (40, 56), f"series shape = {spec.data[0].shape}")
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -413,6 +589,12 @@ def main() -> int:
         test_imagej_tiff,
         test_plain_tiff,
         test_ome_zarr,
+        test_ome_zarr_plate,
+        test_ome_zarr_acquisitions_are_channels,
+        test_ome_zarr_sparse_plate_is_trimmed,
+        test_roi_layer_text_matches_the_layer_ndim,
+        test_ome_zarr_well_and_descent,
+        test_bioformats2raw_series,
         test_measurements,
         test_ellipse_and_uncalibrated,
         test_3d_line_uses_z,

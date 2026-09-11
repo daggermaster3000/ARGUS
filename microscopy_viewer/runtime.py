@@ -30,6 +30,49 @@ def app_data_dir() -> Path:
     return Path.home() / ".cache" / "MicroscopyViewer"
 
 
+def preload_torch_libraries() -> Path | None:
+    """Load torch's core DLL before Qt does, on Windows.
+
+    Importing PyQt *before* torch leaves torch unable to load its own libraries::
+
+        OSError: [WinError 1114] A dynamic link library (DLL) initialization
+        routine failed. Error loading "…\\torch\\lib\\c10.dll"
+
+    which reaches the user as "Segmentation needs the cellpose package" — cellpose
+    imports torch, the import raises, and the panel cannot tell that apart from
+    the package being absent. Claiming the DLL directory and loading ``c10.dll``
+    first is enough to avoid it, and costs milliseconds: torch itself is not
+    imported here, only its library directory registered.
+
+    Returns the directory used, or ``None`` when this does not apply.
+    """
+    if sys.platform != "win32" or not hasattr(os, "add_dll_directory"):
+        return None
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("torch")
+    except (ImportError, ValueError):  # a broken or absent install
+        return None
+    locations = list(getattr(spec, "submodule_search_locations", None) or []) if spec else []
+    if not locations:
+        return None
+
+    directory = Path(locations[0]) / "lib"
+    core = directory / "c10.dll"
+    if not core.exists():
+        return None
+    try:
+        os.add_dll_directory(str(directory))
+        import ctypes
+
+        ctypes.CDLL(str(core))
+    except OSError:
+        # Nothing is lost: this is the state the process would have been in.
+        return None
+    return directory
+
+
 def configure_numba_cache() -> Path | None:
     """Point numba's JIT cache at a writable per-user directory.
 

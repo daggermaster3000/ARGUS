@@ -194,7 +194,12 @@ class MicroscopyViewer:
         added = 0
         for spec in specs:
             try:
-                self.viewer.add_image(spec.data, **spec.to_kwargs())
+                add = (
+                    self.viewer.add_labels
+                    if spec.layer_type == "labels"
+                    else self.viewer.add_image
+                )
+                add(spec.data, **spec.to_kwargs())
                 added += 1
             except Exception as exc:
                 logger.exception("could not add layer %s", spec.name)

@@ -67,6 +67,9 @@ registration = [
 # found, so a silent fall back to the CPU is visible rather than merely slow.
 segmentation = [
     "cellpose>=3.0",
+    # Shape descriptors for the object table and the solidity filter. cellpose
+    # depends on it too, so this only pins what is already being installed.
+    "scikit-image>=0.19",
 ]
 
 [project.urls]
