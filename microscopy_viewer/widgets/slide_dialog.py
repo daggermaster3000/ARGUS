@@ -44,6 +44,25 @@ from ..utils import get_logger
 logger = get_logger("slide_dialog")
 
 
+def _format_limit(value: float) -> str:
+    """A limit as a box wants to show it: no trailing ``.0`` on whole numbers."""
+    return f"{value:g}"
+
+
+def _parse_limits(low: str, high: str) -> tuple[float, float] | None:
+    """``(low, high)`` from two typed boxes, or ``None`` if they are not usable.
+
+    Anything unparseable is treated as an empty box rather than an error: the
+    fallback is the range the channel is displayed at, which is a sane picture,
+    and a modal complaint about a half-typed number would be worse than that.
+    """
+    try:
+        pair = (float(low.strip()), float(high.strip()))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return pair if pair[1] > pair[0] else None
+
+
 class SlideExportDialog(QDialog):
     """Choose samples, name the stainings, and write the PowerPoint deck."""
 
@@ -71,6 +90,10 @@ class SlideExportDialog(QDialog):
         # typing "anti-CD31" is not undone by loading more files.
         self._labels: dict[str, str] = {}
         self._merge: dict[str, bool] = {}
+        # Typed contrast limits, one pair per channel column. Only consulted in
+        # manual mode; kept regardless, so switching modes to look at something
+        # else and back does not lose what was typed.
+        self._limits: dict[str, tuple[float, float]] = {}
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -105,9 +128,9 @@ class SlideExportDialog(QDialog):
                 "Rename it to the staining or antibody."
             )
         )
-        self._channel_table = QTableWidget(0, 3, self)
+        self._channel_table = QTableWidget(0, 5, self)
         self._channel_table.setHorizontalHeaderLabels(
-            ["Colour", "Label (staining / antibody)", "In merge"]
+            ["Colour", "Label (staining / antibody)", "In merge", "Min", "Max"]
         )
         self._channel_table.verticalHeader().setVisible(False)
         self._channel_table.setAlternatingRowColors(False)
@@ -164,6 +187,17 @@ class SlideExportDialog(QDialog):
             if tick is not None:
                 self._merge[key] = tick.checkState() == Qt.Checked
 
+            low = self._channel_table.item(row, 3)
+            high = self._channel_table.item(row, 4)
+            pair = _parse_limits(
+                low.text() if low is not None else "",
+                high.text() if high is not None else "",
+            )
+            if pair is None:
+                self._limits.pop(key, None)
+            else:
+                self._limits[key] = pair
+
     def _fill_sample_table(self) -> None:
         table = self._sample_table
         table.setRowCount(len(self._samples))
@@ -186,6 +220,10 @@ class SlideExportDialog(QDialog):
 
     def _fill_channel_table(self) -> None:
         table = self._channel_table
+        # The limit cells are only editable in manual mode: greyed out they say
+        # the numbers exist and what the mode does, which an empty column does not.
+        combo = getattr(self, "_contrast", None)
+        manual = combo is not None and combo.currentText() == slides.CONTRAST_MANUAL
         table.setRowCount(len(self._columns))
         for row, (key, label, color) in enumerate(self._columns):
             swatch = QTableWidgetItem("")
@@ -202,8 +240,25 @@ class SlideExportDialog(QDialog):
             tick.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             tick.setCheckState(Qt.Checked if self._merge.get(key, True) else Qt.Unchecked)
             table.setItem(row, 2, tick)
+
+            pair = self._limits.get(key)
+            for column, value in ((3, pair[0] if pair else None), (4, pair[1] if pair else None)):
+                cell = QTableWidgetItem("" if value is None else _format_limit(value))
+                cell.setFlags(
+                    Qt.ItemIsEnabled | Qt.ItemIsEditable | Qt.ItemIsSelectable
+                    if manual
+                    else Qt.NoItemFlags
+                )
+                cell.setToolTip(
+                    "Intensity mapped to black (Min) and to full colour (Max).\n"
+                    "Applied to this channel on every sample in the deck.\n"
+                    "Leave empty to keep the range the channel is displayed at."
+                )
+                table.setItem(row, column, cell)
         table.resizeColumnToContents(0)
         table.resizeColumnToContents(2)
+        table.resizeColumnToContents(3)
+        table.resizeColumnToContents(4)
 
     def _merge_default(self, key: str) -> bool:
         """Whether this channel starts out included in the merge."""
@@ -235,8 +290,11 @@ class SlideExportDialog(QDialog):
         )
         self._contrast.setToolTip(
             "As displayed: the layer's current contrast limits.\n"
-            "Auto per image: the 0.5–99.5 percentile of each projected image."
+            "Auto per image: the 0.5–99.5 percentile of each projected image.\n"
+            "Manual limits: the Min and Max typed into the channel table above,\n"
+            "one pair per channel, used for every sample in the deck."
         )
+        self._contrast.currentTextChanged.connect(self._on_contrast_changed)
         form.addRow("Contrast", self._contrast)
 
         row = QHBoxLayout()
@@ -276,6 +334,17 @@ class SlideExportDialog(QDialog):
         self._overview_slide.stateChanged.connect(self._update_summary)
         form.addRow("Overview", self._overview_slide)
 
+        self._zoom_slides = QCheckBox("Show each closeup beside the field it was taken from")
+        self._zoom_slides.setToolTip(
+            "A dataset acquired inside the field of another one — a 40x taken from a 20x —\n"
+            "gets its own slide: that field on the left with a box around the part the\n"
+            "closeup covers, and the closeup's channels beside it. The pairing comes from\n"
+            "the stage coordinates. A sample nothing else contains is shown on the overview."
+        )
+        self._zoom_slides.setChecked(True)
+        self._zoom_slides.stateChanged.connect(self._update_summary)
+        form.addRow("Closeups", self._zoom_slides)
+
         return form
 
     def _update_summary(self) -> None:
@@ -302,6 +371,16 @@ class SlideExportDialog(QDialog):
             # Nothing to stitch: leave the tick visible but inert rather than
             # hiding it, so its absence is not mistaken for the feature missing.
             self._overview_slide.setEnabled(False)
+
+        # Counted from the stage coordinates, which are already in hand: nothing
+        # is read or stitched to say how long the deck will be.
+        if self._zoom_slides.isChecked():
+            chosen = [sample for sample, ok in zip(self._samples, self._included) if ok]
+            tiles = self._overview if self._overview_slide.isChecked() else ()
+            pairs = slides.find_closeups(chosen, tiles=tiles)
+            if pairs:
+                deck += len(pairs)
+                note += f" {len(pairs)} closeup slide(s)."
         self._status.setText(
             f"{count} sample(s) x {len(self._columns)} channel(s) "
             f"→ {deck} slide(s) at {per_slide} per slide.{note}"
@@ -381,9 +460,29 @@ class SlideExportDialog(QDialog):
             chosen.append(sample)
         return chosen
 
+    def _on_contrast_changed(self, mode: str) -> None:
+        """Enable the limit cells for manual mode, seeding them the first time.
+
+        Seeded from what each channel is displayed at, because that is a range
+        somebody has already looked at — a pair of empty boxes is a worse start
+        than a pair of numbers to nudge.
+        """
+        self._harvest()
+        if mode == slides.CONTRAST_MANUAL and not self._limits:
+            self._limits = slides.suggested_limits(self._samples)
+        self._fill_channel_table()
+        self._update_summary()
+
     def labels(self) -> dict[str, str]:
         self._harvest()
         return dict(self._labels)
+
+    def contrast_limits(self) -> dict[str, tuple[float, float]]:
+        """The typed limits, or nothing at all outside manual mode."""
+        self._harvest()
+        if self._contrast.currentText() != slides.CONTRAST_MANUAL:
+            return {}
+        return dict(self._limits)
 
     def merge_keys(self) -> list[str]:
         self._harvest()
@@ -401,6 +500,9 @@ class SlideExportDialog(QDialog):
         # all that is needed for the coloured column titles to follow.
         slides.apply_labels(chosen, self.labels())
         slides.apply_merge_selection(chosen, self.merge_keys())
+        # Cleared rather than skipped outside manual mode: the samples are the
+        # dialog's own objects and may carry limits from an earlier export.
+        slides.apply_contrast_limits(chosen, self.contrast_limits())
 
         directory = self._last_directory or Path.home()
         suggested = str(Path(directory) / f"{slides.default_stem()}.pptx")
@@ -429,6 +531,7 @@ class SlideExportDialog(QDialog):
                 contrast=self._contrast.currentText(),
                 rows_per_slide=int(self._rows_per_slide.value()),
                 overview_tiles=self._overview if self._overview_slide.isChecked() else (),
+                zoom_slides=self._zoom_slides.isChecked(),
                 progress=self._on_progress,
                 should_cancel=lambda: self._cancelled,
             )
@@ -468,9 +571,9 @@ class SlideExportDialog(QDialog):
 
     def _on_progress(self, index: int, total: int, name: str) -> None:
         # A negative index is work that is not one of the numbered samples — the
-        # overview, which is stitched before the first row is rendered.
+        # overview, or a closeup slide. Those pass a phrase rather than a name.
         if index < 0:
-            self._status.setText(f"Stitching the {name}…")
+            self._status.setText(f"{name}…")
         else:
             self._status.setText(f"Rendering {index + 1} of {total}: {name}…")
         application = QApplication.instance()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from .utils import MICRON, get_logger, setup_logging
 
@@ -56,19 +56,32 @@ class MicroscopyViewer:
     and the drag-and-drop filter.
     """
 
-    def __init__(self, show: bool = True, suppress_plugin_warning: bool = True):
+    def __init__(
+        self,
+        show: bool = True,
+        suppress_plugin_warning: bool = True,
+        progress: Callable[[str], None] | None = None,
+    ):
         import napari
 
+        # Called at each step of the build. It is what puts the panel currently
+        # being made onto the splash, and it is also what lets the splash paint:
+        # none of this returns to the event loop on its own.
+        self._progress = progress or (lambda _message: None)
+
         setup_logging()
+        self._progress("Starting napari…")
         if suppress_plugin_warning:
             suppress_shimmed_plugin_dialog()
         self.viewer = napari.Viewer(title=WINDOW_TITLE, show=show)
         self.last_directory: Path | None = None
         self._metadata_dock = None
         self._load_errors: list[str] = []
+        #: Set by :func:`launch` when it is watching for freezes; ``None`` otherwise.
+        self.busy_watchdog = None
 
         self.viewer.scale_bar.visible = True
-        self.viewer.scale_bar.unit = "px"
+        self._set_scale_bar_unit("px")
         self.viewer.scale_bar.colored = False
 
         self._build_docks()
@@ -85,6 +98,7 @@ class MicroscopyViewer:
         # It writes its cached arrays back into the same ``mv_pyramid`` list the
         # depth manager restores from, so a trip through 3D keeps them.
         self.timeline_manager = TimelineManager(self.viewer, on_status=self.toolbar.set_status)
+        self._progress("Ready")
 
     # -- construction ---------------------------------------------------------
 
@@ -98,6 +112,7 @@ class MicroscopyViewer:
         from .widgets import ViewerToolbar
         from .widgets.registry import iter_panels
 
+        self._progress("Building the toolbar…")
         self.toolbar = ViewerToolbar(self)
         self.viewer.window.add_dock_widget(
             self.toolbar, name="Tools", area="top", tabify=False
@@ -115,6 +130,9 @@ class MicroscopyViewer:
 
         for spec in specs:
             try:
+                # Panels are where the wait is: one of them importing torch or
+                # cellpose is seconds on its own, so each is named as it is built.
+                self._progress(f"Building the {spec.title} panel…")
                 widget = spec.factory(self)
                 dock = self.viewer.window.add_dock_widget(
                     widget, name=spec.title, area=spec.area, **spec.dock_kwargs
@@ -147,6 +165,26 @@ class MicroscopyViewer:
                 target.raise_()  # keep the original panel in front
             except Exception:
                 logger.debug("could not tabify %s", spec.identifier, exc_info=True)
+
+    def _set_scale_bar_unit(self, unit: str) -> None:
+        """Tell the scale bar what a world unit is, on whichever napari this is.
+
+        Up to napari 0.6 the overlay carried its own ``unit``. From 0.8 it has no
+        such field: the bar reads ``layer.units`` instead, which the readers now
+        supply through :class:`~microscopy_viewer.loaders.layer_spec.LayerSpec`.
+        Setting the old attribute anyway would either raise or, worse, silently
+        stick an ignored value on the model, so it is only set where it is real.
+        """
+        scale_bar = self.viewer.scale_bar
+        fields = getattr(type(scale_bar), "model_fields", None) or getattr(
+            type(scale_bar), "__fields__", {}
+        )
+        if "unit" not in fields:
+            return
+        try:
+            scale_bar.unit = unit
+        except Exception:  # pragma: no cover - napari API drift
+            logger.debug("could not set the scale bar unit", exc_info=True)
 
     def _bind_shortcuts(self) -> None:
         """Keyboard equivalents for the toolbar buttons."""
@@ -223,7 +261,7 @@ class MicroscopyViewer:
             self.viewer.dims.axis_labels = tuple(widest.axes)
 
         calibrated = any(spec.metadata.is_calibrated for spec in specs)
-        self.viewer.scale_bar.unit = MICRON if calibrated else "px"
+        self._set_scale_bar_unit(MICRON if calibrated else "px")
 
         # New layers arrive as full pyramids; if the viewer is already in 3D they
         # need collapsing to a single level straight away.
@@ -241,6 +279,17 @@ class MicroscopyViewer:
         self.measurements_widget.refresh_layer_list()
         if self.timeseries_widget is not None:
             self.timeseries_widget.refresh()
+
+        # Brain regions are stored inside the .ims they were drawn on, so opening
+        # that sample again should put them back on the canvas. Done here rather
+        # than off the layer-inserted event because that fires once per channel,
+        # and this needs the file list exactly once per open.
+        regions = getattr(self, "regions_widget", None)
+        if regions is not None:
+            try:
+                regions.on_files_opened(specs)
+            except Exception:
+                logger.exception("could not restore the stored brain regions")
 
     # -- panels ---------------------------------------------------------------
 
@@ -301,17 +350,64 @@ def launch(
     paths: Sequence[str | Path] = (),
     block: bool = True,
     suppress_plugin_warning: bool = True,
+    splash: bool = True,
+    busy_overlay: bool = True,
 ) -> MicroscopyViewer:
     """Create the viewer, open any given paths, and optionally run the Qt loop.
 
     ``block=False`` is used by tests and by interactive sessions that already
     have an event loop running.
+
+    With *splash* the main window stays hidden until it is built and the loading
+    animation is shown in its place, because napari otherwise puts an empty white
+    window on screen for the whole of the build. If the splash cannot be made the
+    window opens straight away as before, so nothing depends on it.
+
+    *busy_overlay* keeps watching after that: whenever the main thread stops
+    responding for longer than :data:`microscopy_viewer.busy.BUSY_AFTER_S`, the
+    same animation is put over the window by a second process until it comes back.
+    See :mod:`microscopy_viewer.busy` for why that has to be another process.
     """
     import napari
+    from napari.qt import get_qapp
+    from qtpy.QtWidgets import QApplication
 
-    app = MicroscopyViewer(suppress_plugin_warning=suppress_plugin_warning)
+    from .splash import start as start_splash
+
+    banner = None
+    if splash:
+        # The splash needs a QApplication, and napari's is the one the viewer
+        # will run on: made here rather than by ``napari.Viewer`` a moment later.
+        get_qapp()
+        banner = start_splash(WINDOW_TITLE)
+
+    app = MicroscopyViewer(
+        show=banner is None,
+        suppress_plugin_warning=suppress_plugin_warning,
+        progress=banner.pump if banner is not None else None,
+    )
     if paths:
+        if banner is not None:
+            banner.pump(f"Opening {len(paths)} file(s)…")
         app.open_paths(paths)
+    if banner is not None:
+        # Shown only now, with everything on it: the point of the splash is that
+        # nobody watches an empty window being filled in.
+        app.viewer.window.show()
+        banner.finish(getattr(app.viewer.window, "_qt_window", None))
+    if busy_overlay:
+        from . import busy
+
+        window = getattr(app.viewer.window, "_qt_window", None)
+        app.busy_watchdog = busy.start(window)
+        if app.busy_watchdog is not None:
+            # Stopping it on quit closes the child process politely; the child
+            # also exits by itself when our stdin pipe dies, so a crash still
+            # cleans up.
+            application = QApplication.instance()
+            if application is not None:
+                application.aboutToQuit.connect(app.busy_watchdog.stop)
+
     if block:
         napari.run()
     return app

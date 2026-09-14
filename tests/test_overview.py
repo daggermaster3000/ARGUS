@@ -53,7 +53,9 @@ def _tile_sample(index: int, plane: np.ndarray | None = None) -> slides.SampleSl
     )
 
 
-def _acquisition(name: str, x: float, y: float, size: float = 120.0) -> slides.SampleSlide:
+def _acquisition(
+    name: str, x: float, y: float, size: float = 120.0, objective: str = ""
+) -> slides.SampleSlide:
     """A z-stack sample centred on a stage position."""
     rng = np.random.default_rng(abs(hash(name)) % 1000)
     channels = [
@@ -67,6 +69,7 @@ def _acquisition(name: str, x: float, y: float, size: float = 120.0) -> slides.S
     return slides.SampleSlide(
         name=name, channels=channels, pixel_size_um=0.6, source=f"C:/data/{name}.ims",
         stage_extent=(x - size / 2, x + size / 2, y - size / 2, y + size / 2, 0.0, 50.0),
+        objective=objective,
     )
 
 
@@ -219,9 +222,11 @@ def test_overview_slide() -> None:
     samples = [_acquisition("fish_1", 800, 700), _acquisition("fish_2", 1500, 1200)]
 
     with tempfile.TemporaryDirectory() as directory:
+        # Closeups off: this test is about the locator slide, and with an overview
+        # to sit against every sample here would get one of its own as well.
         path = slides.export_slide(
             samples, Path(directory) / "deck.pptx", title="Fish", max_pixels=32,
-            overview_tiles=tiles, overview_pixels=300,
+            overview_tiles=tiles, overview_pixels=300, zoom_slides=False,
         )
         presentation = Presentation(str(path))
         check(len(presentation.slides) == 2, f"the overview leads the deck ({len(presentation.slides)})")
@@ -287,6 +292,115 @@ def test_stitch_failures_are_survivable() -> None:
     check(len(found) == 2, "the fixtures themselves still detect as an overview")
 
 
+def test_closeup_detection() -> None:
+    print("a closeup is paired with the field it was taken from")
+    wide = _acquisition("fish_1 10x", 800, 700, size=1200, objective="10x")
+    middle = _acquisition("fish_1 20x", 800, 700, size=600, objective="20x")
+    tight = _acquisition("fish_1 40x", 700, 620, size=300, objective="40x")
+    elsewhere = _acquisition("fish_2 20x", 1500, 1200, size=600, objective="20x")
+
+    order = [wide, middle, tight, elsewhere]
+    pairs = {pair.child.name: pair for pair in ov.closeups(order)}
+    check(pairs["fish_1 40x"].parent is middle, "the 40x is shown against the 20x, not the 10x")
+    check(pairs["fish_1 20x"].parent is wide, "and the 20x against the 10x")
+    check("fish_1 10x" not in pairs, "nothing contains the 10x, so it has no context")
+    check("fish_2 20x" not in pairs, "a field somewhere else is not a closeup of anything")
+
+    # Two acquisitions of the same field contain each other; neither is a closeup.
+    twin = _acquisition("fish_1 20x again", 800, 700, size=600, objective="20x")
+    again = {pair.child.name for pair in ov.closeups([middle, twin])}
+    check(not again, f"same-sized fields do not pair with each other ({again})")
+
+    # The stage repeats to a few micrometres, so a closeup may sit a hair over the
+    # edge of the field it was picked from and still have come from it.
+    over = _acquisition("fish_1 40x edge", 800 + 155, 700, size=300, objective="40x")
+    edged = {pair.child.name for pair in ov.closeups([middle, over])}
+    check("fish_1 40x edge" in edged, f"a few µm of overhang is still a closeup ({edged})")
+    far = _acquisition("fish_1 40x off", 800 + 300, 700, size=300, objective="40x")
+    check(not ov.closeups([middle, far]), "half outside the field is not")
+
+    # With an overview to fall back on, a sample nothing contains gets a window of
+    # it rather than nothing: smaller than the mosaic, and centred on the sample.
+    covered = ov.Box(0, 12000, 0, 12000)
+    fallback = {pair.child.name: pair for pair in ov.closeups(order, covered)}
+    lonely = fallback["fish_1 10x"]
+    check(lonely.parent is None, "the overview stands in when no sample contains a field")
+    check(lonely.on_overview, "and says so")
+    window = lonely.parent_box
+    check(window.width < covered.width, f"the window is a part of the overview ({window.width:.0f} µm)")
+    check(window.contains(lonely.box), "and it holds the sample it is a window on")
+    check(covered.contains(window), f"without running off it ({window.x0:.0f}-{window.x1:.0f} µm)")
+
+    # The box drawn on the context has to land where the stage says it was.
+    left, top, width, height = ov.fractions_within(
+        pairs["fish_1 40x"].box, pairs["fish_1 40x"].parent_box
+    )
+    check(
+        abs(width - 0.5) < 1e-6 and abs(height - 0.5) < 1e-6,
+        f"a 300 µm field is half of a 600 µm one ({width:.3f} x {height:.3f})",
+    )
+    check(
+        abs(left - 50 / 600) < 1e-6 and abs(top - 70 / 600) < 1e-6,
+        f"and it sits where it was imaged ({left:.3f}, {top:.3f})",
+    )
+
+
+def test_closeup_slide() -> None:
+    print("the closeup slide")
+    try:
+        from pptx import Presentation
+    except ImportError:
+        print("  skip python-pptx is not installed")
+        return
+
+    wide = _acquisition("fish_1 10x", 800, 700, size=1200, objective="10x")
+    tight = _acquisition("fish_1 40x", 700, 620, size=300, objective="40x")
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = slides.export_slide(
+            [wide, tight], Path(directory) / "deck.pptx", title="Fish", max_pixels=32
+        )
+        presentation = Presentation(str(path))
+        check(
+            len(presentation.slides) == 2,
+            f"the table, then one closeup slide ({len(presentation.slides)})",
+        )
+
+        last = presentation.slides[-1]
+        text = " ".join(shape.text_frame.text for shape in last.shapes if shape.has_text_frame)
+        check("fish_1 40x" in text and "inside" in text, f"the slide names both ({text[:70]!r})")
+        check("10x" in text and "40x" in text, "both magnifications are stated")
+        check("X 0.70, Y 0.62 mm" in text, f"so is the stage position ({text[-90:]!r})")
+
+        pictures = [shape for shape in last.shapes if shape.shape_type == 13]
+        # The context, plus the closeup's two channels and their merge.
+        check(len(pictures) == 4, f"the context and the closeup's panels ({len(pictures)})")
+
+        outlines = [shape for shape in last.shapes if shape.shape_type == 1]
+        check(len(outlines) == 1, f"one region box ({len(outlines)})")
+
+        context = min(pictures, key=lambda shape: shape.left)
+        box = outlines[0]
+        inside = (
+            context.left <= box.left and box.left + box.width <= context.left + context.width
+            and context.top <= box.top and box.top + box.height <= context.top + context.height
+        )
+        check(inside, "the box sits on the context picture")
+        # The 40x was taken up and left of the 10x centre, and the box has to
+        # follow that or it is decoration rather than a locator.
+        check(
+            box.left + box.width / 2 < context.left + context.width / 2,
+            "on the side of it the closeup came from",
+        )
+
+    # Turned off, the deck is what it was before any of this existed.
+    with tempfile.TemporaryDirectory() as directory:
+        plain = slides.export_slide(
+            [wide, tight], Path(directory) / "plain.pptx", max_pixels=32, zoom_slides=False
+        )
+        check(len(Presentation(str(plain)).slides) == 1, "no closeup slides when they are not asked for")
+
+
 def main() -> int:
     for test in (
         test_detection,
@@ -295,6 +409,8 @@ def main() -> int:
         test_overlap_blends,
         test_canvas_covers_outside_samples,
         test_overview_slide,
+        test_closeup_detection,
+        test_closeup_slide,
         test_stitch_failures_are_survivable,
     ):
         test()

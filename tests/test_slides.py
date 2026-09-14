@@ -342,6 +342,59 @@ def test_auto_contrast_mode() -> None:
     check(flat == (0.0, 0.0), "a constant image gives a degenerate range, handled downstream")
 
 
+def test_manual_contrast() -> None:
+    print("typed contrast limits")
+    data = np.zeros((1, 20, 20), dtype=np.uint16)
+    data[0, 5, 5] = 200
+    data[0, 6, 6] = 400
+    channel = slides.ChannelView(
+        label="Ch0", color=(0, 1, 0), layer_name="L", data=data, axes="ZYX",
+        contrast_limits=(0.0, 800.0), channel_index=0,
+    )
+    sample = slides.SampleSlide(name="A", channels=[channel])
+
+    # Nothing typed: manual mode is the displayed range, not a black picture.
+    plain, _ = slides.normalized_plane(channel, "Maximum projection", None, slides.CONTRAST_MANUAL)
+    check(abs(float(plain[6, 6]) - 0.5) < 1e-6, f"an untyped channel keeps its own limits ({plain[6, 6]:.2f})")
+
+    slides.apply_contrast_limits([sample], {"0": (0.0, 400.0)})
+    typed, _ = slides.normalized_plane(channel, "Maximum projection", None, slides.CONTRAST_MANUAL)
+    check(float(typed[6, 6]) == 1.0, "the typed maximum is full brightness")
+    check(abs(float(typed[5, 5]) - 0.5) < 1e-6, f"and everything scales to it ({typed[5, 5]:.2f})")
+
+    # A floor lifts the black point: 200 sits at the bottom of a 200-400 range.
+    slides.apply_contrast_limits([sample], {"0": (200.0, 400.0)})
+    floored, _ = slides.normalized_plane(channel, "Maximum projection", None, slides.CONTRAST_MANUAL)
+    check(float(floored[5, 5]) == 0.0, "the typed minimum is black")
+    check(float(floored[6, 6]) == 1.0, "and the typed maximum is still white")
+
+    # The other modes are untouched by anything typed.
+    displayed, _ = slides.normalized_plane(channel, "Maximum projection", None, slides.CONTRAST_AS_DISPLAYED)
+    check(abs(float(displayed[6, 6]) - 0.5) < 1e-6, "as displayed ignores the typed limits")
+
+    # Keyed by column, so one pair covers the same stain on every sample.
+    second = _sample(name="Sample B", n_channels=2)
+    slides.apply_contrast_limits([sample, second], {"0": (0.0, 400.0), "1": (0.0, 100.0)})
+    reached = [c.export_limits for c in second.channels]
+    check(reached == [(0.0, 400.0), (0.0, 100.0)], f"every sample in the column gets them ({reached})")
+
+    # Clearing is what the dialog does when the mode is not manual.
+    slides.apply_contrast_limits([sample, second], {})
+    check(
+        all(c.export_limits is None for c in sample.channels + second.channels),
+        "an empty mapping clears what an earlier export set",
+    )
+
+    # The dialog seeds its boxes from the range each column is displayed at.
+    suggested = slides.suggested_limits([second])
+    check(suggested.get("0") == (0.0, 1000.0), f"suggested limits come from the channels ({suggested})")
+    blank = slides.SampleSlide(
+        name="C",
+        channels=[slides.ChannelView(label="x", color=(1, 1, 1), layer_name="x", data=data, channel_index=7)],
+    )
+    check("7" not in slides.suggested_limits([blank]), "a channel with no recorded range suggests nothing")
+
+
 def test_multiple_slides() -> None:
     print("a folder is split across slides")
     try:
@@ -497,6 +550,7 @@ def main() -> int:
         test_scale_bar,
         test_columns_and_labels,
         test_auto_contrast_mode,
+        test_manual_contrast,
         test_pptx_output,
         test_multiple_slides,
         test_cancellation,

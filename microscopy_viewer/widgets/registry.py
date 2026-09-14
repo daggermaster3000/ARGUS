@@ -96,6 +96,20 @@ def _register_builtin_panels() -> None:
 
         return SegmentationWidget(app.viewer)
 
+    def _regions(app):
+        from .regions_widget import RegionsWidget
+
+        # Takes the app: saving regions into a sample's .ims has to close and
+        # reopen that sample, which goes through ``open_paths``.
+        return RegionsWidget(app)
+
+    def _experiment(app):
+        from .experiment_widget import ExperimentWidget
+
+        # Takes the app: opening a sample goes through ``open_paths`` and the
+        # batch run borrows the segmentation panel's settings.
+        return ExperimentWidget(app)
+
     def _timeseries(app):
         from .timeseries_widget import TimeSeriesWidget
 
@@ -161,6 +175,29 @@ def _register_builtin_panels() -> None:
             attribute="segmentation_widget",
             tabify_with="intensity_comparison",
             order=50,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="regions",
+            title="Brain regions",
+            factory=_regions,
+            attribute="regions_widget",
+            tabify_with="intensity_comparison",
+            order=60,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="experiment",
+            title="Experiment setup",
+            factory=_experiment,
+            attribute="experiment_widget",
+            # Its own dock rather than another tab on the right: the thumbnail
+            # grid is the one panel that wants width, and it is where a session
+            # starts rather than something consulted mid-analysis.
+            area="left",
+            order=5,
         )
     )
 

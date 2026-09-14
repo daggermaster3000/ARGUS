@@ -88,8 +88,11 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
     except OSError:
         pass
 
-    # pythonw.exe has no usable stderr; only add a stream handler when one exists.
-    if sys.stderr is not None:
+    # pythonw.exe has no usable stderr. runtime.ensure_std_streams may have put a
+    # null sink there so third-party code can write; that is not worth a handler.
+    from .runtime import NULL_SINK_FLAG
+
+    if sys.stderr is not None and not getattr(sys.stderr, NULL_SINK_FLAG, False):
         stream = logging.StreamHandler(sys.stderr)
         stream.setFormatter(fmt)
         logger.addHandler(stream)

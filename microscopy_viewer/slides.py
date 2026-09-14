@@ -21,7 +21,7 @@ from __future__ import annotations
 import datetime as _dt
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -45,7 +45,11 @@ DEFAULT_MAX_PIXELS = 900
 #: How contrast is decided per channel.
 CONTRAST_AS_DISPLAYED = "As displayed"
 CONTRAST_AUTO = "Auto per image"
-CONTRAST_MODES = (CONTRAST_AS_DISPLAYED, CONTRAST_AUTO)
+#: Limits typed into the export dialog, one pair per channel column, applied to
+#: every sample in that column. What a figure usually wants: the same range on
+#: every panel of a row, so two samples can honestly be compared by eye.
+CONTRAST_MANUAL = "Manual limits"
+CONTRAST_MODES = (CONTRAST_AS_DISPLAYED, CONTRAST_AUTO, CONTRAST_MANUAL)
 
 #: Rows per slide. Four leaves each panel about 1.5 in tall on a 16:9 slide,
 #: which is still legible projected; more than that and the images stop being
@@ -78,6 +82,9 @@ class ChannelView:
     data: Any
     axes: str = ""
     contrast_limits: tuple[float, float] | None = None
+    #: Limits typed for the export, overriding both the layer's and the file's
+    #: when the contrast mode is :data:`CONTRAST_MANUAL`. ``None`` falls back.
+    export_limits: tuple[float, float] | None = None
     #: A napari ``Colormap``; when absent the colour is used as a black-to-colour ramp.
     colormap: Any = None
     current_step: tuple[int, ...] = ()
@@ -131,8 +138,11 @@ class SampleSlide:
     pixel_size_um: float | None = None
     source: str = ""
     #: Where on the stage this dataset was imaged, ``(x0, x1, y0, y1, z0, z1)`` in
-    #: µm, when the file recorded it. Drives the overview slide and nothing else.
+    #: µm, when the file recorded it. Drives the overview and closeup slides.
     stage_extent: tuple[float, float, float, float, float, float] | None = None
+    #: Objective as the file names it, "20x" typically. Caption only: the closeup
+    #: slides are worked out from the stage coordinates, never from this.
+    objective: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +243,14 @@ def normalized_plane(
     plane, description = ix.extract_plane(_condition(channel, channel.data if data is None else data), mode)
     plane = np.asarray(plane, dtype=np.float32)
 
-    limits = None if contrast == CONTRAST_AUTO else channel.contrast_limits
+    if contrast == CONTRAST_AUTO:
+        limits = None
+    elif contrast == CONTRAST_MANUAL:
+        # Typed limits win; a channel nobody typed anything for keeps the range it
+        # was displayed at, so half-filling the table is a usable thing to do.
+        limits = channel.export_limits or channel.contrast_limits
+    else:
+        limits = channel.contrast_limits
     if limits is None:
         # No limits to honour — either the caller asked for auto, or the file
         # never recorded a display range. Percentiles either way, so a single hot
@@ -451,6 +468,7 @@ def collect_samples(viewer, visible_only: bool = False) -> list[SampleSlide]:
                 pixel_size_um=pixel,
                 source=source,
                 stage_extent=getattr(meta, "stage_extent", None) if meta is not None else None,
+                objective=str(getattr(meta, "objective", "") or "") if meta is not None else "",
             )
             samples[key] = sample
             order.append(key)
@@ -534,6 +552,7 @@ def samples_from_paths(paths: Sequence[str | Path]) -> tuple[list[SampleSlide], 
                 pixel_size_um=getattr(meta, "pixel_size_x_um", None),
                 source=source,
                 stage_extent=getattr(meta, "stage_extent", None),
+                objective=str(getattr(meta, "objective", "") or ""),
             )
             samples[key] = sample
             order.append(key)
@@ -590,6 +609,40 @@ def apply_labels(samples: Iterable[SampleSlide], labels: dict[str, str]) -> None
             text = labels.get(channel.key)
             if text:
                 channel.label = text
+
+
+def apply_contrast_limits(
+    samples: Iterable[SampleSlide], limits: Mapping[str, tuple[float, float] | None]
+) -> None:
+    """Set the typed export limits, keyed by channel column.
+
+    Keyed by column rather than by layer because that is what makes a figure
+    readable: one range per stain, held across every sample in the deck. A key
+    mapped to ``None``, or missing, leaves that channel to fall back.
+    """
+    for sample in samples:
+        for channel in sample.channels:
+            pair = limits.get(channel.key)
+            channel.export_limits = (float(pair[0]), float(pair[1])) if pair else None
+
+
+def suggested_limits(samples: Sequence[SampleSlide]) -> dict[str, tuple[float, float]]:
+    """A starting pair per channel column: what that column is displayed at now.
+
+    Only the first sample that carries limits for a column is consulted — they are
+    the same stain, and a dialog needs a number to put in the box, not a survey.
+    Columns nobody recorded a range for are absent, which the dialog shows as an
+    empty cell meaning "leave it alone".
+    """
+    out: dict[str, tuple[float, float]] = {}
+    for sample in samples:
+        for channel in sample.channels:
+            if channel.key in out:
+                continue
+            pair = channel.export_limits or channel.contrast_limits
+            if pair and float(pair[1]) > float(pair[0]):
+                out[channel.key] = (float(pair[0]), float(pair[1]))
+    return out
 
 
 def apply_merge_selection(samples: Iterable[SampleSlide], keys: Iterable[str]) -> None:
@@ -669,6 +722,43 @@ def build_mosaic(
     return ov.stitch(prepared, max_pixels=max_pixels, include=footprints)
 
 
+# ---------------------------------------------------------------------------
+# Closeups
+# ---------------------------------------------------------------------------
+
+
+def find_closeups(
+    samples: Sequence[SampleSlide],
+    mosaic: ov.Mosaic | None = None,
+    tiles: Sequence[SampleSlide] = (),
+) -> list[ov.Closeup]:
+    """Which samples were imaged inside the field of a lower-magnification one.
+
+    Worked out from the stage coordinates alone — the objective a file names is
+    never consulted, because a 20x and a 40x of the same field are told apart by
+    how much stage they cover, and that is recorded even when the objective is
+    not. *mosaic* lets a sample nothing else contains be shown against the
+    overview instead of being left without a context; *tiles* answers the same
+    question from the fields' coordinates alone, which is how a dialog can count
+    the slides before anything has been stitched.
+    """
+    covered = mosaic.covered if mosaic is not None else ov.union(
+        box for box in (ov.box_from_extent(tile.stage_extent) for tile in tiles) if box is not None
+    )
+    return ov.closeups(list(samples), covered)
+
+
+def field_label(sample: SampleSlide, box: ov.Box | None = None) -> str:
+    """How to name a field on a closeup slide: ``"20x · 621 µm"``."""
+    box = box if box is not None else ov.box_from_extent(sample.stage_extent)
+    parts = []
+    if getattr(sample, "objective", ""):
+        parts.append(str(sample.objective))
+    if box is not None and box.width > 0:
+        parts.append(f"{box.width:.0f} µm")
+    return " · ".join(parts)
+
+
 def default_stem() -> str:
     return f"figure_slide_{_dt.datetime.now():%Y%m%d_%H%M%S}"
 
@@ -698,6 +788,16 @@ _MIN_MARKER_IN = 0.11
 #: Marker red. Dark enough to read on the pale background of a brightfield
 #: overview, and nothing in a fluorescence panel is this colour.
 _MARKER_RGB = (0xC0, 0x20, 0x20)
+
+#: Width of the context field on a closeup slide. Just over a third of the slide:
+#: wide enough that the region box is a shape rather than a dot, and what is left
+#: still holds the closeup's own channels at a size worth looking at.
+_CONTEXT_COLUMN_IN = 4.9
+#: Smallest the region box is drawn. A 40x field inside a 10x one is a twentieth
+#: of the picture, which at this width is about a tenth of an inch.
+_MIN_REGION_IN = 0.09
+#: Height reserved under a picture for its caption.
+_CAPTION_IN = 0.22
 
 
 def _png_bytes(image: np.ndarray):
@@ -772,6 +872,7 @@ def export_slide(
     rows_per_slide: int = DEFAULT_ROWS_PER_SLIDE,
     overview_tiles: Sequence[SampleSlide] = (),
     overview_pixels: int = ov.DEFAULT_MAX_PIXELS,
+    zoom_slides: bool = True,
     progress: Callable[[int, int, str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> Path:
@@ -786,6 +887,11 @@ def export_slide(
     :func:`split_overview`. They are stitched into a single locator slide that
     leads the deck, with a numbered box where each sample was imaged; the numbers
     are the sample's position in the deck, so marker 3 is the third row.
+
+    *zoom_slides* adds a slide per closeup: a dataset acquired inside the field of
+    another one — a 40x taken from a 20x — is shown beside that field with a box
+    around the part it covers. The pairing comes from the stage coordinates, and a
+    sample nothing else contains is shown against the overview when there is one.
 
     Raises :class:`ExportCancelled` if *should_cancel* starts returning true; a
     folder of large stacks takes minutes and has to be interruptible.
@@ -817,12 +923,13 @@ def export_slide(
     # The overview leads the deck, so it is built first — a reader wants to know
     # where the panels came from before looking at them.
     stitched = False
+    mosaic: ov.Mosaic | None = None
     if overview_tiles:
         if should_cancel is not None and should_cancel():
             raise ExportCancelled("cancelled before the overview was stitched")
         if progress is not None:
             # A negative index marks work that is not one of the numbered samples.
-            progress(-1, len(samples), f"overview ({len(overview_tiles)} fields)")
+            progress(-1, len(samples), f"Stitching the overview ({len(overview_tiles)} fields)")
         mosaic = build_mosaic(overview_tiles, samples, mode, overview_pixels)
         if mosaic is None:
             logger.warning("the overview fields could not be stitched; skipping that slide")
@@ -857,13 +964,74 @@ def export_slide(
             _build_slide(presentation, rendered, columns, heading, font_size, per_slide)
         )
 
+    # Closeups come last: a reader looks at the figure first and then at where a
+    # particular panel was taken from, and rendering them here means the table is
+    # already written when the extra reads start.
+    zoomed = 0
+    if zoom_slides:
+        for pair in find_closeups(samples, mosaic):
+            if should_cancel is not None and should_cancel():
+                raise ExportCancelled(f"cancelled after {zoomed} closeup slide(s)")
+            where = pair.parent.name if pair.parent is not None else "the overview"
+            if progress is not None:
+                progress(-1, len(samples), f"Locating {pair.child.name} in {where}")
+            context, context_bar = _context_image(pair, mosaic, mode, max_pixels, scale_bar, contrast)
+            if context is None:
+                logger.warning("no context picture for %s; skipping its closeup slide", pair.child.name)
+                continue
+            images, merge, description, bar = render_sample(
+                pair.child, mode, max_pixels, scale_bar, contrast
+            )
+            panels = [
+                (channel.label, image, channel.color)
+                for channel, image in zip(pair.child.channels, images)
+            ]
+            if merge is not None:
+                panels.append(("Merge", merge, None))
+            _build_zoom_slide(
+                presentation, pair, context, panels, description, bar, context_bar, font_size
+            )
+            zoomed += 1
+
     presentation.save(str(path))
     logger.info(
         "wrote %d slide(s), %d sample(s) x %d channel(s) to %s%s",
-        len(chunks) + (1 if stitched else 0), len(samples), len(columns), path,
+        len(chunks) + (1 if stitched else 0) + zoomed, len(samples), len(columns), path,
         f" ({len(warnings)} gap(s))" if warnings else "",
     )
     return path
+
+
+def _context_image(
+    pair: ov.Closeup,
+    mosaic: ov.Mosaic | None,
+    mode: str,
+    max_pixels: int,
+    scale_bar: bool,
+    contrast: str,
+) -> tuple[np.ndarray | None, str]:
+    """The picture a closeup is shown against, and its scale bar label.
+
+    The parent's merge when another sample contains the closeup, and otherwise the
+    window of the overview around it — cropped rather than shown whole, since the
+    locator slide already shows the whole thing and a box a hundredth of it wide
+    points at nothing.
+    """
+    if pair.parent is not None:
+        # The context is drawn about a third of the slide wide, so the full pixel
+        # budget is bytes off a network share that end up thrown away — and a
+        # smaller budget also lets a coarser pyramid level answer the read.
+        budget = max(256, int(max_pixels * _CONTEXT_COLUMN_IN / SLIDE_WIDTH_IN))
+        images, merge, _description, bar = render_sample(
+            pair.parent, mode, budget, scale_bar, contrast
+        )
+        image = merge if merge is not None else (images[0] if images else None)
+        return image, bar
+    if mosaic is None:
+        return None, ""
+    window = np.array(mosaic.view_of(pair.parent_box), copy=True)
+    bar = draw_scale_bar(window, mosaic.um_per_px) if scale_bar else ""
+    return window, bar
 
 
 class ExportCancelled(Exception):
@@ -1134,12 +1302,17 @@ def _aspect(images: Sequence[np.ndarray]) -> float:
     return 1.0
 
 
-def _place(slide, image: np.ndarray, left: float, top: float, width: float, height: float) -> None:
-    """Drop a picture into a table cell, centred and fitted inside it."""
-    from pptx.util import Inches
+def _fit(
+    image: np.ndarray, left: float, top: float, width: float, height: float,
+    inset: float = _CELL_INSET_IN,
+) -> tuple[float, float, float, float]:
+    """Where a picture lands when centred and fitted inside a box, in inches.
 
-    box_width = width - 2 * _CELL_INSET_IN
-    box_height = height - 2 * _CELL_INSET_IN
+    Returned rather than drawn because a closeup slide has to put a shape at an
+    exact spot *on* the picture, which means knowing where the picture ended up.
+    """
+    box_width = width - 2 * inset
+    box_height = height - 2 * inset
     aspect = _aspect([image])
 
     draw_width = box_width
@@ -1148,10 +1321,167 @@ def _place(slide, image: np.ndarray, left: float, top: float, width: float, heig
         draw_height = box_height
         draw_width = draw_height * aspect
 
-    slide.shapes.add_picture(
-        _png_bytes(image),
-        Inches(left + (width - draw_width) / 2),
-        Inches(top + (height - draw_height) / 2),
+    return (
+        left + (width - draw_width) / 2,
+        top + (height - draw_height) / 2,
+        draw_width,
+        draw_height,
+    )
+
+
+def _place(slide, image: np.ndarray, left: float, top: float, width: float, height: float):
+    """Drop a picture into a table cell, centred and fitted inside it."""
+    from pptx.util import Inches
+
+    rect = _fit(image, left, top, width, height)
+    return slide.shapes.add_picture(_png_bytes(image), *(Inches(value) for value in rect))
+
+
+def _textbox(
+    slide, text: str, left: float, top: float, width: float, height: float, size: float,
+    bold: bool = False, color=None, align: str = "centre",
+):
+    """A plain text label on a slide, sized in inches and points."""
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+    from pptx.util import Inches, Pt
+
+    box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+    frame = box.text_frame
+    frame.word_wrap = True
+    frame.margin_left = frame.margin_right = frame.margin_top = frame.margin_bottom = 0
+    paragraph = frame.paragraphs[0]
+    paragraph.alignment = PP_ALIGN.CENTER if align == "centre" else PP_ALIGN.LEFT
+    run = paragraph.add_run()
+    run.text = text
+    run.font.size = Pt(size)
+    run.font.bold = bold
+    if color is not None:
+        run.font.color.rgb = RGBColor(*color)
+    return box
+
+
+def _region_box(slide, rect: tuple[float, float, float, float], fractions: tuple[float, float, float, float]):
+    """Outline the part of a picture another acquisition covers.
+
+    A shape over the picture rather than pixels burned into it, for the same
+    reason the overview's markers are: a box that lands on top of the specimen has
+    to be draggable, and it stays sharp when the slide is projected. Below
+    :data:`_MIN_REGION_IN` it is grown about its own centre, so a 40x field inside
+    a 10x one stays findable without stopping pointing at the right place.
+    """
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.util import Inches, Pt
+
+    left, top, width, height = rect
+    fraction_left, fraction_top, fraction_width, fraction_height = fractions
+    true_width = fraction_width * width
+    true_height = fraction_height * height
+    draw_width = max(_MIN_REGION_IN, true_width)
+    draw_height = max(_MIN_REGION_IN, true_height)
+
+    shape = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(left + fraction_left * width - (draw_width - true_width) / 2),
+        Inches(top + fraction_top * height - (draw_height - true_height) / 2),
         Inches(draw_width),
         Inches(draw_height),
+    )
+    shape.fill.background()
+    shape.line.color.rgb = RGBColor(*_MARKER_RGB)
+    shape.line.width = Pt(1.5)
+    shape.shadow.inherit = False
+    return shape
+
+
+def _build_zoom_slide(
+    presentation,
+    pair: ov.Closeup,
+    context: np.ndarray,
+    panels: Sequence[tuple[str, np.ndarray, tuple[float, float, float] | None]],
+    description: str,
+    bar: str,
+    context_bar: str,
+    font_size: float,
+) -> None:
+    """Lay out one closeup slide: the field it was taken from, then the closeup.
+
+    The context picture sits on the left with a red box where the closeup was
+    acquired, and the closeup's own channels fill the right. The box comes from
+    the stage coordinates of both acquisitions, so it is where the microscope says
+    it is — nothing here registers or correlates anything.
+    """
+    from pptx.util import Inches
+
+    child = pair.child
+    parent = pair.parent
+    slide = presentation.slides.add_slide(_blank_layout(presentation))
+
+    child_label = field_label(child, pair.box)
+    if parent is not None:
+        parent_label = field_label(parent, pair.parent_box) or parent.name
+        context_name = f"{parent.name} — {parent_label}" if parent_label else parent.name
+        heading = f"{child.name} — {child_label} inside {parent.name}"
+    else:
+        context_name = f"overview — {pair.parent_box.width:.0f} µm across"
+        heading = f"{child.name} — {child_label} on the overview"
+
+    _textbox(
+        slide, heading, _MARGIN_IN, 0.22,
+        SLIDE_WIDTH_IN - 2 * _MARGIN_IN, _TITLE_HEIGHT_IN, 18, bold=True, align="left",
+    )
+
+    # -- geometry --------------------------------------------------------------
+    top = 0.22 + _TITLE_HEIGHT_IN + 0.08
+    footer = _CAPTION_IN + 0.08
+    height = SLIDE_HEIGHT_IN - top - _MARGIN_IN - footer
+
+    # -- the context, boxed ----------------------------------------------------
+    rect = _fit(context, _MARGIN_IN, top, _CONTEXT_COLUMN_IN, height - _CAPTION_IN, inset=0.0)
+    slide.shapes.add_picture(_png_bytes(context), *(Inches(value) for value in rect))
+    _region_box(slide, rect, ov.fractions_within(pair.box, pair.parent_box))
+
+    notes = [note for note in (context_name, f"scale bar {context_bar}" if context_bar else "") if note]
+    _textbox(
+        slide, " · ".join(notes), _MARGIN_IN, rect[1] + rect[3] + 0.04,
+        _CONTEXT_COLUMN_IN, _CAPTION_IN, max(7.0, font_size - 1), color=_MARKER_RGB,
+    )
+
+    # -- the closeup itself ----------------------------------------------------
+    panel_left = _MARGIN_IN + _CONTEXT_COLUMN_IN + 0.25
+    panel_width = SLIDE_WIDTH_IN - panel_left - _MARGIN_IN
+    count = max(1, len(panels))
+    across = 2 if count <= 4 else 3
+    down = -(-count // across)  # ceiling division
+    cell_width = panel_width / across
+    cell_height = height / down
+
+    for index, (label, image, color) in enumerate(panels):
+        cell_left = panel_left + (index % across) * cell_width
+        cell_top = top + (index // across) * cell_height
+        _place(slide, image, cell_left, cell_top, cell_width, cell_height - _CAPTION_IN)
+        _textbox(
+            slide, label, cell_left, cell_top + cell_height - _CAPTION_IN, cell_width, _CAPTION_IN,
+            max(7.0, font_size - 1), bold=True,
+            color=text_color(color) if color is not None else None,
+        )
+
+    # -- footer ----------------------------------------------------------------
+    x_mm, y_mm = (value / 1000.0 for value in pair.box.centre)
+    footer_notes = [
+        note
+        for note in (
+            description,
+            f"scale bar {bar}" if bar else "",
+            f"closeup {pair.box.width:.0f} × {pair.box.height:.0f} µm at X {x_mm:.2f}, Y {y_mm:.2f} mm",
+        )
+        if note
+    ]
+    _textbox(
+        slide, " · ".join(footer_notes), _MARGIN_IN, SLIDE_HEIGHT_IN - _MARGIN_IN - _CAPTION_IN,
+        SLIDE_WIDTH_IN - 2 * _MARGIN_IN, _CAPTION_IN, max(7.0, font_size - 1), align="left",
+    )
+    logger.info(
+        "closeup slide: %s inside %s", child.name, parent.name if parent is not None else "the overview"
     )

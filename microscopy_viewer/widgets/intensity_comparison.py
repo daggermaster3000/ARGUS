@@ -40,6 +40,7 @@ from qtpy.QtWidgets import (
 )
 
 from .. import intensity as ix
+from ..loaders.layer_spec import units_like
 from .. import measurements as mm
 from ..exports import default_stem
 from ..utils import format_number, get_logger
@@ -723,6 +724,10 @@ class IntensityComparisonWidget(QWidget):
                 kwargs["blending"] = source.blending
                 kwargs["contrast_limits"] = tuple(source.contrast_limits)
                 kwargs["visible"] = source.visible
+                # A layer added without units is dimensionless, and one of those
+                # is enough for napari to stop using units at all — which puts
+                # the scale bar back to pixels over a calibrated image.
+                kwargs.update(units_like(source, 2))
             try:
                 self._viewer.add_image(plane, **kwargs)
             except Exception as exc:

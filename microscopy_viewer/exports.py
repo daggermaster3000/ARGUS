@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -169,6 +169,42 @@ def export_table(frame, path: str | Path, sheet_name: str = "Results") -> Path:
             _autofit(writer.sheets[sheet_name], frame)
 
     logger.info("wrote %d row(s) to %s", len(frame), path)
+    return path
+
+
+def export_sheets(frames: dict[str, Any], path: str | Path) -> Path:
+    """Write several dataframes to one workbook, one sheet each.
+
+    :func:`export_table` opens the file fresh, so calling it twice leaves only
+    the second table. A summary and the rows behind it belong in one file — the
+    per-region counts and the objects they were counted from, in particular — and
+    this is what puts them there.
+
+    Falls back to a sheet-suffixed ``.csv`` per frame when a CSV path is given,
+    since CSV has no notion of a sheet.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if path.suffix.lower() == ".csv":
+        written = path
+        for index, (name, frame) in enumerate(frames.items()):
+            target = path if index == 0 else path.with_name(f"{path.stem}_{name.lower()}.csv")
+            frame.to_csv(target, index=False)
+            written = path
+        return written
+
+    if path.suffix.lower() != ".xlsx":
+        path = path.with_suffix(".xlsx")
+    import pandas as pd
+
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        for name, frame in frames.items():
+            sheet = str(name)[:31]  # Excel's own limit
+            frame.to_excel(writer, sheet_name=sheet, index=False)
+            _autofit(writer.sheets[sheet], frame)
+
+    logger.info("wrote %d sheet(s) to %s", len(frames), path)
     return path
 
 
