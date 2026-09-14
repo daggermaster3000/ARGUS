@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QFileDialog,
@@ -22,6 +23,10 @@ from ..loaders import FILE_DIALOG_FILTER
 from ..utils import get_logger
 
 logger = get_logger("toolbar")
+
+#: Above this many pixels, flattening is confirmed first: a plugin handed the copy
+#: reads all of it, and a plate mosaic level is tens of gigabytes.
+_FLATTEN_WARN_PIXELS = 500_000_000
 
 
 class ViewerToolbar(QWidget):
@@ -57,6 +62,7 @@ class ViewerToolbar(QWidget):
             ("ndisplay", "2D / 3D (MIP)", "Switch between slice view and 3D maximum-intensity projection (Ctrl+D)", self.toggle_ndisplay),
             ("scalebar", "Toggle Scale Bar", "Show or hide the calibrated scale bar (Ctrl+B)", self.toggle_scale_bar),
             ("metadata", "Show/Hide Metadata", "Toggle the acquisition metadata panel (Ctrl+M)", self.toggle_metadata),
+            ("flatten", "Flatten for Plugins", "Copy the level on screen out of a pyramid layer as a plain layer, which is what most napari plugins can actually read (Ctrl+Shift+L)", self.flatten_layer),
         ):
             button = QPushButton(label)
             button.setToolTip(tooltip)
@@ -109,6 +115,87 @@ class ViewerToolbar(QWidget):
             return
         self._app.last_directory = Path(written).parent
         self.set_status(f"Snapshot saved to {written}")
+
+    def flatten_layer(self) -> None:
+        """Copy one pyramid level out as an ordinary layer, for plugins to work on.
+
+        Plugins that take ``napari.types.ImageData`` are handed the layer's data
+        as-is, and for a multiscale layer that is ``MultiScaleData`` — a sequence
+        of levels rather than an array. napari-simpleitk-image-processing,
+        napari-segment-blobs-and-things and the rest raise on it, and every
+        OME-Zarr layer here is multiscale, so this makes them usable at all.
+        """
+        from napari.layers import Image
+
+        from ..rendering import displayed_voxels, plain_level
+
+        layer = self._selected_image()
+        if layer is None:
+            QMessageBox.information(
+                self, "Microscopy Viewer", "Select an image layer in the layer list first."
+            )
+            return
+        if not getattr(layer, "multiscale", False) or len(layer.data) < 2:
+            self.set_status(f"“{layer.name}” is already a plain layer; plugins can read it.")
+            return
+
+        try:
+            data, scale, level = plain_level(layer)
+        except Exception as exc:
+            logger.exception("could not flatten %s", layer.name)
+            QMessageBox.critical(self, "Microscopy Viewer", f"Could not flatten that layer:\n{exc}")
+            return
+
+        shape = tuple(int(n) for n in data.shape)
+        # A plugin calls np.asarray on what it is given, so the copy is about to be
+        # read into memory in full. Say so before that happens rather than after.
+        pixels = displayed_voxels(shape)
+        if pixels > _FLATTEN_WARN_PIXELS:
+            gigabytes = pixels * int(np.dtype(data.dtype).itemsize) / 1e9
+            answer = QMessageBox.question(
+                self,
+                "Flatten for plugins",
+                f"Level {level} of “{layer.name}” is {'×'.join(str(n) for n in shape)}. "
+                f"A plugin reading it will pull about {gigabytes:.1f} GB into memory.\n\n"
+                "Zoom in first and the viewer will be on a finer, smaller level. Continue?",
+                QMessageBox.Ok | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if answer != QMessageBox.Ok:
+                return
+
+        name = f"{layer.name} [level {level}]"
+        if name in self._viewer.layers:
+            del self._viewer.layers[name]
+        try:
+            self._viewer.add_image(
+                data,
+                name=name,
+                scale=scale,
+                colormap=layer.colormap,
+                blending=layer.blending,
+                contrast_limits=tuple(layer.contrast_limits),
+                metadata=dict(layer.metadata),
+            )
+        except Exception as exc:
+            logger.exception("could not add the flattened layer")
+            QMessageBox.critical(self, "Microscopy Viewer", f"Could not add that layer:\n{exc}")
+            return
+        self.set_status(
+            f"Added “{name}” ({'×'.join(str(n) for n in shape)}) — a plain layer plugins can read."
+        )
+
+    def _selected_image(self):
+        """The selected Image layer, falling back to the last one in the list."""
+        from napari.layers import Image
+
+        selected = [
+            layer for layer in getattr(self._viewer.layers, "selection", ()) if isinstance(layer, Image)
+        ]
+        if selected:
+            return selected[-1]
+        images = [layer for layer in self._viewer.layers if isinstance(layer, Image)]
+        return images[-1] if images else None
 
     def export_measurements(self) -> None:
         self._app.measurements_widget.export()

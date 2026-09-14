@@ -39,6 +39,79 @@ class _Level:
 # ---------------------------------------------------------------------------
 
 
+class _FakeLayer:
+    """Just enough of a napari Image layer for :func:`rendering.plain_level`."""
+
+    def __init__(self, levels, scale, level=0, name="layer"):
+        self.data = levels
+        self.scale = scale
+        self.name = name
+        self.multiscale = True
+        self._data_level = level
+
+
+def test_voxel_counts_do_not_overflow() -> None:
+    print("voxel counts past 2**31")
+
+    # numpy's default integer is 32-bit on Windows below numpy 2, so np.prod on a
+    # shape this size wraps to a negative number and every size check downstream
+    # of it passes. That handed napari a volume it could not upload.
+    check(
+        rendering.displayed_voxels((512, 2048, 2048)) == 2_147_483_648,
+        f"a 2.1 Gvoxel stack counts as itself ({rendering.displayed_voxels((512, 2048, 2048))})",
+    )
+    check(
+        rendering.displayed_voxels((4096, 4096, 4096)) == 68_719_476_736,
+        f"and so does a 68 Gvoxel one ({rendering.displayed_voxels((4096, 4096, 4096))})",
+    )
+    check(
+        rendering.displayed_voxels((10, 512, 2048, 2048)) == 2_147_483_648,
+        "leading axes are still ignored — napari slices them before the upload",
+    )
+
+
+def test_plain_level_for_plugins() -> None:
+    print("a plain copy of one pyramid level")
+
+    levels = [_Level((1200, 1600)), _Level((600, 800)), _Level((300, 400))]
+    layer = _FakeLayer(levels, scale=(0.25, 0.25), level=0)
+
+    data, scale, level = rendering.plain_level(layer)
+    check(level == 0 and data is levels[0], "by default it takes the level on screen")
+    check(scale == (0.25, 0.25), f"level 0 keeps the layer's own scale ({scale})")
+
+    layer._data_level = 2
+    data, scale, level = rendering.plain_level(layer)
+    check(level == 2 and data is levels[2], "following the viewer down the pyramid")
+    check(
+        scale == (1.0, 1.0),
+        f"a level shrunk 4x is stretched 4x so it sits on its parent ({scale})",
+    )
+
+    data, scale, level = rendering.plain_level(layer, level=1)
+    check(level == 1 and scale == (0.5, 0.5), f"an explicit level is honoured ({scale})")
+    check(
+        rendering.plain_level(layer, level=99)[2] == 2,
+        "a level the pyramid does not have is clamped to the coarsest",
+    )
+
+    # Anisotropic levels, which is what a plate pyramid is: Y and X halve, Z does not.
+    volume = [_Level((40, 1200, 1600)), _Level((40, 600, 800))]
+    _data, scale, _level = rendering.plain_level(
+        _FakeLayer(volume, scale=(2.0, 0.25, 0.25), level=1)
+    )
+    check(
+        scale == (2.0, 0.5, 0.5),
+        f"only the axes that were downsampled are stretched ({scale})",
+    )
+
+    try:
+        rendering.plain_level(_FakeLayer([], scale=(1.0,)))
+        check(False, "an empty layer is refused")
+    except ValueError:
+        check(True, "an empty layer is refused rather than indexed into")
+
+
 def test_budget_scales_with_vram() -> None:
     print("the voxel budget follows the GPU, not a constant")
     os.environ.pop(gpu.BUDGET_ENV_VAR, None)
@@ -247,6 +320,8 @@ def test_cache_can_be_disabled() -> None:
 def main() -> int:
     for test in (
         test_budget_scales_with_vram,
+        test_voxel_counts_do_not_overflow,
+        test_plain_level_for_plugins,
         test_texture_axis_limit,
         test_real_stack_now_uses_full_resolution,
         test_cache_round_trip,

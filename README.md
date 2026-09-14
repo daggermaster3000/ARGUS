@@ -693,6 +693,36 @@ image boundary with everything already finished safely on disk. On an RTX 4090 a
 12 000 × 12 000 well takes about 35 s including the read and the write, so a
 46-well cycle is roughly half an hour.
 
+### Third-party napari plugins
+
+Most napari plugins declare their input as `napari.types.ImageData` and then treat
+it as an array. A **multiscale** layer hands them `MultiScaleData` instead — a
+sequence of pyramid levels, not an array — which they do not convert and cannot
+use. Every OME-Zarr layer this viewer makes is multiscale, so the failure is
+immediate and looks like a bug in the plugin:
+
+```
+TypeError: in method 'Median', argument 1 of type 'itk::simple::Image const &'
+```
+
+That one is `napari-simpleitk-image-processing`; `napari-segment-blobs-and-things`
+and the rest of the assistant family behave the same way. Measured on this
+plugin: a numpy array works, a dask array works, `MultiScaleData` raises — with
+one level in it or five.
+
+**Flatten for Plugins** (Ctrl+Shift+L) is the way round it. It copies the level
+the viewer is currently drawing out of the selected pyramid layer and adds it as
+an ordinary single-level layer, named `… [level 3]`. That copy is a plain dask
+array, which those plugins handle. The scale is corrected for the level, so the
+copy sits exactly on top of its parent and measurements taken on it stay in µm.
+
+Zoom in before flattening and you get a finer level; zoom out and you get a
+coarser, smaller one. Above 500 Mpixels it asks first, because a plugin handed
+the copy reads all of it into memory — a plate mosaic level is tens of gigabytes.
+
+For median filtering specifically there is no need for any of this: the
+Segmentation panel does it natively, on the pyramid, as part of the run.
+
 ### Exports
 
 **Export Snapshot** saves what is on the canvas at 2× oversampling, so it stays

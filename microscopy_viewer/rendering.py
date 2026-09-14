@@ -57,6 +57,43 @@ def displayed_voxels(shape: Sequence[int]) -> int:
     return math.prod(spatial) if spatial else 0
 
 
+def plain_level(layer, level: int | None = None) -> tuple:
+    """``(data, scale, level)`` for one level of a multiscale layer, on its own.
+
+    Most napari plugins take ``napari.types.ImageData`` and assume it is an array.
+    A multiscale layer hands them ``MultiScaleData`` instead — a sequence of
+    levels — which is not an array and not something they convert, so anything
+    built on numpy, dask or SimpleITK raises on it. Every OME-Zarr layer this
+    viewer makes is multiscale, so that is every plugin.
+
+    Copying one level out as an ordinary layer is the way round it: the copy is a
+    plain dask array, which those plugins do handle. *level* defaults to the one
+    napari is currently drawing, so what the plugin gets is what is on screen.
+
+    The scale is corrected for the level: a layer's ``scale`` describes level 0,
+    and level *n* has coarser pixels, so the copy has to be stretched by exactly
+    the factor the pyramid shrank it or it will not sit on top of its parent.
+    """
+    levels = list(layer.data)
+    if not levels:
+        raise ValueError(f"{layer.name} holds no data")
+    index = int(getattr(layer, "_data_level", 0) if level is None else level)
+    index = max(0, min(index, len(levels) - 1))
+
+    data = levels[index]
+    base = tuple(int(n) for n in levels[0].shape)
+    shape = tuple(int(n) for n in data.shape)
+    factors = [
+        (base[axis] / shape[axis]) if axis < len(shape) and shape[axis] else 1.0
+        for axis in range(len(base))
+    ]
+    scale = tuple(
+        float(value) * float(factor)
+        for value, factor in zip(tuple(layer.scale), factors[-len(tuple(layer.scale)):])
+    )
+    return data, scale, index
+
+
 def choose_level(levels: Sequence, budget: int, max_axis: int | None = None) -> int:
     """Index of the finest pyramid level the GPU can actually hold.
 
