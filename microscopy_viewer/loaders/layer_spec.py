@@ -89,6 +89,99 @@ def napari_colormap(color: tuple[float, float, float] | None, name: str):
         return None
 
 
+def supports_layer_units() -> bool:
+    """Whether this napari takes a per-axis ``units`` argument on a layer.
+
+    napari moved the scale bar's unit onto the layers: up to 0.6 the overlay had
+    its own ``unit`` field, and from 0.8 ``ScaleBarOverlay`` has none at all and
+    the bar reads ``layer.units``, which defaults to *pixel*. A calibrated stack
+    whose layers never said "µm" therefore gets a scale bar reading "25 pixels",
+    which is the wrong answer stated confidently.
+
+    Checked once, by signature, so the same code is right on both.
+    """
+    global _SUPPORTS_UNITS
+    if _SUPPORTS_UNITS is None:
+        try:
+            import inspect
+
+            from napari.layers import Image
+
+            _SUPPORTS_UNITS = "units" in inspect.signature(Image.__init__).parameters
+        except Exception:  # pragma: no cover - napari API drift
+            logger.debug("could not tell whether napari takes layer units", exc_info=True)
+            _SUPPORTS_UNITS = False
+    return bool(_SUPPORTS_UNITS)
+
+
+_SUPPORTS_UNITS: bool | None = None
+
+
+#: Units napari gives a layer that was never told any. Dimensionless, which is
+#: what makes it clash with a calibrated image rather than simply differ from it.
+DEFAULT_UNIT = "pixel"
+
+
+def units_like(source, ndim: int) -> dict:
+    """``units`` for a new layer, copied from the layer it is derived from.
+
+    Right-aligned onto *ndim* axes, because a 2D ROI or label map drawn over a
+    4D stack takes the last two of its axes.
+
+    Empty when this napari has no layer units, or when there is nothing to copy —
+    in both cases the caller simply does not pass the argument.
+    """
+    if source is None or not supports_layer_units():
+        return {}
+    units = getattr(source, "units", None)
+    if units is None:
+        return {}
+    try:
+        taken = tuple(units)[-int(ndim):]
+    except Exception:  # pragma: no cover - napari API drift
+        logger.debug("could not read layer units", exc_info=True)
+        return {}
+    return {"units": taken} if len(taken) == int(ndim) else {}
+
+
+def world_units(viewer, ndim: int, exclude=None) -> dict:
+    """``units`` for a new layer, matched to the calibrated layers already open.
+
+    Every layer added without this defaults to *pixel*, which is dimensionless.
+    napari compares units across layers right-aligned and by dimensionality, so a
+    single pixel-unit layer makes the whole list inconsistent — at which point it
+    warns, drops units from rendering, and **the scale bar goes back to reading
+    pixels over a calibrated image**. Adding a ROI or a region outline should not
+    do that.
+
+    The first layer carrying a real unit wins. When nothing is calibrated there is
+    nothing to match and the default is already right.
+
+    *exclude* is the layer being matched, when it is already in the list: without
+    it a layer asking what the others use is answered with its own units, and can
+    never be corrected.
+    """
+    if viewer is None or not supports_layer_units():
+        return {}
+    try:
+        layers = [layer for layer in viewer.layers if layer is not exclude]
+    except Exception:  # pragma: no cover - defensive
+        return {}
+    for layer in layers:
+        units = getattr(layer, "units", None)
+        if units is None:
+            continue
+        # "Real" means dimensioned: a layer still on pixels is what we are
+        # avoiding becoming, not something to copy.
+        if all(str(unit) == DEFAULT_UNIT for unit in tuple(units)):
+            continue
+        matched = units_like(layer, ndim)
+        if matched:
+            return matched
+    return {}
+
+
+
 @dataclass
 class LayerSpec:
     """A ready-to-add napari image layer plus the metadata that produced it.
@@ -143,6 +236,10 @@ class LayerSpec:
                 "mv_units": self.units,
             },
         }
+        # The scale bar's unit comes from here on napari 0.8 and later. Passed only
+        # when there is one per axis: a partial tuple would be worse than none.
+        if self.units and len(self.units) == len(self.scale) and supports_layer_units():
+            kwargs["units"] = tuple(self.units)
         if self.contrast_limits is not None:
             low, high = self.contrast_limits
             if high > low:

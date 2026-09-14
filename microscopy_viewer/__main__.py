@@ -33,6 +33,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="keep napari's modal plugin-engine warning at startup (it blocks loading until dismissed)",
     )
     parser.add_argument(
+        "--no-splash",
+        action="store_true",
+        help="open the window straight away instead of covering the build with the loading animation",
+    )
+    parser.add_argument(
+        "--no-busy-overlay",
+        action="store_true",
+        help="do not cover the window with the animation while it is busy",
+    )
+    parser.add_argument(
         "--version", action="store_true", help="print the version and exit"
     )
     return parser.parse_args(argv)
@@ -80,7 +90,13 @@ def main(argv: list[str] | None = None) -> int:
 
         # Quoted drops can arrive with stray whitespace; normalise before loading.
         paths = [Path(p.strip('"').strip()) for p in args.paths if p.strip()]
-        launch(paths, block=True, suppress_plugin_warning=not args.warn_shimmed_plugins)
+        launch(
+            paths,
+            block=True,
+            suppress_plugin_warning=not args.warn_shimmed_plugins,
+            splash=not args.no_splash,
+            busy_overlay=not args.no_busy_overlay,
+        )
     except BaseException as exc:  # noqa: BLE001 - last line of defence for a GUI app
         _fatal(exc)
         return 1

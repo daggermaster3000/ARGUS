@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 
@@ -48,6 +48,25 @@ DEFAULT_MAX_PIXELS = 1600
 #: visible grid; ramping across it hides the seam without touching the pixels
 #: anywhere else.
 _FEATHER = 0.12
+
+#: How far a closeup may stick out of the field it was taken from, as a fraction
+#: of its own width. The stage repeats to a few micrometres and a field re-centred
+#: by eye can end up a hair over the edge of the one it was picked from; a sample
+#: that is genuinely half outside was not taken from it.
+_NEST_SLACK = 0.05
+
+#: Largest a closeup may be relative to the field it sits in. Two acquisitions of
+#: the same field contain each other and neither is a closeup of the other, and
+#: two images that merely start at the same corner are not related at all. Every
+#: real step down clears this easily: 40x inside 20x is 0.5, and even 60x inside
+#: 40x is 0.67.
+_NEST_RATIO = 0.7
+
+#: How much of the overview to show around a sample that no other sample
+#: contains, as a multiple of the sample's own size. The whole mosaic is already
+#: the locator slide — this is meant to be the next step in, close enough that the
+#: box is a shape rather than a dot.
+_WINDOW = 6.0
 
 
 # ---------------------------------------------------------------------------
@@ -145,8 +164,18 @@ class Box:
     def centre(self) -> tuple[float, float]:
         return (0.5 * (self.x0 + self.x1), 0.5 * (self.y0 + self.y1))
 
-    def contains(self, other: "Box") -> bool:
-        return self.x0 <= other.x0 and other.x1 <= self.x1 and self.y0 <= other.y0 and other.y1 <= self.y1
+    @property
+    def area(self) -> float:
+        return max(0.0, self.width) * max(0.0, self.height)
+
+    def contains(self, other: "Box", slack: float = 0.0) -> bool:
+        """Whether *other* lies inside this box, allowing *slack* µm of overhang."""
+        return (
+            self.x0 - slack <= other.x0
+            and other.x1 <= self.x1 + slack
+            and self.y0 - slack <= other.y0
+            and other.y1 <= self.y1 + slack
+        )
 
 
 def box_from_extent(extent: Sequence[float] | None) -> Box | None:
@@ -379,4 +408,104 @@ def markers(samples: Sequence, covered: Box | None = None) -> list[Marker]:
                 outside=covered is not None and not covered.contains(box),
             )
         )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Closeups
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Closeup:
+    """A sample imaged inside the field of a lower-magnification one.
+
+    ``parent`` is the sample the closeup was taken from, or ``None`` when nothing
+    else contains it and the overview mosaic stands in. ``parent_box`` is the area
+    to draw as the context picture — the parent's whole field, or a window of the
+    overview — and ``box`` is the closeup's own footprint inside it.
+    """
+
+    child: Any
+    parent: Any | None
+    box: Box
+    parent_box: Box
+
+    @property
+    def on_overview(self) -> bool:
+        return self.parent is None
+
+
+def fractions_within(inner: Box, outer: Box) -> tuple[float, float, float, float]:
+    """*inner* as ``(left, top, width, height)`` fractions of *outer*.
+
+    Measured from the top left of the picture, with row 0 at the low-Y edge —
+    the same convention :class:`Mosaic` places its tiles with, which is how
+    Imaris stores a plane.
+    """
+    if outer.width <= 0 or outer.height <= 0:
+        return (0.0, 0.0, 0.0, 0.0)
+    return (
+        (inner.x0 - outer.x0) / outer.width,
+        (inner.y0 - outer.y0) / outer.height,
+        inner.width / outer.width,
+        inner.height / outer.height,
+    )
+
+
+def _window(box: Box, bounds: Box, factor: float) -> Box:
+    """A square-ish view of *bounds* centred on *box*, *factor* times its size.
+
+    Slid back inside *bounds* rather than clipped when it would overhang, so the
+    window keeps its size near an edge; a window larger than the overview is the
+    overview.
+    """
+    span = max(box.width, box.height) * float(factor)
+    if span >= bounds.width and span >= bounds.height:
+        return bounds
+    half_x = min(span, bounds.width) / 2.0
+    half_y = min(span, bounds.height) / 2.0
+    centre_x, centre_y = box.centre
+    centre_x = min(max(centre_x, bounds.x0 + half_x), bounds.x1 - half_x)
+    centre_y = min(max(centre_y, bounds.y0 + half_y), bounds.y1 - half_y)
+    return Box(centre_x - half_x, centre_x + half_x, centre_y - half_y, centre_y + half_y)
+
+
+def closeups(samples: Sequence, covered: Box | None = None, window: float = _WINDOW) -> list[Closeup]:
+    """Pair each sample with the field it is a closeup of.
+
+    The parent is the *smallest* other sample whose stage footprint contains it,
+    so a 40x taken inside a 20x taken inside a 10x is shown against the 20x — the
+    tightest context is the one that tells a reader where they are. A sample only
+    counts as a parent when the closeup is meaningfully smaller than it, which is
+    what stops two acquisitions of the same field pairing with each other.
+
+    When nothing contains a sample and *covered* is given — the area the overview
+    fields span — the overview stands in as its context, windowed around the
+    sample rather than shown whole. Samples with no stage coordinates, and samples
+    outside the overview with no parent, are left out.
+    """
+    boxed = [(sample, box_from_extent(getattr(sample, "stage_extent", None))) for sample in samples]
+    boxed = [(sample, box) for sample, box in boxed if box is not None and box.area > 0]
+
+    out: list[Closeup] = []
+    for child, box in boxed:
+        slack = _NEST_SLACK * max(box.width, box.height)
+        parents = [
+            (other, other_box)
+            for other, other_box in boxed
+            if other is not child
+            and other_box.contains(box, slack)
+            and max(box.width, box.height) <= _NEST_RATIO * max(other_box.width, other_box.height)
+        ]
+        if parents:
+            parent, parent_box = min(parents, key=lambda pair: pair[1].area)
+            out.append(Closeup(child=child, parent=parent, box=box, parent_box=parent_box))
+        elif covered is not None and covered.contains(box, slack):
+            out.append(Closeup(child=child, parent=None, box=box, parent_box=_window(box, covered, window)))
+
+    logger.info(
+        "%d closeup(s) of %d sample(s); %d against the overview",
+        len(out), len(boxed), sum(1 for pair in out if pair.on_overview),
+    )
     return out

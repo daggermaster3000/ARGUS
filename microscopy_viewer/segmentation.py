@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -55,8 +55,13 @@ MODE_STITCH = "2D + stitch"
 #: Segment each plane independently; labels do not carry between planes. For
 #: counting per plane, or checking a diameter setting quickly.
 MODE_SLICES = "2D per plane"
+#: Flatten the stack with a maximum projection and segment that one image. The
+#: usual choice for sparse, well-separated objects in a thin stack: it is the
+#: fastest mode by far and gives one label per object rather than one per plane.
+#: Objects that overlap along Z merge into one, which is the trade being made.
+MODE_MIP = "2D on max projection"
 
-MODES = (MODE_STITCH, MODE_3D, MODE_SLICES)
+MODES = (MODE_STITCH, MODE_3D, MODE_SLICES, MODE_MIP)
 
 #: Cellpose 4's single generalist model, and the default when v4 is installed.
 CPSAM_MODEL = "cpsam"
@@ -98,6 +103,13 @@ NON_MODEL_SUFFIXES = (".txt", ".json", ".csv", ".log", ".yml", ".yaml", ".png")
 #: Objects smaller than this many pixels are dropped by Cellpose itself.
 DEFAULT_MIN_SIZE = 15
 
+#: How far stitching reaches across planes where an object was missed, in µm of
+#: depth. A nucleus is rarely absent from more than a fraction of a micrometre of
+#: an otherwise continuous run, and on a 5 µm nucleus this is well under the
+#: distance to the next one along Z. Zero restores Cellpose's own behaviour of
+#: comparing neighbouring planes only.
+DEFAULT_STITCH_GAP_UM = 1.5
+
 #: Voxels above which the volume is decimated in XY before segmentation. Sized for
 #: a card with a few GB free; the result reports what it decided.
 DEFAULT_MAX_VOXELS = 200_000_000
@@ -133,6 +145,23 @@ OBJECT_HEADERS = {
     "integrated": "Integrated intensity",
 }
 
+#: Headers that mean something different for a 2D label map. The measurement is
+#: already right — :func:`object_table` multiplies by whatever voxel size it is
+#: given — but "Volume (µm³)" over an area in µm² is a wrong label on a right
+#: number, which is worse than no label. Projected runs make 2D the usual case.
+OBJECT_HEADERS_2D = {
+    "n_voxels": "Pixels",
+    "volume_um3": "Area (µm²)",
+}
+
+
+def object_headers(ndim: int = 3) -> dict[str, str]:
+    """Column headings for a label map of *ndim* dimensions."""
+    headers = dict(OBJECT_HEADERS)
+    if ndim < 3:
+        headers.update(OBJECT_HEADERS_2D)
+    return headers
+
 
 # ---------------------------------------------------------------------------
 # What goes in and what comes out
@@ -153,6 +182,15 @@ class SegmentationSettings:
     #: Expected object diameter **in µm**. Zero means let Cellpose decide, which on
     #: v3 is its size model and on v4 is the scale the network was trained at.
     diameter_um: float = 0.0
+    #: Smallest object to keep, as an equivalent diameter in **µm** — the same
+    #: quantity the object table reports, so a number read off the table can be
+    #: typed straight back in. Zero leaves :attr:`min_size` alone.
+    min_diameter_um: float = 0.0
+    #: Largest object to keep, as an equivalent diameter in **µm**. Cellpose has
+    #: no ceiling of its own — ``min_size`` has no counterpart — so this is
+    #: applied to the finished label map by :func:`filter_by_diameter`, measured
+    #: exactly the way the object table measures it. Zero means no limit.
+    max_diameter_um: float = 0.0
     #: Cellpose's flow error threshold: lower keeps fewer, rounder objects.
     flow_threshold: float = 0.4
     #: Mask probability cut: lower finds more and larger objects.
@@ -160,6 +198,14 @@ class SegmentationSettings:
     #: IoU above which masks in neighbouring planes become one object. Only used
     #: in :data:`MODE_STITCH`.
     stitch_threshold: float = 0.25
+    #: How far, in **µm of depth**, stitching may reach across planes where an
+    #: object was missed. Cellpose compares neighbouring planes only, so one
+    #: plane in which a nucleus was not found splits it into two objects that no
+    #: threshold can rejoin. Zero restores that behaviour exactly.
+    stitch_gap_um: float = DEFAULT_STITCH_GAP_UM
+    #: The above in planes, derived from the Z voxel size by :func:`segment_volume`
+    #: once the working volume is known. Not something to set by hand.
+    stitch_gap_planes: int = 1
     min_size: int = DEFAULT_MIN_SIZE
     #: Per-channel percentile normalisation. Off only if the data is already scaled.
     normalize: bool = True
@@ -182,6 +228,11 @@ class SegmentationSettings:
     def do_3d(self) -> bool:
         return self.mode == MODE_3D
 
+    @property
+    def is_projection(self) -> bool:
+        """Whether a 3D stack is flattened to one plane before segmenting."""
+        return self.mode == MODE_MIP
+
 
 @dataclass
 class SegmentationResult:
@@ -193,6 +244,13 @@ class SegmentationResult:
     model: str
     mode: str
     device: str
+    #: True when a 3D stack was flattened first, so ``masks`` is 2D although the
+    #: image was not. Callers measuring intensities have to project too.
+    projected: bool = False
+    #: Objects removed after segmentation by the maximum-diameter filter.
+    dropped_oversize: int = 0
+    #: Planes the stitch was allowed to reach across. 1 is neighbours only.
+    stitch_gap_planes: int = 1
     #: Diameter actually used by Cellpose, in XY pixels of the analysed volume.
     diameter_px: float | None = None
     anisotropy: float | None = None
@@ -405,6 +463,10 @@ class Backend:
         """Just the values, for callers that only want names."""
         return tuple(choice.value for choice in self.model_choices())
 
+    def unsupported_models(self) -> tuple[str, ...]:
+        """Models present locally that this backend version cannot load."""
+        return ()
+
     def segment(
         self,
         image: np.ndarray,
@@ -515,7 +577,9 @@ class CellposeBackend(Backend):
                     continue
                 if not _model_loadable(path.name, major):
                     # A pre-v4 zoo file under cellpose 4, or cpsam under cellpose 3.
-                    # Offering it would fail on the architecture, minutes in.
+                    # Cellpose refuses these outright — "This model does not appear
+                    # to be a CP4 model" — so they are reported by
+                    # :meth:`unsupported_models` rather than offered and then failing.
                     logger.debug("skipping %s: not loadable by cellpose %s", path.name, major)
                     continue
                 seen.add(path.name.lower())
@@ -528,6 +592,60 @@ class CellposeBackend(Backend):
                     )
                 )
         return tuple(choices)
+
+    def unsupported_models(self) -> tuple[str, ...]:
+        """Weights present on this machine that the installed cellpose refuses.
+
+        Almost always the cyto / cyto2 / cyto3 / nuclei zoo under cellpose 4:
+        cellpose rejects them with *"This model does not appear to be a CP4 model.
+        CP3 models are not compatible with CP4"*. Hiding them without saying so
+        looks like the panel lost them, so the names come back here for the panel
+        to name — with what to install to get them.
+        """
+        directory = self._model_directory()
+        if directory is None or not self.available():
+            return ()
+        major = self.major_version()
+        names = []
+        for path in sorted(directory.iterdir()):
+            if not path.is_file() or path.suffix.lower() in NON_MODEL_SUFFIXES:
+                continue
+            if path.name.lower().startswith(SIZE_MODEL_PREFIX):
+                continue
+            if not _model_loadable(path.name, major):
+                names.append(path.name)
+        return tuple(names)
+
+    def _sized_model(self, settings: SegmentationSettings, device: DeviceInfo):
+        """Cellpose 3's ``Cellpose`` wrapper, which estimates the diameter itself.
+
+        Only reachable on v3, only for a zoo model, and only when no diameter was
+        given: it is the size model that makes "automatic" mean something there.
+        Plain :class:`CellposeModel` would silently fall back to the model's
+        training diameter instead, which is wrong for anything not imaged at that
+        magnification. v4 has no size model — its diameter argument is optional
+        because the network is scale-tolerant.
+        """
+        if self.major_version() >= 4 or settings.diameter_um > 0 or settings.custom_model_path:
+            return None
+        wanted = settings.resolved_model()
+        if not wanted or Path(wanted).exists() or wanted not in self._builtin_names():
+            return None
+
+        from cellpose import models as cp_models
+
+        factory = getattr(cp_models, "Cellpose", None)
+        if factory is None:
+            return None
+        kwargs: dict[str, Any] = {
+            "gpu": bool(settings.use_gpu and device.is_gpu),
+            "model_type": wanted,
+        }
+        try:
+            return factory(**kwargs)
+        except Exception:
+            logger.info("no size model for %s; using its training diameter", wanted, exc_info=True)
+            return None
 
     def _model(self, settings: SegmentationSettings, device: DeviceInfo):
         from cellpose import models as cp_models
@@ -568,6 +686,45 @@ class CellposeBackend(Backend):
                 ) from exc
             raise RuntimeError(f"could not load the model “{label}”: {exc}") from exc
 
+    def _segment_planes(self, model, image, kwargs, progress=None, offset_labels=True):
+        """Segment a stack one plane at a time and stack the results back up.
+
+        The mode that wants this is "2D per plane", where planes are deliberately
+        independent. Doing the loop here rather than handing cellpose the volume
+        is not a workaround for the z_axis rule so much as an honest reading of
+        it: cellpose is being asked for 2D segmentation, so it is given 2D images.
+
+        Labels are made unique across the stack. Restarting from 1 on every plane
+        would collide in the label map, so one object would appear to span planes
+        it was never found in — the exact thing this mode exists not to do.
+
+        ``offset_labels=False`` leaves every plane numbered from 1, which is what
+        :func:`cellpose.utils.stitch3D` expects: it matches labels between
+        neighbouring planes by overlap and renumbers them itself. Offsetting first
+        defeats it — it finds no matches and every plane's objects stay separate.
+        """
+        per_plane = {key: value for key, value in kwargs.items()
+                     if key not in ("z_axis", "stitch_threshold", "anisotropy")}
+        per_plane["do_3D"] = False
+
+        planes: list[np.ndarray] = []
+        highest = 0
+        total = int(image.shape[0])
+        for index, plane in enumerate(image):
+            if progress is not None:
+                progress(f"plane {index + 1} of {total}")
+            outcome = model.eval(plane, **per_plane)
+            masks = np.asarray(outcome[0]).astype(np.int32, copy=True)
+            if offset_labels:
+                if highest and masks.size:
+                    masks[masks > 0] += highest
+                if masks.size:
+                    highest = max(highest, int(masks.max()))
+            planes.append(masks)
+
+        stacked = np.stack(planes) if planes else np.zeros(image.shape, dtype=np.int32)
+        return stacked, {"batch_size": int(kwargs.get("batch_size", 0)), "per_plane": True}
+
     def segment(
         self,
         image,
@@ -577,7 +734,7 @@ class CellposeBackend(Backend):
         device,
         progress=None,
     ):
-        model = self._model(settings, device)
+        model = self._sized_model(settings, device) or self._model(settings, device)
         batch_size = int(settings.batch_size) or estimate_batch_size(device)
 
         kwargs: dict[str, Any] = {
@@ -590,15 +747,42 @@ class CellposeBackend(Backend):
         }
         if diameter_px:
             kwargs["diameter"] = float(diameter_px)
-        if np.asarray(image).ndim == 3:
+        stack = np.asarray(image).ndim == 3
+        # Cellpose only accepts ``z_axis`` when it is going to treat the array as a
+        # volume — do_3D, or stitching with a real threshold. Handed a 3D array in
+        # plain 2D mode it refuses outright: "2D image processing selected, but
+        # z_axis is not None". That covers "2D per plane", and also "2D + stitch"
+        # with the threshold wound down to 0, which asks for exactly the same thing.
+        volumetric = stack and settings.mode == MODE_3D
+        stitching = stack and settings.mode == MODE_STITCH and float(settings.stitch_threshold) > 0
+        if volumetric:
             # Say which axis is Z rather than letting cellpose guess: on a stack
             # with few planes it can take Z for a channel axis.
             kwargs["z_axis"] = 0
             kwargs["channel_axis"] = None
-            if settings.mode == MODE_3D and anisotropy:
+            if anisotropy:
                 kwargs["anisotropy"] = float(anisotropy)
-            if settings.mode == MODE_STITCH:
-                kwargs["stitch_threshold"] = float(settings.stitch_threshold)
+        elif stitching:
+            # Segment the planes here rather than inside model.eval, and stitch
+            # them with :func:`stitch_planes`. At a gap of one plane that is the
+            # same join cellpose makes internally — checked voxel for voxel — but
+            # the planes can be counted off as they go, and the gap can be opened
+            # up, which is the only way to rejoin an object missing from a plane.
+            planes, info = self._segment_planes(
+                model, np.asarray(image), kwargs, progress, offset_labels=False
+            )
+            gap = max(1, int(settings.stitch_gap_planes))
+            joined = stitch_planes(
+                planes,
+                stitch_threshold=float(settings.stitch_threshold),
+                max_gap=gap,
+                progress=progress,
+            )
+            return joined, {**info, "stitched": True, "stitch_gap_planes": gap}
+        elif stack:
+            if progress is not None:
+                progress(f"cellpose per plane, {np.asarray(image).shape[0]} planes")
+            return self._segment_planes(model, np.asarray(image), kwargs, progress)
         if self.major_version() < 4:
             # v3 reads one grayscale channel when told [0, 0]; v4 warns about the
             # argument existing at all.
@@ -671,6 +855,35 @@ def model_choices(name: str = "cellpose") -> tuple[ModelChoice, ...]:
         return get_backend(name).model_choices()
     except ValueError:
         return ()
+
+
+def unsupported_models_message(name: str = "cellpose") -> str | None:
+    """One sentence naming local models this cellpose cannot load, or ``None``.
+
+    The zoo (``cyto``, ``cyto2``, ``cyto3``, ``nuclei``) belongs to Cellpose 3 and
+    the architecture changed in 4, so there is no way to offer both from one
+    install. Which one is wanted is a real choice, not a bug to route around, so
+    the panel states it and names the command that switches.
+    """
+    try:
+        backend = get_backend(name)
+    except ValueError:
+        return None
+    missing = backend.unsupported_models()
+    if not missing:
+        return None
+    major = getattr(backend, "major_version", lambda: 0)()
+    listed = ", ".join(missing[:4]) + ("…" if len(missing) > 4 else "")
+    if major >= 4:
+        return (
+            f"{len(missing)} model(s) in your cellpose folder ({listed}) are Cellpose 3 models, "
+            f"which Cellpose {major} cannot load. For the cyto / cyto2 / cyto3 / nuclei zoo: "
+            'python -m pip install "cellpose<4"'
+        )
+    return (
+        f"{len(missing)} model(s) in your cellpose folder ({listed}) need Cellpose 4: "
+        "python -m pip install --upgrade cellpose"
+    )
 
 
 def model_directory(name: str = "cellpose") -> Path | None:
@@ -806,6 +1019,319 @@ def restore_masks(masks: np.ndarray, shape: Sequence[int]) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def max_projection(array: np.ndarray) -> np.ndarray:
+    """Flatten a ``(z, y, x)`` stack to ``(y, x)`` by taking the brightest voxel.
+
+    A 2D array comes back untouched, so callers can apply this unconditionally.
+
+    Exposed rather than buried inside :func:`segment_volume` because anything
+    measuring intensities against projected labels has to project its own channel
+    the same way — a 2D label map and a 3D signal do not line up.
+    """
+    array = np.asarray(array)
+    if array.ndim < 3:
+        return array
+    return array.max(axis=0)
+
+
+def project_for_mode(
+    array: np.ndarray, voxel_size_um: Sequence[float], mode: str
+) -> tuple[np.ndarray, tuple[float, ...]]:
+    """Apply *mode*'s flattening to an array and its voxel size together.
+
+    Dropping the Z voxel alongside the Z axis is the point: keeping a three-entry
+    voxel size for a 2D image is how a diameter in µm silently becomes wrong.
+    """
+    voxel = tuple(float(v) for v in voxel_size_um)
+    if mode != MODE_MIP or np.asarray(array).ndim < 3:
+        return np.asarray(array), voxel
+    return max_projection(array), voxel[-2:]
+
+
+def min_size_in_pixels(
+    min_diameter_um: float, voxel_size_um: Sequence[float], ndim: int
+) -> int | None:
+    """Cellpose's ``min_size`` from a minimum equivalent diameter in µm.
+
+    ``min_size`` counts pixels in 2D and voxels in 3D, so a threshold that means
+    anything physical has to be converted against the voxel size — and against the
+    right number of dimensions, which is the mode's, not the array's: stitching
+    and per-plane modes both filter 2D masks even though the input is a stack.
+
+    This is the exact inverse of :func:`_equivalent_diameter`, so "minimum 5 µm"
+    drops what the table would report as under 5 µm across — exactly so when the
+    filter and the table count the same dimensions, which is every mode except
+    ``2D + stitch``. There cellpose screens each plane before stitching, so an
+    object assembled from several just-surviving planes can still be reported
+    smaller than the threshold.
+    """
+    if not min_diameter_um or min_diameter_um <= 0:
+        return None
+    voxel = [abs(float(v)) for v in tuple(voxel_size_um)[-ndim:] if float(v) > 0]
+    if len(voxel) < ndim:
+        return None
+    radius = float(min_diameter_um) / 2.0
+    extent = (4.0 / 3.0) * np.pi * radius**3 if ndim >= 3 else np.pi * radius**2
+    return max(0, int(round(extent / float(np.prod(voxel)))))
+
+
+# ---------------------------------------------------------------------------
+# Stitching planes into objects
+# ---------------------------------------------------------------------------
+
+
+def stitch_gap_in_planes(gap_um: float, z_voxel_um: float) -> int:
+    """How many planes :attr:`SegmentationSettings.stitch_gap_um` spans.
+
+    In µm rather than planes because a plane is not a fixed distance: four planes
+    is 1.2 µm on a 0.3 µm/plane stack and 8 µm on a 2 µm/plane one, and the second
+    would happily bridge two different cells stacked on top of each other.
+    """
+    if gap_um <= 0 or z_voxel_um <= 0:
+        return 1
+    return max(1, int(round(float(gap_um) / float(z_voxel_um))))
+
+
+class _Union:
+    """Union-find over ``(plane, label)`` keys. Small, and it keeps the stitch flat."""
+
+    def __init__(self) -> None:
+        self._parent: dict[tuple[int, int], tuple[int, int]] = {}
+
+    def find(self, key: tuple[int, int]) -> tuple[int, int]:
+        parent = self._parent
+        parent.setdefault(key, key)
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    def join(self, a: tuple[int, int], b: tuple[int, int]) -> None:
+        root_a, root_b = self.find(a), self.find(b)
+        if root_a != root_b:
+            self._parent[root_b] = root_a
+
+
+def _pair_overlaps(first: np.ndarray, second: np.ndarray):
+    """``(label_a, label_b, intersection)`` for every overlapping mask pair.
+
+    The pair is encoded into one integer and counted with a single sort rather
+    than with ``np.unique(..., axis=0)`` over a two-column array, which lexsorts
+    and is several times slower. This runs once per plane pair, so it is the
+    inner loop of the whole stitch.
+    """
+    flat_a = first.reshape(-1)
+    flat_b = second.reshape(-1)
+    both = (flat_a > 0) & (flat_b > 0)
+    if not both.any():
+        return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.int64)
+    left = flat_a[both].astype(np.int64)
+    right = flat_b[both].astype(np.int64)
+    stride = int(right.max()) + 1
+    codes, counts = np.unique(left * stride + right, return_counts=True)
+    return codes // stride, codes % stride, counts
+
+
+def _areas(plane: np.ndarray) -> np.ndarray:
+    """Pixel count per label, indexed by label."""
+    flat = plane.reshape(-1)
+    return np.bincount(flat[flat > 0].astype(np.int64))
+
+
+def _keep_only(plane: np.ndarray, labels: set) -> np.ndarray:
+    """*plane* with every label outside *labels* erased."""
+    if not labels:
+        return np.zeros_like(plane)
+    lookup = np.zeros(int(plane.max()) + 1, dtype=plane.dtype)
+    index = np.fromiter((label for label in labels if 0 < label < lookup.size), dtype=np.int64)
+    if index.size:
+        lookup[index] = index
+    return lookup[plane]
+
+
+def stitch_planes(
+    planes: np.ndarray,
+    stitch_threshold: float = 0.25,
+    max_gap: int = 1,
+    progress: Callable[[str], None] | None = None,
+) -> np.ndarray:
+    """Join per-plane masks into 3D objects, tolerating planes where one is missing.
+
+    Every plane must be numbered from 1 independently — what
+    :meth:`CellposeBackend._segment_planes` produces with ``offset_labels=False``.
+
+    With ``max_gap=1`` this compares neighbouring planes only and reproduces
+    :func:`cellpose.utils.stitch3D` exactly. That is the behaviour worth
+    replacing: **Cellpose only ever compares plane i with plane i+1, so a single
+    plane in which a nucleus was missed splits it into two objects, and no stitch
+    threshold can put it back together** — the two halves never get compared at
+    all. On a 20-plane confocal crop that turned 551 nuclei into 907.
+
+    A ``max_gap`` above 1 lets a chain that has been broken reach further, under
+    two rules:
+
+    * **Only broken chains bridge.** A label that already matched in the next
+      plane is not offered a longer jump, and neither is one that already has a
+      predecessor. Bridging can therefore only repair a gap, never reroute a
+      match that already worked.
+    * **Best overlap wins, one match each way.** Pairs are taken in descending
+      order of intersection-over-union, and each label may be joined to one label
+      per direction, so two nuclei that touch in a plane do not collapse into one.
+
+    Measured against the same volume segmented in full 3D — the mode that does
+    understand an object missing from a plane — raising the gap improves both
+    directions at once: objects wrongly split fell from 73 to 24, and objects
+    wrongly merged from 52 to 31. Bridging repairs splits rather than trading
+    them for merges.
+    """
+    stack = np.asarray(planes)
+    if stack.ndim != 3 or stack.shape[0] < 2:
+        return stack.astype(np.int32, copy=False)
+
+    union = _Union()
+    has_next: set[tuple[int, int]] = set()
+    has_prev: set[tuple[int, int]] = set()
+    threshold = float(stitch_threshold)
+    total = int(stack.shape[0])
+    furthest = max(1, int(max_gap))
+
+    for gap in range(1, furthest + 1):
+        if progress is not None:
+            progress(f"stitching {total} planes, gap {gap} of {furthest}")
+        for index in range(total - gap):
+            other = index + gap
+            first, second = stack[index], stack[other]
+            if gap > 1:
+                # Only labels whose chain is broken may reach across a gap. This
+                # is also what keeps the longer passes cheap: after the first
+                # pass most labels are already linked, so these planes are nearly
+                # empty by the time they are compared.
+                loose_a = {int(v) for v in np.unique(first) if v and (index, int(v)) not in has_next}
+                loose_b = {int(v) for v in np.unique(second) if v and (other, int(v)) not in has_prev}
+                if not loose_a or not loose_b:
+                    continue
+                first = _keep_only(first, loose_a)
+                second = _keep_only(second, loose_b)
+
+            left, right, inter = _pair_overlaps(first, second)
+            if not left.size:
+                continue
+            area_a, area_b = _areas(first), _areas(second)
+            scores = inter / np.maximum(area_a[left] + area_b[right] - inter, 1)
+
+            taken_a: set[int] = set()
+            taken_b: set[int] = set()
+            for position in np.argsort(scores)[::-1]:
+                if scores[position] < threshold:
+                    break  # sorted, so nothing further can clear the threshold
+                label_a, label_b = int(left[position]), int(right[position])
+                if label_a in taken_a or label_b in taken_b:
+                    continue
+                taken_a.add(label_a)
+                taken_b.add(label_b)
+                union.join((index, label_a), (other, label_b))
+                has_next.add((index, label_a))
+                has_prev.add((other, label_b))
+
+    return _renumber(stack, union)
+
+
+def _renumber(planes: np.ndarray, union: _Union) -> np.ndarray:
+    """Give every connected chain one label, numbered from 1 with no gaps."""
+    out = np.zeros(planes.shape, dtype=np.int32)
+    numbering: dict[tuple[int, int], int] = {}
+    for index, plane in enumerate(planes):
+        labels = np.unique(plane)
+        if not labels.size:
+            continue
+        lookup = np.zeros(int(labels.max()) + 1, dtype=np.int32)
+        for label in labels:
+            if not label:
+                continue
+            root = union.find((index, int(label)))
+            if root not in numbering:
+                numbering[root] = len(numbering) + 1
+            lookup[int(label)] = numbering[root]
+        out[index] = lookup[plane]
+    return out
+
+
+def filter_ndim(mode: str, array_ndim: int) -> int:
+    """How many dimensions cellpose's ``min_size`` counts over, for *mode*."""
+    if array_ndim < 3:
+        return 2
+    return 3 if mode == MODE_3D else 2
+
+
+def filter_by_diameter(
+    masks: np.ndarray,
+    voxel_size_um: Sequence[float],
+    max_diameter_um: float = 0.0,
+    min_diameter_um: float = 0.0,
+) -> tuple[np.ndarray, int]:
+    """Drop finished objects outside a size band. Returns ``(masks, dropped)``.
+
+    This is the ceiling Cellpose has not got: ``min_size`` screens small masks
+    while they are being made, and nothing screens large ones. A cluster of
+    touching nuclei that came back as one 40 µm object is the usual thing to
+    remove, and it can only be removed once the object exists — in
+    :data:`MODE_STITCH` it does not even exist until the planes are joined.
+
+    Size is the **equivalent diameter of the label map that is returned**, the
+    same number :func:`object_table` puts in its *Equivalent diameter* column,
+    so a threshold read off the table means the same thing typed back in. On a
+    3D label map that is the diameter of the sphere of equal volume; on a 2D one,
+    the disc of equal area.
+
+    *min_diameter_um* is accepted for symmetry and is off by default — the
+    minimum normally goes to Cellpose as ``min_size``, which is cheaper because
+    it never builds the objects it rejects.
+
+    Survivors are renumbered from 1 with no gaps, so the count of objects and the
+    highest label agree afterwards.
+    """
+    labels = np.asarray(masks)
+    if not labels.size or (max_diameter_um <= 0 and min_diameter_um <= 0):
+        return labels, 0
+
+    flat = labels.reshape(-1)
+    indices = np.flatnonzero(flat)
+    if indices.size == 0:
+        return labels, 0
+
+    ids = flat[indices].astype(np.int64, copy=False)
+    highest = int(ids.max())
+    counts = np.bincount(ids, minlength=highest + 1)
+
+    voxel = tuple(float(v) for v in tuple(voxel_size_um)[-labels.ndim:])
+    if len(voxel) < labels.ndim:
+        voxel = (1.0,) * (labels.ndim - len(voxel)) + voxel
+    voxel_volume = float(np.prod(voxel)) or 1.0
+
+    # The inverse of :func:`_equivalent_diameter`, done once on the threshold
+    # rather than per object: comparing voxel counts avoids a cube root per label.
+    def _voxels_for(diameter: float) -> float:
+        radius = float(diameter) / 2.0
+        extent = (4.0 / 3.0) * np.pi * radius**3 if labels.ndim >= 3 else np.pi * radius**2
+        return extent / voxel_volume
+
+    keep = counts > 0
+    keep[0] = False
+    if max_diameter_um > 0:
+        keep &= counts <= _voxels_for(max_diameter_um)
+    if min_diameter_um > 0:
+        keep &= counts >= _voxels_for(min_diameter_um)
+
+    dropped = int(np.count_nonzero((counts > 0)[1:]) - np.count_nonzero(keep))
+    if dropped == 0:
+        return labels, 0
+
+    # One lookup table rather than a pass per label: renumber and drop together.
+    lookup = np.zeros(highest + 1, dtype=np.int32)
+    lookup[keep] = np.arange(1, int(np.count_nonzero(keep)) + 1, dtype=np.int32)
+    return lookup[labels], dropped
+
+
 def segment_volume(
     image: np.ndarray,
     voxel_size_um: Sequence[float] = (1.0, 1.0, 1.0),
@@ -828,6 +1354,18 @@ def segment_volume(
         raise ValueError(f"segmentation needs a 2D or 3D array, got {array.ndim}D")
 
     warnings: list[str] = []
+
+    # Flatten before anything else: the decimation budget, the voxel size and the
+    # diameter conversion all have to see the array that is actually segmented.
+    projected = settings.is_projection and array.ndim == 3
+    if projected:
+        planes = int(array.shape[0])
+        array, voxel_size_um = project_for_mode(array, voxel_size_um, settings.mode)
+        warnings.append(
+            f"Segmented the maximum projection of {planes} planes; the labels are 2D. "
+            "Objects overlapping along Z merge into one."
+        )
+
     device = compute_device(prefer_gpu=settings.use_gpu)
     if settings.use_gpu and not device.is_gpu:
         warnings.append(
@@ -855,13 +1393,37 @@ def segment_volume(
     if anisotropy is None and working.ndim == 3:
         anisotropy = anisotropy_from_voxel(working_voxel)
 
+    # A minimum size in µm becomes a pixel count here, where both the decimated
+    # voxel size and the mode are known.
+    effective = settings
+    min_ndim = filter_ndim(settings.mode, working.ndim)
+    converted = min_size_in_pixels(settings.min_diameter_um, working_voxel, min_ndim)
+    if converted is not None:
+        effective = replace(settings, min_size=converted)
+        logger.info(
+            "minimum size %.2f µm -> %d %s",
+            settings.min_diameter_um, converted, "voxels" if min_ndim >= 3 else "pixels",
+        )
+
+    # The stitch gap is in µm of depth; it becomes a plane count here, against the
+    # Z voxel size of the volume actually being segmented.
+    gap_planes = 1
+    if settings.mode == MODE_STITCH and working.ndim == 3:
+        gap_planes = stitch_gap_in_planes(settings.stitch_gap_um, working_voxel[0])
+        effective = replace(effective, stitch_gap_planes=gap_planes)
+        if gap_planes > 1:
+            logger.info(
+                "stitch gap %.2f µm -> %d plane(s) at %.3f µm/plane",
+                settings.stitch_gap_um, gap_planes, working_voxel[0],
+            )
+
     if progress is not None:
         progress(f"segmenting {tuple(working.shape)} on {device.describe()}")
 
     started = time.perf_counter()
     masks, info = backend.segment(
         working,
-        settings=settings,
+        settings=effective,
         diameter_px=diameter_px,
         anisotropy=anisotropy if settings.mode == MODE_3D else None,
         device=device,
@@ -874,6 +1436,19 @@ def segment_volume(
         masks = restore_masks(masks, array.shape)
     masks = masks.astype(np.int32, copy=False)
 
+    # The ceiling is applied here, on the full grid: it is measured against the
+    # voxel size the table will use, so "drop anything over 20 µm" removes
+    # exactly the rows the table would show as over 20 µm across.
+    dropped = 0
+    if settings.max_diameter_um > 0:
+        masks, dropped = filter_by_diameter(masks, voxel, settings.max_diameter_um)
+        if dropped:
+            warnings.append(
+                f"Dropped {dropped} object(s) over {settings.max_diameter_um:g} µm across."
+            )
+            logger.info("maximum diameter %.2f µm dropped %d object(s)",
+                        settings.max_diameter_um, dropped)
+
     estimated = info.get("estimated_diameter_px")
     if diameter_px is None and estimated:
         diameter_px = float(estimated)
@@ -884,10 +1459,13 @@ def segment_volume(
     result = SegmentationResult(
         masks=masks,
         n_objects=int(masks.max()) if masks.size else 0,
+        dropped_oversize=dropped,
+        stitch_gap_planes=gap_planes,
         voxel_size_um=padded_voxel,  # type: ignore[arg-type]
         model=settings.resolved_model(),
         mode=settings.mode,
         device=device.describe(),
+        projected=projected,
         diameter_px=diameter_px,
         anisotropy=anisotropy,
         scale_factors=padded_factors,  # type: ignore[arg-type]
@@ -1006,12 +1584,18 @@ def _medians(ids: np.ndarray, values: np.ndarray, highest: int) -> np.ndarray:
     return medians
 
 
-def object_dataframe(stats: Sequence[ObjectStat]):
-    """The per-object table as a DataFrame, ready for the workbook writer."""
+def object_dataframe(stats: Sequence[ObjectStat], ndim: int = 3):
+    """The per-object table as a DataFrame, ready for the workbook writer.
+
+    *ndim* is the label map's, and only picks the column headings — pass 2 for a
+    projected run so the size column says area rather than volume. It is not
+    inferred from the stats: objects in a genuine 3D run can all sit at z=0, and
+    guessing wrong puts a wrong unit on a right number.
+    """
     import pandas as pd
 
     frame = pd.DataFrame([stat.as_row() for stat in stats], columns=list(OBJECT_COLUMNS))
-    return frame.rename(columns=OBJECT_HEADERS)
+    return frame.rename(columns=object_headers(ndim))
 
 
 def count_summary(stats: Sequence[ObjectStat]) -> dict[str, float]:

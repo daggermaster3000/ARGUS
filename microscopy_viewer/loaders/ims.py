@@ -47,6 +47,49 @@ def can_read(path: Path) -> bool:
     return path.suffix.lower() in (".ims", ".imaris")
 
 
+def _same_file(handle: h5py.File, path: Path) -> bool:
+    try:
+        return Path(str(handle.filename)).resolve() == path
+    except Exception:  # a closed handle has no filename
+        return False
+
+
+def release(path: str | Path) -> int:
+    """Close the read handles this module is holding on *path*. Returns how many.
+
+    HDF5 will not open a file for writing while it is open for reading, even in
+    the same process — ``"file is already open for read-only"`` — and the handles
+    here are deliberately never closed, because the dask graphs read through them
+    long after :func:`read` returned. So anything that wants to *write* into an
+    ``.ims`` has to ask for the handle back first.
+
+    Calling this invalidates every layer still backed by the file: their arrays
+    are lazy and will raise on the next read. Remove those layers first. It is
+    the caller's job because only the caller knows whether they are still on
+    screen.
+    """
+    target = Path(path).resolve()
+    closed = 0
+    for handle in list(_OPEN_FILES):
+        if not _same_file(handle, target):
+            continue
+        try:
+            handle.close()
+        except Exception:
+            logger.debug("could not close the handle on %s", target, exc_info=True)
+        _OPEN_FILES.remove(handle)
+        closed += 1
+    if closed:
+        logger.info("released %d read handle(s) on %s", closed, target.name)
+    return closed
+
+
+def is_open(path: str | Path) -> bool:
+    """Whether this module is still holding a read handle on *path*."""
+    target = Path(path).resolve()
+    return any(_same_file(handle, target) for handle in _OPEN_FILES)
+
+
 # ---------------------------------------------------------------------------
 # HDF5 attribute helpers
 # ---------------------------------------------------------------------------

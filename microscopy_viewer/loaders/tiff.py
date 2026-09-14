@@ -270,6 +270,48 @@ def _split_channels(arrays: list[Any], axes: str) -> tuple[list[list[Any]], str,
 _OPEN_FILES: list[tifffile.TiffFile] = []
 
 
+def _same_file(handle: "tifffile.TiffFile", path: Path) -> bool:
+    try:
+        return Path(str(handle.filehandle.path)).resolve() == path
+    except Exception:
+        try:
+            return Path(str(handle.filename)).name == path.name
+        except Exception:
+            return False
+
+
+def release(path: str | Path) -> int:
+    """Close the handles this module holds on *path*. Returns how many.
+
+    The same contract as :func:`microscopy_viewer.loaders.ims.release`, and needed
+    for the same reason: the handles are kept for the process lifetime so the lazy
+    arrays stay readable, which over a folder-at-a-time batch means one open file
+    per sample and, on Windows, a file nobody can move or delete afterwards.
+
+    Every layer still backed by the file is invalidated. Remove those first.
+    """
+    target = Path(path).resolve()
+    closed = 0
+    for handle in list(_OPEN_FILES):
+        if not _same_file(handle, target):
+            continue
+        try:
+            handle.close()
+        except Exception:
+            logger.debug("could not close the handle on %s", target, exc_info=True)
+        _OPEN_FILES.remove(handle)
+        closed += 1
+    if closed:
+        logger.info("released %d read handle(s) on %s", closed, target.name)
+    return closed
+
+
+def is_open(path: str | Path) -> bool:
+    """Whether this module is still holding a handle on *path*."""
+    target = Path(path).resolve()
+    return any(_same_file(handle, target) for handle in _OPEN_FILES)
+
+
 def read(path: Path) -> list[LayerSpec]:
     """Read *path* and return one :class:`LayerSpec` per channel."""
     path = Path(path)

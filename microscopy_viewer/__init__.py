@@ -12,10 +12,14 @@ or from a shell::
 
 from __future__ import annotations
 
-from .runtime import configure_numba_cache
+from .runtime import allow_duplicate_openmp, configure_numba_cache, ensure_std_streams
 
+# Must run before any library writes to a stream: see runtime.ensure_std_streams.
+ensure_std_streams()
 # Must run before anything imports napari: see runtime.configure_numba_cache.
 configure_numba_cache()
+# Must run before anything imports torch: see runtime.allow_duplicate_openmp.
+allow_duplicate_openmp()
 
 __version__ = "1.0.0"
 __all__ = ["MicroscopyViewer", "launch", "main", "__version__"]

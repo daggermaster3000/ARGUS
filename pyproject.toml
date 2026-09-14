@@ -86,4 +86,6 @@ microscopy-viewer-gui = "microscopy_viewer.__main__:main"
 include = ["microscopy_viewer*"]
 
 [tool.setuptools.package-data]
-microscopy_viewer = ["*.ico"]
+# The splash animation ships inside the package rather than beside it, so an
+# installed copy has it too: the viewer looks for it at runtime, not at build.
+microscopy_viewer = ["*.ico", "resources/*"]

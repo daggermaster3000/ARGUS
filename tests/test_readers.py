@@ -399,6 +399,112 @@ def test_load_errors() -> None:
         check(len(errors) == 1, "a corrupt .ims is reported, not raised")
 
 
+def test_layer_units_reach_napari() -> None:
+    """From napari 0.8 the scale bar reads layer.units, not an overlay field."""
+    print("calibrated layers carry their unit")
+
+    from microscopy_viewer.loaders.layer_spec import LayerSpec, supports_layer_units
+    from microscopy_viewer.metadata import AcquisitionMetadata
+    from microscopy_viewer.utils import MICRON
+
+    meta = AcquisitionMetadata(image_name="x", pixel_size_x_um=0.3, pixel_size_y_um=0.3)
+    spec = LayerSpec(
+        data=np.zeros((4, 8, 8), np.uint16),
+        name="calibrated",
+        axes="ZYX",
+        scale=(0.5, 0.3, 0.3),
+        metadata=meta,
+        units=(MICRON,) * 3,
+    )
+    kwargs = spec.to_kwargs()
+    if supports_layer_units():
+        check("units" in kwargs, "the unit is passed to the layer, not just the metadata")
+        check(kwargs["units"] == (MICRON,) * 3, f"one per axis ({kwargs.get('units')})")
+    else:
+        check("units" not in kwargs, "an older napari is not handed an argument it lacks")
+
+    # A partial or absent unit tuple must not produce a half-labelled layer.
+    bare = LayerSpec(
+        data=np.zeros((4, 8, 8), np.uint16), name="bare", axes="ZYX",
+        scale=(0.5, 0.3, 0.3), metadata=meta,
+    )
+    check("units" not in bare.to_kwargs(), "no units means none are passed")
+    partial = LayerSpec(
+        data=np.zeros((4, 8, 8), np.uint16), name="partial", axes="ZYX",
+        scale=(0.5, 0.3, 0.3), metadata=meta, units=(MICRON,),
+    )
+    check("units" not in partial.to_kwargs(), "a partial tuple is dropped rather than guessed at")
+
+    # And the real thing: napari has to accept what the readers produce.
+    if supports_layer_units():
+        from napari.layers import Image
+
+        layer = Image(spec.data, scale=spec.scale, units=kwargs["units"])
+        check(
+            all(str(unit) == "micrometer" for unit in layer.units),
+            f"napari parses the micro sign ({layer.units})",
+        )
+
+
+def test_derived_layers_inherit_the_unit() -> None:
+    """A layer added without units is dimensionless, and one is enough to spoil it.
+
+    napari compares units across layers right-aligned and by dimensionality. The
+    default is ``pixel``, which is dimensionless, so a single ROI or region layer
+    left on it makes the whole list inconsistent — at which point napari warns,
+    stops using units for rendering, and **the scale bar goes back to reading
+    pixels over a calibrated image**. Drawing a ROI must not do that.
+    """
+    print("derived layers inherit the unit")
+
+    from microscopy_viewer.loaders.layer_spec import (
+        DEFAULT_UNIT,
+        supports_layer_units,
+        units_like,
+        world_units,
+    )
+
+    if not supports_layer_units():
+        check(units_like(_FakeLayer(("um", "um")), 2) == {}, "an older napari is handed nothing")
+        return
+
+    calibrated = _FakeLayer(("second", "um", "um", "um"), ndim=4)
+    uncalibrated = _FakeLayer((DEFAULT_UNIT,) * 2, ndim=2)
+
+    # Right-aligned: a 2D ROI over a 4D stack takes the last two axes.
+    check(units_like(calibrated, 2) == {"units": ("um", "um")}, "two axes taken from the end")
+    check(len(units_like(calibrated, 4)["units"]) == 4, "and all four when four are wanted")
+    check(units_like(calibrated, 9) == {}, "more axes than exist yields nothing, not a guess")
+    check(units_like(None, 2) == {}, "nothing to copy from, nothing copied")
+
+    viewer = _FakeViewer([uncalibrated, calibrated])
+    check(
+        world_units(viewer, 2) == {"units": ("um", "um")},
+        "the calibrated layer is the one followed, not merely the first",
+    )
+    check(
+        world_units(_FakeViewer([uncalibrated]), 2) == {},
+        "with nothing calibrated there is nothing to match",
+    )
+    # Without this a layer asking what the others use is answered with its own
+    # units, and can never be corrected.
+    check(
+        world_units(_FakeViewer([calibrated]), 2, exclude=calibrated) == {},
+        "a layer does not match against itself",
+    )
+    check(world_units(None, 2) == {}, "and no viewer is not an error")
+
+
+class _FakeLayer:
+    def __init__(self, units, ndim=None):
+        self.units = tuple(units)
+        self.ndim = ndim if ndim is not None else len(self.units)
+
+
+class _FakeViewer:
+    def __init__(self, layers):
+        self.layers = list(layers)
+
 def main() -> int:
     if not SAMPLES.exists():
         print(f"sample data missing — run: python {Path('tests/make_sample_data.py')}")
@@ -420,6 +526,8 @@ def main() -> int:
         test_roi_names_are_unique,
         test_excel_export,
         test_load_errors,
+        test_layer_units_reach_napari,
+        test_derived_layers_inherit_the_unit,
     ):
         test()
         print()

@@ -9,12 +9,14 @@ Set ``QT_QPA_PLATFORM=offscreen`` to run it on a machine with no display.
 
 from __future__ import annotations
 
+import shutil
 import sys
 import tempfile
 import time
 from pathlib import Path
 
 import numpy as np
+from qtpy.QtCore import QCoreApplication, Qt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -37,12 +39,66 @@ def _is_missing_gl(exc: BaseException) -> bool:
     return any(marker in str(exc) for marker in _NO_GL_MARKERS)
 
 
+def load_and_release(path):
+    """Read a file and give its handle straight back.
+
+    The readers hold files open for the life of the process so their lazy arrays
+    stay readable; in a temporary folder that is what stops Windows deleting it.
+    """
+    from microscopy_viewer.loaders import load_path, release
+
+    specs = load_path(path)
+    for spec in specs:
+        spec.data = np.asarray(spec.data[0] if spec.multiscale else spec.data)
+        spec.multiscale = False
+    release(path)
+    return specs
+
+
+def loader_release(path):
+    from microscopy_viewer.loaders import release
+
+    return release(path)
+
+
 def check(condition: bool, message: str) -> None:
     if condition:
         print(f"  ok   {message}", flush=True)
     else:
         print(f"  FAIL {message}", flush=True)
         _failures.append(message)
+
+
+
+class _StubSegmentation:
+    """A segmentation backend that labels a corner, so no weights are downloaded."""
+
+    name = "stub"
+    install_hint = "-"
+
+    def available(self) -> bool:
+        return True
+
+    def model_choices(self):
+        from microscopy_viewer import segmentation as sg
+
+        return (sg.ModelChoice(label="stub", value="stub"),)
+
+    def models(self):
+        return ("stub",)
+
+    def available_models(self):
+        return ("stub",)
+
+    def unsupported_models(self):
+        return ()
+
+    def segment(self, image, settings, diameter_px, anisotropy, device, progress=None):
+        import numpy as np
+
+        masks = np.zeros(np.asarray(image).shape, dtype=np.int32)
+        masks[..., :4, :4] = 1
+        return masks, {}
 
 
 def main() -> int:
@@ -75,7 +131,24 @@ def main() -> int:
     check(added == 5, f"five layers added from three files (got {added})")
     check(len(app.viewer.layers) == 5, f"viewer holds five layers ({len(app.viewer.layers)})")
     check(app.viewer.dims.ndim == 4, f"viewer is 4D for the widest dataset ({app.viewer.dims.ndim})")
-    check(app.viewer.scale_bar.unit == MICRON, f"scale bar unit = {app.viewer.scale_bar.unit!r}")
+    # Where the scale bar reads its unit from moved in napari 0.8: the overlay
+    # lost its own ``unit`` field and now takes it from the layer. Check whichever
+    # one this napari actually has, because checking the wrong one passes on the
+    # version that is broken and fails on the version that works.
+    overlay_fields = getattr(type(app.viewer.scale_bar), "model_fields", None) or getattr(
+        type(app.viewer.scale_bar), "__fields__", {}
+    )
+    if "unit" in overlay_fields:
+        check(app.viewer.scale_bar.unit == MICRON, f"scale bar unit = {app.viewer.scale_bar.unit!r}")
+    else:
+        # napari normalises the unit through pint, so "um" comes back as
+        # "micrometer" rather than as the string the reader handed it.
+        micron_names = {MICRON, "um", "micron", "micrometer", "micrometre"}
+        units = [tuple(str(u) for u in layer.units) for layer in app.viewer.layers]
+        check(
+            all(unit in micron_names for entry in units for unit in entry[-2:]),
+            f"layers carry micrometre units for the scale bar to read ({units[0]})",
+        )
     names = [layer.name for layer in app.viewer.layers]
     check(any("GFP" in name for name in names), f"channel names used in layers: {names[:2]}")
     print(flush=True)
@@ -365,6 +438,34 @@ def main() -> int:
     check(not app.timeseries_widget.playing, "and stops it again")
     print(flush=True)
 
+    print("the startup splash", flush=True)
+    from microscopy_viewer import splash as splash_module
+
+    check(splash_module.ANIMATION.is_file(), f"the animation ships with the package ({splash_module.ANIMATION.name})")
+    banner = splash_module.start("Smoke test")
+    check(banner is not None, "a splash is made when a QApplication exists")
+    if banner is not None:
+        check(banner.widget.isVisible(), "and it is on screen")
+        check(banner._movie is not None, "Qt can play the animation")
+        if banner._movie is not None:
+            check(banner._movie.frameCount() > 1, f"which has {banner._movie.frameCount()} frames")
+        # The whole point of pump(): the build never returns to the event loop,
+        # so this is what makes the splash paint and say where it has got to.
+        banner.pump("Building the Segmentation panel…")
+        check(banner._message.text().startswith("Building"), "pump puts the step on the splash")
+        banner.finish(None)
+        check(not banner.widget.isVisible(), "and it closes when the window is ready")
+
+    # The progress hook is the same one the splash is driven through, and a
+    # viewer built without one must behave exactly as it always did.
+    steps: list[str] = []
+    quiet = MicroscopyViewer(show=False, progress=steps.append)
+    check(steps and steps[0].startswith("Starting"), f"the build reports its steps ({len(steps)} of them)")
+    check(any("panel" in step for step in steps), "including the panel being built")
+    check(steps[-1] == "Ready", f"and says when it is done ({steps[-1]!r})")
+    quiet.viewer.close()
+    print(flush=True)
+
     print("PowerPoint slide export", flush=True)
     from microscopy_viewer import slides
     from microscopy_viewer.widgets.slide_dialog import SlideExportDialog
@@ -373,6 +474,36 @@ def main() -> int:
     check(dialog._sample_table.rowCount() > 0, f"the dialog lists {dialog._sample_table.rowCount()} sample(s)")
     check(dialog._channel_table.rowCount() > 0, f"and {dialog._channel_table.rowCount()} channel(s)")
     check(bool(dialog.labels()), "channel labels are pre-filled from the file")
+    # -- manual contrast ------------------------------------------------------
+    from qtpy.QtCore import Qt
+
+    from microscopy_viewer.widgets.slide_dialog import _parse_limits
+
+    table = dialog._channel_table
+    check(table.columnCount() == 5, f"the channel table carries Min and Max ({table.columnCount()} columns)")
+    check(not dialog.contrast_limits(), "nothing is typed until manual mode is chosen")
+    check(not (table.item(0, 3).flags() & Qt.ItemIsEditable), "and the limit cells start locked")
+
+    dialog._contrast.setCurrentText(slides.CONTRAST_MANUAL)
+    check(bool(table.item(0, 3).flags() & Qt.ItemIsEditable), "manual mode unlocks them")
+    check(table.item(0, 4).text() != "", f"seeded from the displayed range ({table.item(0, 4).text()!r})")
+
+    key = dialog._columns[0][0]
+    table.item(0, 3).setText("10")
+    table.item(0, 4).setText("2000")
+    check(dialog.contrast_limits().get(key) == (10.0, 2000.0), "what is typed is what the export gets")
+
+    # A backwards or half-typed pair falls back rather than raising: the picture
+    # is then the displayed range, which is better than a modal complaint.
+    table.item(0, 3).setText("2000")
+    table.item(0, 4).setText("10")
+    check(key not in dialog.contrast_limits(), "a backwards pair is ignored")
+    check(_parse_limits("", "") is None and _parse_limits("abc", "5") is None, "so are empty and unparseable boxes")
+    check(_parse_limits(" 3 ", "9.5") == (3.0, 9.5), "and a good pair reads as numbers")
+
+    dialog._contrast.setCurrentText(slides.CONTRAST_AS_DISPLAYED)
+    check(not dialog.contrast_limits(), "leaving manual mode drops the typed limits again")
+
     chosen = dialog.selected_samples()
     check(len(chosen) == dialog._sample_table.rowCount(), "every sample starts ticked")
     dialog.close()
@@ -417,14 +548,103 @@ def main() -> int:
 
     batch._rows_per_slide.setValue(2)
     with tempfile.TemporaryDirectory() as directory:
+        # Closeups off: this check is about how the rows are split, and a folder
+        # that happens to hold a nested acquisition would add slides to the count.
         deck = slides.export_slide(
             batch.selected_samples(), Path(directory) / "batch.pptx",
             max_pixels=120, rows_per_slide=2, contrast=slides.CONTRAST_AUTO,
+            zoom_slides=False,
         )
         count = len(Presentation(str(deck)).slides)
         expected = -(-len(batch.selected_samples()) // 2)
         check(count == expected, f"{count} slide(s) at two rows each, as expected ({expected})")
     batch.close()
+    print(flush=True)
+
+    print("batch maximum projection", flush=True)
+    from microscopy_viewer import projection as pj
+    from microscopy_viewer.widgets.projection_dialog import ProjectionDialog
+
+    check("mip" in app.toolbar._buttons, "the batch MIP button is on the toolbar")
+    with tempfile.TemporaryDirectory() as directory:
+        stacks = Path(directory) / "stacks"
+        stacks.mkdir()
+        for name in ("fish_1", "fish_2"):
+            shutil.copy(SAMPLES / "sample_4d_2ch.ims", stacks / f"{name}.ims")
+        out = Path(directory) / "MIP"
+
+        layers_before = len(app.viewer.layers)
+        dialog = ProjectionDialog(stacks)
+        try:
+            dialog._input_edit.setText(str(stacks))
+            dialog.rescan()
+            for _ in range(1500):
+                QCoreApplication.processEvents()
+                if dialog._channel_list.count():
+                    break
+                time.sleep(0.01)
+            offered = [dialog._channel_list.item(row).text() for row in range(dialog._channel_list.count())]
+            check(offered == ["GFP", "mCherry"], f"channel names were read from the files ({offered})")
+            check(len(dialog._paths) == 2, f"both stacks were listed ({len(dialog._paths)})")
+
+            # Tick one channel by name; the point of the list is picking stains,
+            # not positions.
+            dialog._output_edit.setText(str(out))
+            dialog._all_channels.setChecked(False)
+            for row in range(dialog._channel_list.count()):
+                item = dialog._channel_list.item(row)
+                item.setCheckState(Qt.Checked if item.text() == "mCherry" else Qt.Unchecked)
+            check(dialog.chosen_channels() == ("mCherry",), "one channel ticked")
+
+            dialog._format_box.setCurrentIndex(1)  # Imaris
+            check(dialog.options().fmt == ".ims", f"the format combo yields a suffix ({dialog.options().fmt})")
+
+            dialog.run()
+            for _ in range(3000):
+                QCoreApplication.processEvents()
+                if dialog._worker is None and dialog.outcomes:
+                    break
+                time.sleep(0.01)
+            written = sorted(path.name for path in out.iterdir())
+            check(written == ["fish_1_MIP.ims", "fish_2_MIP.ims"], f"one output per stack ({written})")
+
+            source = load_and_release(stacks / "fish_1.ims")
+            result = load_and_release(out / "fish_1_MIP.ims")
+            check(
+                [spec.channel_name for spec in result] == ["mCherry"],
+                f"carrying only the ticked channel ({[s.channel_name for s in result]})",
+            )
+            reference = next(spec for spec in source if spec.channel_name == "mCherry")
+            expected = np.asarray(reference.data).max(axis=reference.axes.index("Z"))
+            check(
+                np.array_equal(np.asarray(result[0].data), expected),
+                "and it really is the maximum over Z, pixel for pixel",
+            )
+            check(
+                tuple(round(float(v), 4) for v in result[0].scale)[-2:] == (0.13, 0.13),
+                f"with the pixel size intact ({tuple(round(float(v), 4) for v in result[0].scale)})",
+            )
+            check(
+                len(app.viewer.layers) == layers_before,
+                f"and nothing was added to the viewer ({len(app.viewer.layers)})",
+            )
+
+            # A second pass must not silently rewrite what is already there.
+            dialog.run()
+            for _ in range(2000):
+                QCoreApplication.processEvents()
+                if dialog._worker is None and dialog.outcomes:
+                    break
+                time.sleep(0.01)
+            check(
+                all(outcome.skipped for outcome in dialog.outcomes),
+                "re-running skips outputs that already exist",
+            )
+            check("already existed" in dialog._status.text(), f"and says so ({dialog._status.text()[:60]!r})")
+        finally:
+            dialog.close()
+            for path in list(stacks.glob("*.ims")) + list(out.glob("*.ims")):
+                loader_release(path)
     print(flush=True)
 
     print("drag-and-drop path handling", flush=True)
@@ -450,6 +670,8 @@ def main() -> int:
     check("timeseries" in identifiers, "time-series panel registered")
     check("atlas_registration" in identifiers, "atlas registration panel registered")
     check("segmentation" in identifiers, "segmentation panel registered")
+    check("regions" in identifiers, "brain regions panel registered")
+    check("experiment" in identifiers, "experiment setup panel registered")
     for identifier in identifiers:
         check(identifier in app.panels, f"{identifier} built and tracked in app.panels")
         check(identifier in app.docks, f"{identifier} has a dock")
@@ -458,6 +680,8 @@ def main() -> int:
     check(app.intensity_widget is not None, "intensity_widget attribute populated")
     check(app.registration_widget is not None, "registration_widget attribute populated")
     check(app.segmentation_widget is not None, "segmentation_widget attribute populated")
+    check(app.regions_widget is not None, "regions_widget attribute populated")
+    check(app.experiment_widget is not None, "experiment_widget attribute populated")
     print(flush=True)
 
     print("atlas registration panel", flush=True)
@@ -547,6 +771,310 @@ def main() -> int:
     else:
         check(not panel._run_button.isEnabled(), "without cellpose, Segment is disabled")
         check(not panel._backend_notice.isHidden(), "and the panel says what to install")
+
+    # Maximum-projection mode, through the panel but around cellpose: the stub
+    # keeps this a smoke check rather than a minutes-long segmentation.
+    modes = [panel._mode_box.itemText(i) for i in range(panel._mode_box.count())]
+    check(sg.MODE_MIP in modes, f"the projection mode is offered ({modes})")
+    panel._mode_box.setCurrentText(sg.MODE_MIP)
+    check(panel.settings().is_projection, "and the panel builds a projecting settings object")
+    check(not panel._stitch.isEnabled(), "the stitch threshold is greyed out, since it is unused")
+
+    if image is not None and image.ndim == 3:
+        flat = sg.max_projection(image)
+        check(flat.shape == image.shape[1:], f"a snapshot flattens to 2D ({flat.shape})")
+        stub = _StubSegmentation()
+        sg.register_backend(stub)
+        try:
+            projected = sg.segment_volume(
+                image, voxel,
+                settings=sg.SegmentationSettings(backend="stub", mode=sg.MODE_MIP),
+            )
+            check(projected.projected, "a projected run says so on the result")
+            check(projected.masks.ndim == 2, f"and returns 2D labels ({projected.masks.shape})")
+            stats = sg.object_table(
+                projected.masks, flat, projected.voxel_size_um[-2:]
+            )
+            check(bool(stats), f"the object table measures on the projection ({len(stats)} row(s))")
+            headers = sg.object_headers(2)
+            check(headers["volume_um3"] == "Area (µm²)", "2D results are labelled as areas")
+        finally:
+            sg._BACKENDS.pop("stub", None)
+    print(flush=True)
+
+    print("brain regions panel", flush=True)
+    from microscopy_viewer import regions as reg
+
+    regions_panel = app.regions_widget
+    labels = np.zeros((8, 64, 64), dtype=np.int32)
+    labels[:, 4:8, 4:8] = 1        # centroid near (6, 6)
+    labels[:, 4:8, 40:44] = 2      # centroid near (6, 41)
+    labels[:, 40:44, 40:44] = 3    # centroid near (41, 41)
+    from microscopy_viewer.loaders.layer_spec import world_units
+
+    app.viewer.add_labels(
+        labels, name="smoke labels", scale=(1.0, 1.0, 1.0), **world_units(app.viewer, 3)
+    )
+    regions_panel.refresh_layers()
+    check(regions_panel._labels_box.count() > 0, "the label map list found a Labels layer")
+
+    region_layer = regions_panel.region_layer(create=True)
+    check(region_layer is not None, "the region layer is created on demand")
+
+    # A Shapes layer added without units defaults to dimensionless "pixel", and
+    # one of those in the list makes napari drop units for the whole viewer —
+    # which puts the scale bar back to reading pixels over a calibrated image.
+    def _world_units():
+        units = app.viewer.layers.extent.units
+        return None if units is None else tuple(str(unit) for unit in units)
+
+    check(
+        tuple(str(unit) for unit in region_layer.units) == ("micrometer", "micrometer"),
+        f"the region layer took the images' unit ({tuple(str(u) for u in region_layer.units)})",
+    )
+    check(
+        _world_units() is not None and _world_units()[-1] == "micrometer",
+        f"and the viewer's units survived it ({_world_units()})",
+    )
+    roi_probe = mm.new_roi_layer(app.viewer, app.viewer.layers[0])
+    check(
+        _world_units() is not None and _world_units()[-1] == "micrometer",
+        f"a measurements ROI layer does not break them either ({_world_units()})",
+    )
+    app.viewer.layers.remove(roi_probe)
+    region_layer.add_rectangles(np.array([[0.0, 0.0], [0.0, 20.0], [64.0, 20.0], [64.0, 0.0]]))
+    region_layer.add_rectangles(np.array([[0.0, 20.0], [0.0, 64.0], [64.0, 64.0], [64.0, 20.0]]))
+    regions_panel.refresh_regions()
+    check(
+        regions_panel._region_table.rowCount() == 2,
+        f"both outlines reached the table ({regions_panel._region_table.rowCount()})",
+    )
+    regions_panel.suggest_names()
+    names = [regions_panel._region_table.item(row, 0).text() for row in range(2)]
+    check(names == list(reg.SUGGESTED_REGIONS[:2]), f"names were suggested ({names})")
+
+    # Rename through the table and check it reaches the layer, not just the cell.
+    regions_panel._region_table.item(0, 0).setText("cerebellum left")
+    check(
+        regions_panel.collect_regions()[0].name == "cerebellum left",
+        "editing the table renames the outline on the layer",
+    )
+
+    index = regions_panel._labels_box.findData("smoke labels")
+    regions_panel._labels_box.setCurrentIndex(index)
+    regions_panel.count()
+    for _ in range(600):
+        QCoreApplication.processEvents()
+        if regions_panel._worker is None and regions_panel._counts:
+            break
+        time.sleep(0.01)
+    counted = {row.region: row.n_objects for row in regions_panel._counts}
+    check(sum(counted.values()) == 3, f"every object was counted once ({counted})")
+    check(counted.get("cerebellum left") == 1, f"one object on the left ({counted})")
+    check(
+        regions_panel._result_table.rowCount() == len(regions_panel._counts),
+        "the results table matches the counts",
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / "counts.xlsx"
+        from microscopy_viewer.exports import export_sheets
+
+        written = export_sheets(
+            {
+                "Regions": reg.counts_dataframe(regions_panel._counts),
+                "Objects": reg.objects_dataframe(
+                    regions_panel._stats, regions_panel._regions
+                ),
+            },
+            target,
+        )
+        check(Path(written).stat().st_size > 4000, f"a two-sheet workbook was written ({written.name})")
+    app.viewer.layers.remove("smoke labels")
+    print(flush=True)
+
+    print("experiment setup panel", flush=True)
+    from microscopy_viewer import ims_store as store
+    from microscopy_viewer.loaders import ims as ims_reader
+
+    exp_panel = app.experiment_widget
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        shutil.copy(SAMPLES / "sample_4d_2ch.ims", folder / "fish_1.ims")
+        shutil.copy(SAMPLES / "sample_4d_2ch.ims", folder / "fish_2.ims")
+
+        before_scan = len(app.viewer.layers)
+        exp_panel._folder_edit.setText(str(folder))
+        exp_panel.scan()
+        for _ in range(1500):
+            QCoreApplication.processEvents()
+            if exp_panel._worker is None and exp_panel._entries:
+                break
+            time.sleep(0.01)
+        check(len(exp_panel._entries) == 2, f"both samples were found ({len(exp_panel._entries)})")
+        check(exp_panel._grid.count() == 2, "and both have a tile in the grid")
+        check(all(entry.readable for entry in exp_panel._entries), "both read cleanly")
+        icons = [not exp_panel._grid.item(row).icon().isNull() for row in range(2)]
+        check(all(icons), f"thumbnails were drawn ({icons})")
+        check(
+            exp_panel._entries[0].n_channels == 2,
+            f"channels counted without opening the file ({exp_panel._entries[0].n_channels})",
+        )
+        check(
+            len(app.viewer.layers) == before_scan,
+            f"scanning added nothing to the viewer ({len(app.viewer.layers)} layers)",
+        )
+
+        # Outlines on screen are written into the files themselves.
+        exp_panel._grid.selectAll()
+        written = exp_panel.current_rois()
+        check(len(written) == 2, f"the panel picked up the outlines on the canvas ({len(written)})")
+        exp_panel.write_rois_to_selected()
+        stored = store.load_rois(folder / "fish_1.ims")
+        check(len(stored) == 2, f"both ROIs reached the .ims file ({len(stored)})")
+        check(
+            stored[0].name == "cerebellum left",
+            f"with the names they were given ({[roi.name for roi in stored]})",
+        )
+        check(
+            len(store.load_rois(folder / "fish_2.ims")) == 2,
+            "and into every selected sample, not just the first",
+        )
+
+        # The tile text is refreshed so the file's new contents are visible.
+        check(
+            "ROI" in exp_panel._grid.item(0).text(),
+            f"the tile says what the file now carries ({exp_panel._grid.item(0).text()!r})",
+        )
+
+        # Reading them back onto the canvas is the other half of the round trip.
+        region_layer.data = []
+        exp_panel.load_rois_from_sample()
+        check(len(region_layer.data) == 2, "the stored ROIs came back onto the canvas")
+
+        # The batch borrows the segmentation panel's settings rather than
+        # duplicating them.
+        borrowed = exp_panel._batch_settings()
+        check(
+            borrowed.mode == app.segmentation_widget.settings().mode,
+            "the batch takes its settings from the segmentation panel",
+        )
+        check(exp_panel._channel_spec("2") == 2, "a bare number is a channel index")
+        check(exp_panel._channel_spec("dapi") == "dapi", "anything else is a channel name")
+        check(exp_panel._channel_spec("  ") is None, "and an empty box is no channel at all")
+
+        # The check that matters: opening a sample must put its stored regions
+        # back by itself. Saving them and then having to remember a Load button
+        # is how a saved annotation looks lost. A second viewer, because the test
+        # is that *opening a file* does it, not that a method works.
+        fresh = MicroscopyViewer(show=False)
+        try:
+            fresh.open_paths([folder / "fish_1.ims"])
+            restored = [region.name for region in fresh.regions_widget.collect_regions()]
+            check(
+                restored == ["cerebellum left", "midbrain"],
+                f"opening the sample restored its stored regions ({restored})",
+            )
+            check(
+                reg.REGION_LAYER_NAME in fresh.viewer.layers,
+                "and made the region layer to put them on",
+            )
+            check(
+                "Loaded 2 region(s)" in fresh.regions_widget._status.text(),
+                f"and said so ({fresh.regions_widget._status.text()[:60]!r})",
+            )
+
+            # Outlines already on the canvas are somebody's unsaved work and must
+            # not be silently replaced.
+            fresh.regions_widget._regions_source = None
+            fresh.open_paths([folder / "fish_1.ims"])
+            check(
+                "left alone" in fresh.regions_widget._status.text(),
+                f"existing outlines are not clobbered ({fresh.regions_widget._status.text()[:60]!r})",
+            )
+        finally:
+            # Closing the viewer does not give the file back: the reader keeps its
+            # handle for the life of the process, which on Windows is enough to
+            # stop the temporary folder being deleted.
+            fresh.viewer.close()
+            ims_reader.release(folder / "fish_1.ims")
+
+        # Stepping through a folder replaces the sample on screen rather than
+        # piling samples up — that is the whole point of the panel. Its own
+        # viewer, because replacing closes every file-backed layer, including the
+        # ones the sections after this one still need.
+        stepper = MicroscopyViewer(show=False)
+        try:
+            panel = stepper.experiment_widget
+            panel._folder_edit.setText(str(folder))
+            panel.scan()
+            for _ in range(2000):
+                QCoreApplication.processEvents()
+                if panel._worker is None and panel._entries:
+                    break
+                time.sleep(0.01)
+
+            def _images():
+                from napari.layers import Image
+
+                return [layer for layer in stepper.viewer.layers if isinstance(layer, Image)]
+
+            def _show(row):
+                panel._grid.clearSelection()
+                panel._grid.item(row).setSelected(True)
+                panel.open_selected()
+
+            _show(0)
+            first = len(_images())
+            check(first == 2, f"opening a sample shows its two channels ({first})")
+            _show(1)
+            check(
+                len(_images()) == first,
+                f"opening the next one replaces it rather than adding ({len(_images())})",
+            )
+            check(
+                "Replaced" in panel._status.text() and "fish_2" in panel._status.text(),
+                f"and says which sample is up ({panel._status.text()!r})",
+            )
+            check(
+                not ims_reader.is_open(folder / "fish_1.ims"),
+                "the sample that went away released its file",
+            )
+
+            # Outlines are not samples: they must survive the swap, or drawing
+            # the same regions across a folder would be impossible.
+            kept = stepper.regions_widget.region_layer(create=True)
+            kept.add_rectangles(np.array([[0.0, 0.0], [0.0, 20.0], [30.0, 20.0], [30.0, 0.0]]))
+            stepper.regions_widget.refresh_regions()
+            _show(0)
+            check(
+                reg.REGION_LAYER_NAME in stepper.viewer.layers,
+                "the region layer survives a sample swap",
+            )
+            check(len(_images()) == first, "and the swap still replaced the images")
+
+            # Selecting two shows exactly two.
+            panel._grid.clearSelection()
+            for row in (0, 1):
+                panel._grid.item(row).setSelected(True)
+            panel.open_selected()
+            check(len(_images()) == 2 * first, f"two selected shows both ({len(_images())})")
+        finally:
+            stepper.viewer.close()
+            for name in ("fish_1.ims", "fish_2.ims"):
+                ims_reader.release(folder / name)
+
+        # A sample carrying nothing must not conjure an empty region layer.
+        bare = MicroscopyViewer(show=False)
+        try:
+            bare.open_paths([SAMPLES / "sample_plain.tif"])
+            check(
+                bare.regions_widget.region_layer() is None,
+                "a sample with no stored regions adds no region layer",
+            )
+        finally:
+            bare.viewer.close()
+
+    app.viewer.layers.remove(reg.REGION_LAYER_NAME)
     print(flush=True)
 
     print("ROI intensity comparison panel", flush=True)
@@ -568,8 +1096,6 @@ def main() -> int:
     check(len(panel.condition_rows()) == 2, f"trimmed to two conditions ({len(panel.condition_rows())})")
 
     print("  -- projection layers --", flush=True)
-    from qtpy.QtCore import QCoreApplication
-
     source_name = panel.condition_rows()[0][1]
     source = app.viewer.layers[source_name]
     check(source.ndim == 4, f"the source layer is a 4D stack ({source.ndim}D)")
@@ -766,8 +1292,6 @@ def main() -> int:
     print(flush=True)
 
     print("threaded measurement keeps the UI responsive", flush=True)
-    from qtpy.QtCore import QCoreApplication
-
     panel._result = None
     panel.measure()
     check(not panel._measure_button.isEnabled(), "the Measure button is disabled while running")

@@ -288,8 +288,20 @@ def _is_shapes(layer) -> bool:
     return type(layer).__name__ == "Shapes"
 
 
+#: Metadata flag a Shapes layer can carry to say it is not a measurement ROI
+#: layer. The Brain regions panel sets it: its outlines are anatomy, named by
+#: hand, and this panel renames every shape it finds to "ROI 1", "ROI 2", … —
+#: which quietly overwrites the names before anyone can type them.
+NOT_A_ROI = "mv_not_a_roi"
+
+
 def shapes_layers(viewer) -> list[Any]:
-    return [layer for layer in viewer.layers if _is_shapes(layer)]
+    """Shapes layers this panel measures: all of them bar the opted-out ones."""
+    return [
+        layer
+        for layer in viewer.layers
+        if _is_shapes(layer) and not layer.metadata.get(NOT_A_ROI, False)
+    ]
 
 
 def new_roi_layer(viewer, image_layer=None, name: str | None = None):
@@ -299,6 +311,8 @@ def new_roi_layer(viewer, image_layer=None, name: str | None = None):
     coordinates directly convertible to micrometres.
     """
     from napari.layers import Image
+
+    from .loaders.layer_spec import units_like
 
     if image_layer is None:
         image_layer = next(
@@ -323,6 +337,10 @@ def new_roi_layer(viewer, image_layer=None, name: str | None = None):
     if image_layer is not None:
         kwargs["ndim"] = int(image_layer.ndim)
         kwargs["scale"] = tuple(float(s) for s in image_layer.scale)
+        # Without this the layer defaults to dimensionless "pixel" units, which
+        # makes the whole layer list inconsistent and sends the scale bar back to
+        # reading pixels over a calibrated image.
+        kwargs.update(units_like(image_layer, int(image_layer.ndim)))
         kwargs["name"] = name or f"ROIs — {image_layer.name}"
         kwargs["metadata"] = {
             ROI_KEY: True,

@@ -117,7 +117,32 @@ def expand_inputs(paths: Sequence[str | Path]) -> list[Path]:
     return out
 
 
+def release(path: str | Path) -> int:
+    """Give back every read handle any reader is holding on *path*.
+
+    The readers keep files open for the life of the process so their lazy arrays
+    stay readable. Anything that wants to write the file, move it, or simply work
+    through a folder without accumulating one open handle per sample has to ask
+    for them back — and should not have to know which reader opened it.
+
+    Every layer still backed by the file is invalidated by this. Take those off
+    screen first; only the caller knows whether they are still on it.
+    """
+    from . import ims, tiff
+
+    return sum(reader.release(path) for reader in (ims, tiff))
+
+
+def is_open(path: str | Path) -> bool:
+    """Whether any reader is still holding *path* open."""
+    from . import ims, tiff
+
+    return any(reader.is_open(path) for reader in (ims, tiff))
+
+
 __all__ = [
+    "release",
+    "is_open",
     "COLORMAP_CYCLE",
     "FILE_DIALOG_FILTER",
     "LayerSpec",

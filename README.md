@@ -94,6 +94,66 @@ make a `.desktop` entry pointing at the `microscopy-viewer` command.
 Several datasets can be open at once; each channel becomes its own layer, blended
 additively, so you can toggle and compare them from napari's layer list.
 
+### Startup
+
+napari puts its main window on screen the instant the viewer object exists and
+then spends several seconds building the docks — importing what each panel needs,
+waking the GPU, reading settings. What is on screen for those seconds is an empty
+white window, which looks like a hung application rather than a loading one.
+
+So the window is kept hidden until it is built, and the animation in
+`microscopy_viewer/resources/loading.gif` is shown in its place, with the step
+currently running underneath it:
+*Building the Segmentation panel…*, *Opening 3 file(s)…*, *Ready*. The window then
+appears complete, with the files already open.
+
+The animation only advances while something is processing events, and building a
+viewer is one long blocking call, so the build drives it: each step calls the
+splash, which is what both names the step and lets Qt paint a frame. That makes
+the splash a progress report as much as a picture — if startup ever does hang, the
+last line says where.
+
+Nothing depends on it. A missing GIF, a Qt build without the image plugin, or any
+other failure means the splash is skipped and the window opens the way it always
+did. `--no-splash` does the same on purpose.
+
+#### While the window is busy
+
+The same animation comes back whenever the viewer stops responding for more than
+about a second — a stack coming off the NAS, a Cellpose run, a deck being
+written. It covers the window until the work finishes, counting the seconds, and
+disappears the moment the window answers again.
+
+It has to be **a second process**, and that is the whole design. Qt paints from
+the main thread and nowhere else, so while that thread is inside a long call
+there is nobody left in this process to draw a frame — which is exactly why a
+frozen window goes white and Windows writes *(Not Responding)* on it. An
+animation driven from the frozen process would be a frozen animation.
+
+So there are two pieces, in `microscopy_viewer/busy.py`:
+
+- A **heartbeat**: a timer on the main thread writing the time, and where the
+  window is, into a small locked record. When the thread blocks the heartbeat
+  stops — that is the signal — and the record still holds the last known geometry,
+  which is where the animation has to go, because a stuck thread can no longer be
+  asked.
+- A **watchdog thread** comparing that timestamp against the clock and driving
+  `microscopy_viewer/busy_window.py`, a child process whose only job is to play
+  the GIF. It is spawned once at startup and kept hidden, so appearing during a
+  freeze costs one line down a pipe rather than a process launch.
+
+The watchdog thread touches only plain data and that pipe, never a Qt object:
+calling into Qt from a second thread while the first is inside a long call is how
+a hang turns into a crash.
+
+- The overlay stays away when no window of the viewer's is focused, so alt-tabbing
+  to something else while a long read finishes leaves the screen alone.
+- The child exits when its stdin closes, which happens when the viewer exits —
+  crash included. It cannot outlive the window it belongs to.
+- `--no-busy-overlay` turns it off. So does anything going wrong with it: a child
+  that will not start is logged once and the viewer carries on freezing the way
+  every Qt application freezes.
+
 ### Channel colours
 
 Fluorescence channels use the display colour stored in the file, or the next entry
@@ -118,6 +178,7 @@ extend `_BRIGHTFIELD_TOKENS` in
 | Export Measurements | `Ctrl+E` | write all ROI measurements to `.xlsx` |
 | Export Slide | `Ctrl+P` | build a PowerPoint figure: a row per dataset, a column per channel, plus the merge. Also batch mode — works with nothing open |
 | Export Movie | `Ctrl+Shift+M` | write the time series as a `.mov` for PowerPoint, or `.mp4` / `.gif` |
+| Batch MIP | `Ctrl+Shift+P` | maximum-project a folder of stacks to `.tif` or `.ims`. Works with nothing open |
 | Play / Pause | `Ctrl+Space` | play the time series at the rate set in the **Time series** panel |
 | Auto Contrast | `Ctrl+Shift+A` | stretch each visible layer to the 0.5–99.5 percentile of what is on screen |
 | Reset Contrast | `Ctrl+R` | back to the full data range |
@@ -539,8 +600,11 @@ decimated — the conversion happens after the decimation, not before.
 |---|---|
 | **Segment** | The channel that is labelled. A nuclear stain with the `nuclei` model is the reliable case. |
 | **Measure** | The channel intensities are read from. Segment on DAPI, measure on the reporter, and every row is signal per nucleus. |
-| **Mode** | `2D + stitch` segments each plane and joins overlapping masks between planes — faster, and usually better on an anisotropic stack where a nucleus is four planes tall. `3D` computes flows in 3D. `2D per plane` leaves labels unconnected between planes. |
+| **Mode** | `2D + stitch` segments each plane and joins masks in neighbouring planes whose overlap exceeds the stitch threshold, so one object spanning seven planes comes back as one label — faster than `3D`, and usually better on an anisotropic stack where a nucleus is four planes tall. `3D` computes flows in 3D. `2D per plane` leaves labels unconnected between planes. `2D on max projection` flattens the stack first — see below. |
+| **Stitch gap** | How far, in µm of depth, stitching may reach over planes where the object was missed. Cellpose compares neighbouring planes only, so a nucleus absent from one plane comes back as two objects that no threshold can rejoin. On a 20-plane crop the default took 907 objects down to 602, against 551 for full `3D`. In µm rather than planes because a plane is not a fixed distance. Zero restores Cellpose's own behaviour. |
 | **Diameter** | Expected object diameter in µm. The setting that matters most; automatic is worth overriding. |
+| **Minimum diameter** | Smallest object to keep, in µm. Converted to Cellpose's pixel count against the voxel size, after decimation. Zero leaves Cellpose's own default. |
+| **Maximum diameter** | Largest object to keep, in µm. Cellpose has no ceiling of its own — `min_size` has no counterpart — so this one is applied to the finished label map, which is also the only place it *can* be applied in `2D + stitch`, where an object does not exist until the planes are joined. Measured exactly as the table's *Equivalent diameter*, so a number read off the Objects tab means the same thing typed back in. The usual use is dropping a clump of touching nuclei that came back as one object. Survivors are renumbered from 1, and the panel says how many were removed. |
 | **Segment at most** | Volumes above this are decimated **laterally** before segmentation — Z is left alone, since that is where objects are already only a few planes tall. The labels always come back on the original grid. |
 
 **The model list is discovered, not hard-coded.** It holds three kinds of entry,
@@ -569,6 +633,143 @@ memory it takes scales with the segmented fraction of the volume, not the volume
 
 The run is on a `thread_worker`, so the window stays usable while it goes.
 
+#### Progress while it runs
+
+A segmentation runs on a `thread_worker`, so the window stays usable — but a
+sixteen-plane stack is a minute of nothing happening unless it says otherwise. The
+panel counts the planes off as they go:
+
+```
+Segmenting dapi: plane 4 of 7…
+Segmenting dapi: stitching 7 planes…
+3 object(s) in 3 s (cpsam_v2, 2D + stitch, NVIDIA GeForce RTX 4090, diameter 17 px).
+```
+
+The text crosses threads on a Qt signal rather than being written to the label
+directly. Touching a widget from the worker thread is how a slow segmentation turns
+into a crash; a signal is queued and delivered on the GUI thread, so the label is
+only ever written from the thread that owns it.
+
+`2D + stitch` reports planes because the loop is **here** rather than inside
+`model.eval`. Cellpose's own stitching path segments the planes internally, where
+they cannot be counted, and it is slower: on a 16-plane crop of a 20x stack, 8 s
+against 20–45 s. The planes are then joined by `segmentation.stitch_planes`, which
+at a gap of one plane makes exactly the join cellpose makes — checked voxel for
+voxel against `cellpose.utils.stitch3D` on a real 20-plane crop, identical
+partition — and which can also reach further. See below. Planes must reach the
+stitcher numbered from 1, which is why the per-plane label offsetting is switched
+off on that path: offset first and nothing matches, leaving every plane's objects
+separate.
+
+#### One missed plane splits an object in two
+
+This is the failure `2D + stitch` is most likely to produce, and it is worth
+understanding because no amount of tuning the stitch threshold fixes it.
+
+**Cellpose compares plane *i* with plane *i+1* and nothing else.** If a nucleus is
+found in planes 0–3 and 6–9 but missed in 4 and 5, the two halves are never
+compared with each other at all, so they come back as two objects. Lowering the
+threshold cannot help: the comparison that would rejoin them does not happen.
+
+On a 20-plane crop of a 20× confocal stack, measured against the same volume
+segmented in full `3D` — the mode that *does* understand an object missing from a
+plane — the effect is not subtle:
+
+| Stitch gap | Planes | Objects | Split | Merged |
+|---|---|---|---|---|
+| off (what cellpose does) | 1 | 907 | 73 | 52 |
+| 0.6 µm | 2 | 739 | 48 | 40 |
+| **1.5 µm (the default)** | **5** | **602** | **26** | **34** |
+| 3.0 µm | 10 | 562 | 24 | 31 |
+
+*(3D found 551 objects. "Split" counts reference objects covered by two or more of
+ours; "merged" counts ours covering two or more reference objects.)*
+
+So **Stitch gap** lets a chain that has been broken reach further along Z, under
+two rules that keep it from doing anything else:
+
+- **Only broken chains bridge.** A mask that already matched in the next plane is
+  not offered a longer jump, and neither is one that already has a predecessor.
+  Bridging can only repair a gap, never reroute a match that worked.
+- **Best overlap wins, one match each way.** Pairs are taken in descending order of
+  IoU and each mask joins at most one mask per direction, so two nuclei that touch
+  in a single plane do not collapse into one.
+
+Both error directions improve together — splits fall from 73 to 26 *and* merges
+from 52 to 34 — which is the evidence that this is repairing a real defect rather
+than trading one error for another.
+
+**The setting is in µm of depth, not planes**, like every other size in the panel.
+Four planes is 1.2 µm on a 0.3 µm/plane stack and 8 µm on a 2 µm/plane one, and the
+second would cheerfully bridge two different cells stacked above each other. At
+2 µm/plane the 1.5 µm default converts to one plane, which is cellpose's own
+behaviour — the coarser the stack, the less this does, which is the right way round.
+
+Raise it if single nuclei come back split along Z; lower it if nuclei stacked above
+one another are being merged. Zero restores cellpose's behaviour exactly, and the
+summary line says what was used: `stitched over gaps up to 5 plane(s)`.
+
+The gap costs almost nothing. The extra passes only compare masks whose chain is
+broken, so the planes they look at are nearly empty by then: on that 20-plane crop
+the whole stitch went from 0.07 s to 0.30 s, against 12 s for the segmentation
+itself.
+
+#### The 2D modes on a stack
+
+Cellpose 4 accepts `z_axis` only when it is going to treat the array as a volume —
+`do_3D`, or stitching with a threshold above zero. Hand it a stack in plain 2D mode
+and it refuses:
+
+```
+ValueError: 2D image processing selected, but z_axis is not None.
+            Set z_axis=None to process 2D images.
+```
+
+That caught `2D per plane` always, and `2D + stitch` whenever the stitch threshold
+was wound down to 0 — which asks for exactly the same thing. Both now segment plane
+by plane, one 2D call each, which is an honest reading of the rule rather than a way
+around it: Cellpose is being asked for 2D segmentation, so it is given 2D images.
+
+Labels are made unique across the stack. Restarting from 1 on every plane would
+collide in the label map, so one object would appear to span planes it was never
+found in — the exact thing the mode exists not to do. On a 24-plane DAPI crop of a
+20× stack, `2D per plane` and `2D + stitch` at 0 both return 5329 objects, the same
+number, because they are now the same operation.
+
+#### Segmenting a maximum projection
+
+`2D on max projection` collapses the stack with a maximum projection and segments
+that single image. On the deconvolved 17 x 2040 x 2040 stacks it is the difference
+between a coffee break and a keystroke — measured on an RTX 4090:
+
+| Mode | Objects | Time |
+|---|---|---|
+| `2D on max projection` | 31 | **9 s** |
+| `2D + stitch` | 140 | 78 s |
+| `3D` | 296 | 2296 s (38 min) |
+
+The object counts differ because the modes answer different questions, and the
+projection answers the narrowest one: **anything overlapping along Z becomes one
+object.** For sparse, well-separated objects in a thin stack that is exactly what
+you want and the run says so in its warnings. For a dense nuclear stain it is not,
+and `2D + stitch` is the mode to reach for.
+
+What follows the projection through:
+
+- **The Z voxel is dropped with the Z axis.** A diameter in µm converts against the
+  XY voxel size only, so the same number keeps working.
+- **The measured channel is projected too.** Segment on DAPI, measure on the
+  reporter, and both are flattened the same way — 2D labels against a 3D signal
+  would not line up at all.
+- **The flattened image is added as a layer** beside the labels, named
+  `<channel> [MIP]` and carrying the source channel's colormap and contrast. The
+  labels are 2D, so without it there would be nothing 2D to check them against.
+- **Sizes come back as areas.** The table and the export say `Area (µm²)` and
+  `Pixels` rather than `Volume (µm³)` and `Voxels`. The numbers were always right —
+  `object_table` multiplies by whatever voxel size it is handed — but the heading
+  was not. The dimensionality is passed in, never guessed from the data: a real 3D
+  run can have every object sitting at z=0.
+
 Segmentation needs `cellpose`, which pulls in torch, so it is an optional extra
 rather than a dependency:
 
@@ -580,6 +781,158 @@ python -m pip install ".[segmentation]"
 Without it the panel still appears and says exactly that, the way the atlas panel
 reports a missing `antspyx`. `Backend` is a three-method interface here too, so
 StarDist or micro-SAM can be added beside Cellpose.
+
+### Batch maximum projection
+
+**Batch MIP** (Ctrl+Shift+P) flattens a folder of stacks in one go. A confocal
+folder is mostly Z, and most of what happens to it afterwards — figures, counting,
+sending a collaborator something they can open — happens on the projection.
+
+Pick the folder, tick the channels, pick where the output goes and in what format.
+Nothing is added to the viewer, and **nothing loads a whole stack**: the
+projection is computed through the lazy array the reader returns, so dask reduces
+it chunk by chunk and only the finished plane is ever in memory. On a real 7.8 GB
+three-channel stack that is a 16 MB output in 46 s with resident memory growing by
+0.2 GB — materialising those channels would have been about 6.6 GB.
+
+| Setting | What it does |
+|---|---|
+| **Channels** | Read from the first few files in the folder and ticked **by name**. The channel order is not the same in every acquisition, so an index quietly means a different stain from one file to the next. A name that matches nothing in a given file is reported against that file rather than passing unnoticed. |
+| **Format** | `.tif` is ImageJ-flavoured, so Fiji opens it as a calibrated hyperstack with the channels separated rather than reading three channels as RGB. `.ims` keeps the projection in the same format as its source, carrying the channel names, colours, pixel size and **stage position** — that last one is what lets a projection still be placed on an overview mosaic. |
+| **Name suffix** | Appended to each file's stem. It is what stops a projection written beside its source from landing on top of it; writing onto the source is refused outright. |
+| **Overwrite** | Off, so re-running after adding files to a folder costs nothing and cannot destroy a projection you have since edited. Existing outputs are reported as skipped. |
+
+A file that cannot be read is reported and skipped rather than stopping the run,
+and **Stop** ends it after the file it is on.
+
+Only Z is collapsed. A time series keeps its timepoints — each one projected over
+Z alone — and a stack whose axes say it has no Z is passed through untouched
+rather than being flattened over time.
+
+### Brain regions
+
+**Brain regions** answers the question that follows every segmentation of a whole
+brain: *how many of those are in the cerebellum?* The label map knows where every
+object is; what it does not know is what the parts of the specimen are called. So
+the outlines are drawn by hand and each object is attributed to the region its
+centroid falls in.
+
+Press **Add region**, draw an outline, name it in the table — names are drawn on
+the canvas and stored in the layer's `features`, so they are saved and reloaded
+with the shapes rather than living only in this panel. **Suggest names** fills any
+still-unnamed outline from `forebrain`, `midbrain`, `hindbrain`, `cerebellum left`,
+`cerebellum right`. Then pick a Labels layer and press **Count objects**.
+
+Three decisions are worth knowing:
+
+- **Objects are counted by their centroid, not by overlap.** An object straddling a
+  boundary belongs to exactly one region, so the per-region counts sum to the total
+  and a nucleus is never counted twice. Overlap-weighted counting does not have
+  that property.
+- **Regions are tested in order and the first match wins.** Hand-drawn outlines
+  overlap at every boundary; silently double-counting there would be worse than a
+  rule that can be stated. Overlapping regions are detected and named in the status
+  line, so it is visible when the rule is doing something.
+- **Outlines are kept in world micrometres**, like the ROI comparison panel's. They
+  are therefore independent of which layer they were drawn on, and the same set can
+  be applied to a label map at a different pixel size — which is what lets them be
+  written to a whole folder of samples from the *Experiment setup* panel.
+
+The table reports, per region: objects, area in µm², **objects per mm²**, total
+object volume, median diameter and mean intensity. Objects inside no region get
+their own row rather than being dropped — a large count there means the outlines
+missed something, and that is worth seeing. The export writes two sheets to one
+workbook: the counts, and every object with the region it was assigned to, so a
+surprising number can be traced to the rows that produced it.
+
+**Stored regions come back when the sample is opened.** Outlines are written into
+the `.ims` itself (see *Experiment setup* below), and opening that file again puts
+them back on the canvas without being asked — having to remember a *Load from file*
+button is how a saved annotation looks lost.
+
+Two things it will not do:
+
+- It will not replace outlines already on the canvas that came from somewhere else,
+  since those may be unsaved work. It says the sample carries regions and leaves
+  them; *Load from file* replaces them deliberately.
+- When several samples opened at once carry regions it loads none of them. There is
+  one region layer and the outlines are per-sample, so showing one sample's regions
+  over another's image would be worse than showing none.
+
+The region layer is deliberately kept out of the **Measurements** panel. That panel
+renames every shape it finds to `ROI 1`, `ROI 2`, … on each recompute, which would
+overwrite the anatomical names as fast as they were typed.
+
+### Experiment setup
+
+**Experiment setup** treats a folder as the unit of work. An acquisition session
+leaves a folder of `.ims` files, and nearly everything done afterwards is done to
+all of them: the same region outlined on every fish, the same channel segmented
+with the same settings. Doing that through the viewer means opening thirty
+datasets, and the layer list stops being usable around the fourth.
+
+**Scanning adds nothing to the viewer.** Each file is opened far enough to read its
+shape, channels and whatever this program has already stored in it, a thumbnail is
+drawn, and the file is closed again. The preview comes off a middle pyramid level —
+not the coarsest, which bottoms out near 64 px and tells you nothing about the
+mount, and not the finest, which would be a full-resolution read per channel per
+file. Tiles say what each file carries (`2 ROI(s), 1 label map(s)`) and unreadable
+files — an aborted acquisition leaves `*_F0.ims` stubs — are listed in red with the
+reason rather than filtered out.
+
+**ROIs and label maps go inside the `.ims` file.** Both are written into one
+top-level group, `/ARGUS`, beside Imaris's own `/DataSet` and `/DataSetInfo`.
+Nothing Imaris wrote is read back, modified or deleted, and Imaris ignores groups
+it does not recognise, so the file still opens and behaves normally. A sidecar
+folder would work right up until the files are moved or sent to a collaborator, at
+which point the derived data is orphaned in silence.
+
+What this deliberately does **not** do is write Imaris Surfaces or Spots objects.
+Those live in the undocumented `Scene8` structure; producing one Imaris will load
+means guessing at a private format inside a file holding irreplaceable acquisition
+data, and getting it wrong corrupts the file rather than failing. Regions saved
+here are visible to this viewer and not to Imaris.
+
+**A file being written to cannot be open in the viewer.** HDF5 refuses to open for
+writing what is open for reading — in the same process as much as across
+processes — and the reader deliberately holds its handle for the life of the
+process, because the dask graphs read through it lazily. So the panel takes a
+sample's layers off screen and releases the handle before writing into it, and
+says how many of each it closed.
+
+The workflow the panel is shaped around:
+
+1. **Choose** the folder and **Scan** it.
+2. **Open** replaces the sample on screen rather than adding to it — the panel is
+   a way to look at thirty samples one after another, and accumulating them would
+   rebuild the layer list it exists to avoid. The selection *is* what is shown, so
+   selecting two shows exactly those two. Anything not backed by a file stays put,
+   the region outlines above all, which is what makes drawing the same regions
+   across a folder possible. The log line names the sample that is up: Imaris
+   records the acquiring machine's own path as the image name, so every file in a
+   folder can produce identically named layers.
+3. Draw the outlines on the `Brain regions` layer, then **Write to selected** — into that one sample, or into every sample selected at
+   once. Writing to all of them is right when the samples are mounted and framed
+   alike and wrong when they are not: the vertices are in micrometres from each
+   image's own origin, so a fish sitting 200 µm further along its field gets an
+   outline 200 µm out of place. **Load from sample** reads them back.
+4. **Run on selected.** The batch takes its model, mode, diameters and device from
+   the **Segmentation** panel rather than duplicating those controls — two sets of
+   controls for one set of parameters is how a batch ends up run with settings
+   nobody chose.
+
+| Batch setting | What it does |
+|---|---|
+| **Segment channel** | Matched against the channel names in each file, so `dapi` finds it wherever it sits — the channel order is not the same in every acquisition. A bare number is an index instead. A name that matches nothing **skips that file and says so**, rather than quietly segmenting channel 0: over thirty files that would be an experiment's worth of wrong numbers. |
+| **Measure channel** | Optional second channel the per-object intensities come from. |
+| **Restrict** | Blanks everything outside each file's stored ROIs before segmenting. This is what drawing them was for — Cellpose has no idea the skin and the yolk are not brain, and finds plenty of objects in both. A file with no stored ROIs is segmented whole. The image is zeroed rather than cropped, so labels come back on the grid that went in. |
+| **Results** | Write each label map into its own `.ims`, under `/ARGUS/Labels`, tagged with the model, mode, channel and diameters it was made with. |
+
+A file that cannot be read, or whose channel cannot be found, is reported and
+skipped — thirty files is long enough that aborting on the twenty-ninth because one
+is a stub would be its own kind of failure. **Stop** ends the run after the file it
+is on. The export writes two sheets: one row per sample, and every object from
+every sample with the sample it came from.
 
 ### Exports
 
@@ -637,6 +990,25 @@ Because batch files were never on screen, **Contrast** defaults to *Auto per
 image* — the same 0.5–99.5 percentile stretch as the Auto Contrast button. Switch
 it to *As displayed* to use each layer's or file's own recorded range instead.
 Exports of what is already open default the other way round.
+
+*Manual limits* is the third option: **Min** and **Max** columns in the channel
+table, one pair per channel, typed as raw intensities. Choosing it unlocks the
+cells and seeds them with the range that channel is displayed at, so the numbers
+start somewhere sensible and get nudged rather than invented.
+
+The pair is keyed to the **channel column, not the sample** — which is the point.
+Auto contrast stretches every panel to its own histogram, so a dim sample and a
+bright one come out looking equally bright and the figure quietly lies. One typed
+range across the row makes the panels comparable by eye, which is what a reviewer
+assumes they already are.
+
+- A channel left empty falls back to the range it is displayed at, so filling in
+  one row and leaving the rest alone does what it looks like.
+- A backwards or half-typed pair is ignored the same way, rather than stopping the
+  export with a message box.
+- What is typed is remembered while the dialog is open, so switching to *Auto per
+  image* to see how it looks and back again does not lose it. Only *Manual limits*
+  applies it.
 
 A folder takes minutes, so the export reports which sample it is on and **Cancel
 becomes Stop**, which halts after the current sample and writes nothing.
@@ -706,6 +1078,49 @@ The real folder — 25 overview fields on the NAS — stitches to a 1600 px mosa
 pulling the ~9 MB of each field across the share. Overview fields are written
 without a resolution pyramid, so there is no coarser level to read; where a field
 does have one, only the level that covers its share of the mosaic is read.
+
+#### Closeup slides
+
+A folder is usually acquired by working inwards: a 10x of the fish, a 20x of the
+region worth looking at, a 40x of the thing itself. In the table those are three
+unrelated rows, and which part of the 10x the 40x came from is in the operator's
+head.
+
+Each of them gets its own slide instead: **the field it was taken from on the
+left, with a red box around the part the closeup covers**, and the closeup's own
+channels and merge beside it. A sample nothing else contains is shown against a
+window of the overview rather than the whole mosaic, since the locator slide
+already shows the whole mosaic and a box a hundredth of it wide points at
+nothing.
+
+The pairing is stage coordinates and nothing else — the same `ExtMin`/`ExtMax`
+extents the overview is placed from. The objective a file names (`LensPower`) is
+printed in the captions and never used to decide anything, because two
+acquisitions are told apart by how much stage they cover, and that is recorded
+even when the objective is not.
+
+- The parent is the **smallest** acquisition that contains the closeup, so a 40x
+  taken inside a 20x taken inside a 10x is shown against the 20x. The tightest
+  context is the one that says where you are.
+- A closeup may overhang its parent by 5% of its own width and still count: the
+  stage repeats to a few micrometres and a field re-centred by eye can end up a
+  hair over the edge. Half outside is not a closeup.
+- A field has to be **at most 70%** of the one it sits in. Two acquisitions of the
+  same region contain each other and neither is a closeup of the other; two
+  images that merely start at the same corner are not related at all. Every real
+  step down clears it — 40x inside 20x is 0.5, 60x inside 40x is 0.67.
+- The box is a PowerPoint shape, drawn at a minimum size when the closeup is a
+  small fraction of the field and grown about its own centre, so it stays
+  findable without stopping pointing at the right place.
+- The context picture is read at the resolution it is drawn at — about a third of
+  the slide — which on a pyramid file is a coarser level and a fraction of the
+  bytes.
+- Untick **Closeups** in the dialog for the plain deck. With **Overview** unticked
+  as well, only closeups that sit inside another sample get a slide.
+
+On the real folder that is `ift88-curved_4` (40x, 311 µm) inside `ift88-curved_2`
+(20x, 621 µm) inside `ift88-curved_1` (10x, 1243 µm), each one boxed on its
+parent, and the 10x itself boxed on a 7.5 mm window of the 2x overview.
 
 Needs `python-pptx`; the export says so plainly if it is missing.
 
@@ -810,6 +1225,10 @@ python tests/test_slides.py         # channel/merge rendering and the .pptx tabl
 python tests/test_overview.py       # overview detection, stitching, the locator slide — no Qt needed
 python tests/test_registration.py   # atlas registration engine — no Qt; ANTs checks skip without antspyx
 python tests/test_segmentation.py   # segmentation engine, units, object table — no Qt; cellpose is never run
+python tests/test_busy.py           # the freeze watchdog and its animation process — no display needed
+python tests/test_projection.py     # batch MIP, and the TIFF / Imaris writers — no Qt needed
+python tests/test_regions.py        # region geometry and per-region counting — no Qt needed
+python tests/test_experiment.py     # folder scans, the in-file store, batch runs — no Qt needed
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 
@@ -861,6 +1280,159 @@ The viewer marks the plugins that are already installed as "already warned about
 the same thing napari's own *Only warn me about newly installed plugins* checkbox
 does — so a plugin installed later still raises the warning. Pass
 `--warn-shimmed-plugins` to `launch_viewer.py` to leave napari's behaviour alone.
+
+### The segmentation panel says CPU, or another account on the same machine has no GPU
+
+Both are the same cause: **Python packages install per user, the GPU is shared.**
+A machine where one account segments on a CUDA card and another does not is not a
+driver problem — the second account simply has no `torch` with CUDA in *its*
+site-packages. The panel is reporting truthfully.
+
+Two things have to be true in each account that wants GPU segmentation:
+
+```powershell
+# 1. torch AND torchvision from the same CUDA index. Installing only torch leaves a
+#    mismatched torchvision, which fails at "import cellpose.models" with
+#    "RuntimeError: operator torchvision::nms does not exist" — not at import torch.
+<python> -m pip install --index-url https://download.pytorch.org/whl/cu130 torch torchvision
+
+# 2. cellpose itself
+<python> -m pip install cellpose
+```
+
+`<python>` must be **the interpreter the viewer runs on**, which is the shortcut's
+target — right-click the shortcut, *Properties*, and read *Target*. For a shared
+miniconda whose `site-packages` is not writable, add `--user`; the per-user site is
+on that interpreter's path automatically. Pick the CUDA index that matches the
+driver (`nvidia-smi`): `cu130` for a CUDA 13 driver, `cu128` for CUDA 12.8.
+
+Check it took:
+
+```powershell
+<python> -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+`2.13.0+cu130 True` is what you want. A version ending `+cpu` is the default PyPI
+wheel — that is the usual reason the panel says CPU, and reinstalling from the CUDA
+index above is the fix. To give every account on a shared workstation the GPU with
+one copy, install into a machine-wide environment as an administrator instead of
+into each profile.
+
+### "'NoneType' object has no attribute 'write'" during a segmentation
+
+The desktop shortcut runs **`pythonw.exe`**, which gives the process no console at
+all: `sys.stdout` and `sys.stderr` are both `None`. This project's own code checks
+for that; libraries do not. Cellpose draws `tqdm` progress bars,
+tqdm writes to `sys.stdout`, and the run dies with
+
+```
+AttributeError: 'NoneType' object has no attribute 'write'
+```
+
+after the slow part, with nothing to show for it. It first showed up in
+`2D + stitch`, which at the time called `cellpose.utils.stitch3D` — the stitching
+is now done here and that particular call is gone, but plenty of other cellpose
+paths draw progress bars, so the guard stays. Running the same thing from a
+console worked, which is what kept it hidden — a terminal supplies the streams.
+
+`microscopy_viewer/__init__.py` now points both streams at the null device when
+the interpreter supplied none, before anything can import cellpose. Progress-bar
+redraws are all that gets discarded; real diagnostics go to the log file through
+`setup_logging`. A stream the process actually has is never touched.
+
+### The scale bar says "pixels" on a calibrated image
+
+There are two ways this happens, and both are fixed.
+
+The first is the layer never carrying a unit at all, described below.
+
+The second is subtler: **one dimensionless layer takes the whole viewer down with
+it.** napari compares units across layers right-aligned and by *dimensionality*,
+and a layer added without units defaults to `pixel`, which is dimensionless. So a
+single ROI, brain region, label map or projection layer left on the default makes
+the entire list inconsistent — napari says
+
+```
+Inconsistent units across layers; units will not be used for rendering.
+```
+
+drops units from rendering, and the scale bar over your calibrated stack goes back
+to counting pixels. Drawing a region should not change what the scale bar says.
+
+Every layer this program creates now inherits the unit of the layer it came from,
+through `loaders.layer_spec.units_like` (derived from one layer) and `world_units`
+(matched to whatever calibrated layers are already open): ROI layers, the brain
+region layer, label maps, maximum-projection layers and warped atlas volumes. The
+region layer is also re-matched whenever the layer list changes, since it can be
+created on an empty viewer before there is anything to match.
+
+
+napari moved where the scale bar gets its unit. Up to 0.6 the overlay carried its
+own `unit` field and `viewer.scale_bar.unit = "µm"` was the whole story. From
+**napari 0.8 `ScaleBarOverlay` has no `unit` field at all** — the bar reads
+`layer.units`, which defaults to `pixel`. Setting the old attribute does nothing,
+silently, so a properly calibrated stack showed `25 pixels`.
+
+The readers now pass `units` to the layer alongside `scale`, so the unit travels
+with the data. Both are taken from the same file metadata, which is what stops
+them disagreeing. Derived layers — the segmentation Labels layer, a `[MIP]`
+projection — copy the units of the layer they came from, or selecting one would
+put the bar back to pixels over an image measured in µm.
+
+`viewer.scale_bar.unit` is still set where the field exists, so napari 0.6 keeps
+working; the presence of the field is checked rather than the version.
+
+If it still reads pixels, the file had no calibration to begin with — the metadata
+panel says `Calibration: not in file` and measurements are reported in pixels
+throughout, deliberately, rather than inventing a pixel size.
+
+### "OMP: Error #15" kills the process
+
+torch ships its own Intel OpenMP runtime (`libiomp5md.dll`) while numpy and scipy
+use the copy from conda's MKL. When the second one initialises, Intel's runtime
+prints *OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll
+already initialized* and calls `abort()` — a C-level kill, so no `try`/`except`
+anywhere can catch it and the process simply disappears.
+
+Whether it fires depends on import order. Importing napari first happens to
+arrange the libraries acceptably, which is why the GUI escapes it, but a bare
+`import microscopy_viewer.segmentation` — the test suite, or any script — aborted
+reliably. `microscopy_viewer/__init__.py` now sets `KMP_DUPLICATE_LIB_OK=TRUE`
+before anything can import torch, which is the supported switch for letting a
+second copy load. Set the variable yourself to override it; an explicit value is
+left alone.
+
+The other cure is a single OpenMP build across the environment, which is a rebuild
+rather than something an import can arrange.
+
+### "NameError: name 'dinov3_vitb16' is not defined" when picking a cpdino model
+
+Cellpose 4.2 lists `cpdino` and `cpdino-vitb` in its model zoo, but it does not
+ship the DINOv3 backbone they are built on. Without it the import inside
+`cellpose/vit.py` fails with a warning at import time and the model then fails with
+a `NameError` at load time — a gigabyte of weights downloads first, which makes it
+look like the download was the problem.
+
+```bash
+python -m pip install --user "git+https://github.com/facebookresearch/dinov3"
+```
+
+The weights themselves land in `~/.cellpose/models` on first use, and stay there.
+`cpdino` is 1.2 GB and `cpdino-vitb` is 343 MB, so the first Segment with one of
+them is a long wait with nothing on screen — the panel prefers an already-downloaded
+model for its initial selection for exactly that reason.
+
+### Cellpose 3 models (cyto, cyto2, cyto3, nuclei) do not appear
+
+Cellpose 4 is one architecture and refuses them outright — *"This model does not
+appear to be a CP4 model. CP3 models are not compatible with CP4"* — so they are
+kept out of the model list rather than offered and then failing minutes into a run.
+The panel names any it finds in `~/.cellpose/models` and says what to install.
+
+The two model families cannot coexist in one environment. `python -m pip install
+"cellpose<4"` swaps the zoo (and its size model, which is what makes an automatic
+diameter meaningful there) in for `cpsam` and the `cpdino` models; upgrading again
+swaps back. A second environment with its own shortcut is the way to keep both.
 
 ### Startup over Remote Desktop
 

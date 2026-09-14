@@ -46,6 +46,7 @@ from qtpy.QtWidgets import (
 
 from .. import registration as rg
 from ..exports import default_stem, export_table
+from ..loaders.layer_spec import units_like, world_units
 from ..utils import format_number, get_logger
 
 logger = get_logger("registration_widget")
@@ -731,6 +732,12 @@ class RegistrationWidget(QWidget):
                 source = self._viewer.layers[name] if name in self._viewer.layers else None
                 if source is not None:
                     kwargs["colormap"] = source.colormap
+                # The warped volume is on the atlas grid, still in micrometres.
+                # Saying so keeps the layer list's units consistent; a layer left
+                # on the dimensionless default takes the scale bar down with it.
+                kwargs.update(
+                    units_like(source, 3) or world_units(self._viewer, 3, exclude=source)
+                )
                 self._viewer.add_image(np.asarray(volume), **kwargs)
         except Exception:
             logger.exception("could not add the warped layers")
