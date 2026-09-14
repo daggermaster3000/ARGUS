@@ -297,14 +297,20 @@ def count_objects(
 
     counts: list[RegionCount] = []
     for region in regions:
-        counts.append(_summarise(region.name, grouped.get(region.name, []), region.area_um2))
+        counts.append(summarise_region(region.name, grouped.get(region.name, []), region.area_um2))
     leftover = grouped.get(UNASSIGNED, [])
     if include_unassigned and leftover:
-        counts.append(_summarise(UNASSIGNED, leftover, 0.0))
+        counts.append(summarise_region(UNASSIGNED, leftover, 0.0))
     return counts
 
 
-def _summarise(name: str, stats: Sequence[Any], area_um2: float) -> RegionCount:
+def summarise_region(name: str, stats: Sequence[Any], area_um2: float = 0.0) -> RegionCount:
+    """Count and summarise one region's objects.
+
+    Public because the batch workbook summarises a sample that carries no
+    outlines the same way it summarises one that does, and duplicating the
+    arithmetic is how two tables come to disagree about the same numbers.
+    """
     count = RegionCount(region=name, n_objects=len(stats), area_um2=float(area_um2))
     if area_um2 > 0:
         # Per mm², because per µm² of a brain section is a number with five

@@ -25,6 +25,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from microscopy_viewer import experiment as ex  # noqa: E402
+from microscopy_viewer import regions as rg  # noqa: E402
 from microscopy_viewer import ims_store as store  # noqa: E402
 from microscopy_viewer import segmentation as seg  # noqa: E402
 
@@ -390,7 +391,8 @@ def test_the_batch_tables() -> None:
     outcome.stats = seg.object_table(masks, voxel_size_um=(1.0, 1.0, 1.0))
 
     samples = ex.batch_dataframe([outcome])
-    check(list(samples.columns)[:3] == ["Sample", "Channel", "Objects"], "one row per sample")
+    check(list(samples.columns)[:4] == ["Sample", "Genotype", "Channel", "Objects"],
+          f"one row per sample ({list(samples.columns)[:4]})")
     check(samples["Saved as"].iloc[0] == "DAPI labels", "naming where the labels went")
 
     objects = ex.objects_dataframe([outcome])
@@ -402,6 +404,168 @@ def test_the_batch_tables() -> None:
     check("Area (µm²)" in ex.objects_dataframe([flat]).columns,
           "a projected run's table says area instead")
 
+
+def test_the_regions_sheet() -> None:
+    print("the regions sheet")
+    # Two regions side by side in a 20 x 20 µm field, and four objects: two in
+    # the left one, one in the right, one in neither.
+    masks = np.zeros((1, 20, 20), dtype=np.int32)
+    masks[0, 2:4, 2:4] = 1
+    masks[0, 6:8, 3:5] = 2
+    masks[0, 3:5, 14:16] = 3
+    masks[0, 16:18, 16:18] = 4
+    stats = seg.object_table(masks, voxel_size_um=(1.0, 1.0, 1.0))
+
+    left = store.StoredRoi("forebrain", [[0.0, 0.0], [0.0, 10.0], [10.0, 10.0], [10.0, 0.0]])
+    right = store.StoredRoi("hindbrain", [[0.0, 10.0], [0.0, 20.0], [10.0, 20.0], [10.0, 10.0]])
+
+    outcome = ex.BatchOutcome(
+        path=Path("fish01_mut_20x.ims"),
+        name="fish01_mut_20x",
+        genotype="mut",
+        n_objects=4,
+        channel_name="DAPI",
+        ndim=3,
+        stats=stats,
+        region_rois=[left, right],
+    )
+
+    frame = ex.regions_dataframe([outcome])
+    check(len(frame) == 3, f"a row per region plus the leftovers ({len(frame)})")
+    by_region = {row["Region"]: row for _index, row in frame.iterrows()}
+    check(int(by_region["forebrain"]["Objects"]) == 2, "two objects in the left region")
+    check(int(by_region["hindbrain"]["Objects"]) == 1, "one in the right")
+    check(
+        int(by_region[rg.UNASSIGNED]["Objects"]) == 1,
+        "and the one outside both is reported rather than dropped",
+    )
+    # The property that makes the sheet trustworthy: nothing is counted twice
+    # and nothing disappears.
+    check(int(frame["Objects"].sum()) == 4, "the region counts sum to the sample total")
+
+    check(
+        abs(float(by_region["forebrain"]["Region area (µm²)"]) - 100.0) < 1e-6,
+        "the region's area is its own, in µm²",
+    )
+    check(
+        abs(float(by_region["forebrain"]["Objects per mm²"]) - 2 / (100.0 / 1e6)) < 1e-3,
+        "and the density is per mm², not per µm²",
+    )
+    check(set(frame["Genotype"]) == {"mut"}, "every row carries the genotype")
+    check(
+        np.isfinite(float(by_region["forebrain"]["Mean diameter (µm)"])),
+        "with the morphometrics of the objects in it",
+    )
+    check(
+        "Total Volume (µm³)" in frame.columns,
+        f"3D labels give volumes ({[c for c in frame.columns if 'Total' in c]})",
+    )
+    check(bool(by_region[rg.UNASSIGNED]["Outside every region"]), "the leftover row is flagged")
+    check(not bool(by_region["forebrain"]["Outside every region"]), "and a real region is not")
+
+
+def test_a_sample_with_no_regions_still_gets_a_row() -> None:
+    print("a sample nobody has outlined")
+    masks = np.zeros((1, 8, 8), dtype=np.int32)
+    masks[0, 1:3, 1:3] = 1
+    outcome = ex.BatchOutcome(
+        path=Path("fish_2.ims"),
+        name="fish_2",
+        n_objects=1,
+        ndim=2,
+        stats=seg.object_table(masks, voxel_size_um=(1.0, 1.0, 1.0)),
+    )
+    frame = ex.regions_dataframe([outcome])
+    # A missing row reads as a sample that failed; this one segmented fine.
+    check(len(frame) == 1, "it is still in the sheet")
+    check(frame["Region"].iloc[0] == ex.NO_REGIONS, f"saying so ({frame['Region'].iloc[0]})")
+    check(int(frame["Objects"].iloc[0]) == 1, "with all of its objects")
+    check("Total Area (µm²)" in frame.columns, "and a 2D run's sizes are areas")
+
+
+def test_the_genotype_comes_off_the_file_name() -> None:
+    print("genotypes in the batch tables")
+    backend = _StubBackend()
+    seg.register_backend(backend)
+    monkey: dict = {}
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mutant = _container(root, "fish01_mut_20x.ims")
+            wildtype = _container(root, "fish02_wt_20x.ims")
+            volume = np.zeros((2, 8, 8), dtype=np.float32)
+            _patch_reader(
+                monkey,
+                {
+                    "fish01_mut_20x.ims": [_FakeSpec("Confocal - DAPI", volume, (1.0, 0.5, 0.5))],
+                    "fish02_wt_20x.ims": [_FakeSpec("Confocal - DAPI", volume, (1.0, 0.5, 0.5))],
+                },
+            )
+            options = ex.BatchOptions(
+                channel="dapi",
+                settings=seg.SegmentationSettings(backend="stub-batch", use_gpu=False),
+            )
+            outcomes = ex.run_batch([mutant, wildtype], options)
+            check([o.genotype for o in outcomes] == ["mut", "wt"],
+                  f"read off each file name ({[o.genotype for o in outcomes]})")
+
+            samples = ex.batch_dataframe(outcomes)
+            check(list(samples["Genotype"]) == ["mut", "wt"], "and carried into the samples sheet")
+            objects = ex.objects_dataframe(outcomes)
+            check("Genotype" in objects.columns, "and onto every object")
+            check("Region" in objects.columns, "which also says which region it fell in")
+    finally:
+        _unpatch_reader(monkey)
+        seg._BACKENDS.pop("stub-batch", None)
+
+
+def test_a_write_that_does_not_survive_is_reported() -> None:
+    print("verifying the write")
+    backend = _StubBackend()
+    seg.register_backend(backend)
+    monkey: dict = {}
+    original = store.save_labels
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = _container(root, "fish_1.ims")
+            volume = np.zeros((2, 8, 8), dtype=np.float32)
+            _patch_reader(monkey, {"fish_1.ims": [_FakeSpec("DAPI", volume, (1.0, 0.5, 0.5))]})
+
+            # A write that returns a key without leaving anything behind: what a
+            # full disk or a file opened read-only underneath us looks like.
+            store.save_labels = lambda *args, **kwargs: "DAPI labels"
+            ex.ims_store.save_labels = store.save_labels
+            options = ex.BatchOptions(
+                channel="dapi",
+                settings=seg.SegmentationSettings(backend="stub-batch", use_gpu=False),
+            )
+            outcomes = ex.run_batch([path], options)
+            check(not outcomes[0].saved, "the outcome does not claim to have saved")
+            check(not outcomes[0].ok, "the file is reported as a failure")
+            check("did not survive" in outcomes[0].error,
+                  f"saying what went wrong ({outcomes[0].error})")
+            check(ex.batch_dataframe(outcomes)["Saved as"].iloc[0] == "",
+                  "and the sheet does not name a label map that is not there")
+    finally:
+        store.save_labels = original
+        ex.ims_store.save_labels = original
+        _unpatch_reader(monkey)
+        seg._BACKENDS.pop("stub-batch", None)
+
+
+def test_labels_are_stored_in_the_narrowest_type_that_holds_them() -> None:
+    print("label storage")
+    with tempfile.TemporaryDirectory() as directory:
+        path = _container(Path(directory))
+        masks = np.zeros((2, 8, 8), dtype=np.int32)
+        masks[0, 1:3, 1:3] = 300  # too big for uint8, fits uint16
+        store.save_labels(path, "labels", masks, (1.0, 1.0, 1.0))
+        stored, _attrs = store.load_labels(path, "labels")
+        check(stored.dtype == np.uint16, f"int32 masks are narrowed ({stored.dtype})")
+        check(np.array_equal(stored, masks), "without changing a single label")
+        check(store.label_shape(path, "labels") == (2, 8, 8), "and the shape can be read alone")
+        check(store.label_shape(path, "absent") == (), "a missing map has no shape")
 
 def main() -> int:
     for test in (
@@ -415,6 +579,11 @@ def main() -> int:
         test_batch_stops_when_asked,
         test_roi_restriction_blanks_the_outside,
         test_the_batch_tables,
+        test_the_regions_sheet,
+        test_a_sample_with_no_regions_still_gets_a_row,
+        test_the_genotype_comes_off_the_file_name,
+        test_a_write_that_does_not_survive_is_reported,
+        test_labels_are_stored_in_the_narrowest_type_that_holds_them,
     ):
         test()
         print()

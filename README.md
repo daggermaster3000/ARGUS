@@ -926,13 +926,74 @@ The workflow the panel is shaped around:
 | **Segment channel** | Matched against the channel names in each file, so `dapi` finds it wherever it sits — the channel order is not the same in every acquisition. A bare number is an index instead. A name that matches nothing **skips that file and says so**, rather than quietly segmenting channel 0: over thirty files that would be an experiment's worth of wrong numbers. |
 | **Measure channel** | Optional second channel the per-object intensities come from. |
 | **Restrict** | Blanks everything outside each file's stored ROIs before segmenting. This is what drawing them was for — Cellpose has no idea the skin and the yolk are not brain, and finds plenty of objects in both. A file with no stored ROIs is segmented whole. The image is zeroed rather than cropped, so labels come back on the grid that went in. |
-| **Results** | Write each label map into its own `.ims`, under `/ARGUS/Labels`, tagged with the model, mode, channel and diameters it was made with. |
+| **Results** | Write each label map into its own `.ims`, under `/ARGUS/Labels`, tagged with the model, mode, channel, genotype and diameters it was made with. Each map is read back after writing and the run only reports *saved* if it is really there — a batch that claims to have written what it has not is only discovered weeks later, when the counts are wanted and the files turn out to be empty. |
 
 A file that cannot be read, or whose channel cannot be found, is reported and
 skipped — thirty files is long enough that aborting on the twenty-ninth because one
 is a stub would be its own kind of failure. **Stop** ends the run after the file it
-is on. The export writes two sheets: one row per sample, and every object from
-every sample with the sample it came from.
+is on.
+
+**Load labels** reads a stored map back into the viewer, at the voxel size it was
+written with. It is worth pressing once after the first batch: labels inside an
+`.ims` are invisible to Imaris (see *Brain regions* above for why nothing is
+written as an Imaris Surface), so this is the only way to look at what the run
+produced.
+
+#### What the batch export contains
+
+**Export…** writes one workbook with three sheets:
+
+- **Samples** — one row per file: genotype, channel, object count, how many
+  regions the file carries, how long it took, where the labels went, and what
+  went wrong if anything did.
+- **Regions** — one row per sample *and* region: the object count, its share of
+  the sample, the region's area in µm² and mm², the density per mm², and the
+  morphometrics of the objects inside it (mean, median and SD of the equivalent
+  diameter; mean, median and total size; mean, median and total intensity). This
+  is the sheet the experiment is about — it plots as counts or density against
+  genotype with no reshaping, and the morphometrics sit beside the count because
+  a difference in number means much less without knowing whether the objects
+  were also a different size.
+- **Objects** — every object from every sample, with its sample, genotype,
+  channel and the region it fell in, so a surprising count can be traced back to
+  the rows that produced it.
+
+Objects are attributed to a region by their centroid and the first matching
+region wins, so a sample's per-region counts sum to its total. Whatever falls
+outside every outline gets its own `(outside every region)` row rather than
+disappearing; a sample nobody has outlined yet gets one `(no regions stored)`
+row rather than vanishing from the sheet, which would read as a sample that
+failed.
+
+#### The genotype column
+
+The genotype is read out of the file name, because that is the only place it is
+written down, and typing it into thirty rows by hand is where transcription
+errors come from. The name is split on underscores and each field searched for a
+known genotype word, on word boundaries — `fish01_mut_20x.ims` is `mut`,
+`TUNEL_ift88 mut_Confocal - Blue.ims` is also `mut`, and `kidney_sample_3.ims` is
+**not** `ki`. Spelling variants collapse onto one value, so `MUT`, `mut` and
+`mutant` group together instead of making three columns in a bar chart:
+
+| Value | Written any of |
+|---|---|
+| `wt` | wildtype, wild-type, wild type, wt |
+| `mut` | mutant, mut |
+| `het` | heterozygous, heterozygote, het |
+| `hom` | homozygous, homozygote, homo, hom |
+| `ko` | knockout, knock-out, ko |
+| `ki` | knockin, knock-in, ki |
+| `tg` | transgenic, tg |
+| `ctl` | control, ctrl, ctl |
+| `sib` | sibling, sib |
+| `mo` | morpholino, morphant, mo |
+
+`hom` is deliberately not folded into `mut`, and `sib` not into `wt`: which one a
+given project means by them is the project's business, and guessing would
+silently merge two groups of an experiment. **A name that encodes no genotype
+gives an empty cell, never a guess** — a blank is visible in the workbook and
+gets fixed, a wrong one becomes a result. The same column is added to the *Brain
+regions* panel's own export, alongside the sample name.
 
 ### Exports
 
@@ -1229,6 +1290,7 @@ python tests/test_busy.py           # the freeze watchdog and its animation proc
 python tests/test_projection.py     # batch MIP, and the TIFF / Imaris writers — no Qt needed
 python tests/test_regions.py        # region geometry and per-region counting — no Qt needed
 python tests/test_experiment.py     # folder scans, the in-file store, batch runs — no Qt needed
+python tests/test_naming.py         # reading the genotype out of a file name — no Qt needed
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 

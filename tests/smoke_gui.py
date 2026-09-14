@@ -951,6 +951,33 @@ def main() -> int:
         exp_panel.load_rois_from_sample()
         check(len(region_layer.data) == 2, "the stored ROIs came back onto the canvas")
 
+        # A label map written into a file has to be readable back out of it, or
+        # a batch that says it saved 3 889 objects is indistinguishable from one
+        # that saved nothing.
+        masks = np.zeros((8, 16, 16), dtype=np.int32)
+        masks[2:5, 2:6, 2:6] = 1
+        masks[5:7, 9:13, 9:13] = 2
+        store.save_labels(folder / "fish_1.ims", "DAPI labels", masks, (0.5, 0.2, 0.2))
+        check(
+            store.list_labels(folder / "fish_1.ims") == ["DAPI labels"],
+            "a label map is stored in the file",
+        )
+        exp_panel._grid.setCurrentRow(0)
+        before_labels = len(app.viewer.layers)
+        exp_panel.load_labels_from_sample()
+        added = [
+            layer for layer in app.viewer.layers
+            if layer.name.endswith("DAPI labels")
+        ]
+        check(len(added) == 1, f"and comes back as a layer ({len(app.viewer.layers) - before_labels})")
+        if added:
+            check(int(added[0].data.max()) == 2, "with the objects that were written")
+            check(
+                tuple(float(v) for v in added[0].scale) == (0.5, 0.2, 0.2),
+                f"at the voxel size it was stored with ({tuple(added[0].scale)})",
+            )
+            app.viewer.layers.remove(added[0])
+
         # The batch borrows the segmentation panel's settings rather than
         # duplicating them.
         borrowed = exp_panel._batch_settings()

@@ -241,7 +241,7 @@ def save_labels(
     a 500 Mvoxel int32 volume down by an order of magnitude, and the alternative
     is doubling the size of every file in the experiment.
     """
-    labels = np.asarray(masks)
+    labels = _compact(np.asarray(masks))
     safe = sanitise_key(key)
     with writable(path) as handle:
         group = _group(handle, LABEL_GROUP)
@@ -268,6 +268,48 @@ def save_labels(
                 dataset.attrs[str(attribute)] = str(value)
     logger.info("wrote labels %r (%s) into %s", safe, labels.shape, Path(path).name)
     return safe
+
+
+def _compact(labels: np.ndarray) -> np.ndarray:
+    """The same label map in the narrowest integer type that still holds it.
+
+    Cellpose hands back ``int32`` whether it found four objects or forty
+    thousand, and a whole-brain stack is a few hundred million voxels: storing
+    those as ``uint16`` halves what has to be compressed and what the file grows
+    by. Only ever narrows, and only when every label fits — the alternative is
+    relabelling objects by overflow, which would be silent and wrong.
+    """
+    if not np.issubdtype(labels.dtype, np.integer) or labels.size == 0:
+        return labels
+    highest = int(labels.max())
+    if labels.min() < 0:
+        return labels
+    for candidate in (np.uint8, np.uint16, np.uint32):
+        if highest <= np.iinfo(candidate).max:
+            return labels.astype(candidate, copy=False)
+    return labels
+
+
+def label_shape(path: str | Path, key: str) -> tuple[int, ...]:
+    """Shape of a stored label map, without reading it.
+
+    What a write is verified against: a 4 GB volume read back to be compared
+    would cost as much as producing it did, and a dataset that did not survive
+    being written is the wrong shape or absent, not subtly different.
+    """
+    import h5py
+
+    if not is_container(path):
+        return ()
+    try:
+        with h5py.File(str(path), "r") as handle:
+            group = handle.get(LABEL_GROUP)
+            if group is None or key not in group:
+                return ()
+            return tuple(int(n) for n in group[key].shape)
+    except OSError as exc:
+        logger.info("could not read the shape of %r in %s: %s", key, Path(path).name, exc)
+        return ()
 
 
 def _chunks(shape: Sequence[int]) -> tuple[int, ...]:

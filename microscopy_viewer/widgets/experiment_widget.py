@@ -252,8 +252,19 @@ class ExperimentWidget(QWidget):
         self._run_button.clicked.connect(self.run_batch)
         row.addWidget(self._run_button)
 
+        load_labels = QPushButton("Load labels")
+        load_labels.setToolTip(
+            "Read a label map stored in the selected sample back into the viewer, so what "
+            "the batch wrote can be looked at rather than taken on trust."
+        )
+        load_labels.clicked.connect(self.load_labels_from_sample)
+        row.addWidget(load_labels)
+
         export = QPushButton("Export…")
-        export.setToolTip("Write the per-sample counts and every object to one workbook.")
+        export.setToolTip(
+            "Write the per-sample counts, the per-region counts and every object to one "
+            "workbook. The genotype column is read out of each file name."
+        )
         export.clicked.connect(self.export)
         row.addWidget(export)
         row.addStretch(1)
@@ -705,6 +716,17 @@ class ExperimentWidget(QWidget):
         summary = (
             f"{total} object(s) across {len(done)} sample(s) in {seconds:.0f} s."
         )
+        # Say how many label maps reached the files, not just how many objects
+        # were found. The two can differ — a read-only file, a full disk — and
+        # the difference is only noticed weeks later, when the counts are wanted
+        # and the .ims files turn out to be empty.
+        saved = [outcome for outcome in self._outcomes if outcome.saved]
+        if self._save_labels.isChecked():
+            summary += f" Labels written into {len(saved)} of {len(self._outcomes)} file(s)."
+            if len(saved) < len(done):
+                summary += " Press “Load labels” on a sample to check."
+        else:
+            summary += " Nothing written into the files — “Write the labels” is off."
         if failed:
             summary += " Failed: " + ", ".join(
                 f"{outcome.name} ({outcome.error})" for outcome in failed[:2]
@@ -716,6 +738,66 @@ class ExperimentWidget(QWidget):
         self._log(summary)
         self._refresh_entries([outcome.path for outcome in self._outcomes])
         logger.info("batch finished: %s", summary)
+
+    def load_labels_from_sample(self) -> None:
+        """Put a label map stored in the selected sample back into the viewer.
+
+        Without this the batch is a black box: it says it wrote 3 889 objects
+        into the file and there is no way to look at them, which is
+        indistinguishable from its not having written anything. Reading them
+        back is also the only check that what is in the file is the thing the
+        run produced.
+
+        Read whole rather than lazily, because the reader's handle is released
+        every time anything is written into that file and a lazy layer would
+        then raise on its next draw.
+        """
+        entries = [entry for entry in self.selected_entries() if entry.readable]
+        if not entries:
+            self._status.setText("Select a sample to read labels from.")
+            return
+        entry = entries[0]
+        keys = ims_store.list_labels(entry.path)
+        if not keys:
+            self._log(
+                f"{entry.name} carries no stored label maps. Run the batch with "
+                "“Write the labels into each .ims file” ticked."
+            )
+            return
+
+        key = keys[0]
+        if len(keys) > 1:
+            from qtpy.QtWidgets import QInputDialog
+
+            key, chosen = QInputDialog.getItem(
+                self, "Load labels", f"Label map stored in {entry.name}:", keys, 0, False
+            )
+            if not chosen:
+                return
+
+        masks, attrs = ims_store.load_labels(entry.path, key)
+        if masks is None:
+            self._log(f"Could not read “{key}” out of {entry.name}.")
+            return
+
+        scale = tuple(float(v) for v in np.asarray(attrs.get("voxel_size_um", ())).ravel())
+        if len(scale) != int(masks.ndim):
+            scale = tuple(float(v) for v in entry.voxel_um)[-int(masks.ndim):] or None
+
+        from ..loaders.layer_spec import world_units
+
+        name = f"{entry.name} — {key}"
+        if name in self._viewer.layers:
+            self._viewer.layers.remove(name)
+        kwargs = {"name": name}
+        if scale:
+            kwargs["scale"] = scale
+        kwargs.update(world_units(self._viewer, int(masks.ndim)) or {})
+        self._viewer.add_labels(np.asarray(masks), **kwargs)
+        self._log(
+            f"Loaded “{key}” from {entry.name}: {int(np.max(masks)) if masks.size else 0} "
+            f"object(s), {' × '.join(str(int(n)) for n in masks.shape)}."
+        )
 
     # -- export ---------------------------------------------------------------
 
@@ -735,6 +817,7 @@ class ExperimentWidget(QWidget):
             return
         sheets = {
             "Samples": ex.batch_dataframe(self._outcomes),
+            "Regions": ex.regions_dataframe(self._outcomes),
             "Objects": ex.objects_dataframe(self._outcomes),
         }
         try:

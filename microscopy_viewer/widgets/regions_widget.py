@@ -861,6 +861,19 @@ class RegionsWidget(QWidget):
             sheets["Objects"] = rg.objects_dataframe(
                 self._stats, self._regions, self._translate, ndim=self._label_ndim
             )
+        # Sample and genotype on every row, so one sample's sheets can be pasted
+        # under another's without losing which fish they came from. Both are read
+        # off the file the labels were counted on; a name encoding no genotype
+        # leaves the column blank rather than having a guess put in it.
+        sample = self.sample_path()
+        if sample is not None:
+            from .. import naming
+
+            genotype = naming.genotype_from_name(sample.name)
+            for frame in sheets.values():
+                frame.insert(0, "Genotype", genotype)
+                frame.insert(0, "Sample", sample.stem)
+
         try:
             written = export_sheets(sheets, path)
         except Exception as exc:

@@ -30,7 +30,7 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 
-from . import ims_store
+from . import ims_store, naming
 from .utils import get_logger
 
 logger = get_logger("experiment")
@@ -441,6 +441,12 @@ class BatchOutcome:
     error: str = ""
     stats: list = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: Read out of the file name, so the workbook can be grouped without anybody
+    #: typing a genotype column. Empty when the name encodes none.
+    genotype: str = ""
+    #: The regions stored in this file, read at batch time. Kept on the outcome
+    #: so the export does not depend on the file still being where it was.
+    region_rois: list = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -492,13 +498,16 @@ def run_batch(
         prefix = f"{path.stem} ({index} of {len(paths)})"
         if should_cancel is not None and should_cancel():
             break
-        outcome = BatchOutcome(path=path, name=path.stem)
+        outcome = BatchOutcome(
+            path=path, name=path.stem, genotype=naming.genotype_from_name(path.name)
+        )
         started = time.perf_counter()
         try:
             if progress is not None:
                 progress(f"{prefix}: reading")
             image, measure, voxel, channel_name = _load_channel(path, options)
             outcome.channel_name = channel_name
+            outcome.region_rois = ims_store.load_rois(path)
 
             def _relay(text: str, _prefix=prefix) -> None:
                 if progress is not None:
@@ -532,12 +541,23 @@ def run_batch(
                         "mode": result.mode,
                         "device": result.device,
                         "channel": channel_name,
+                        "genotype": outcome.genotype,
                         "diameter_um": float(settings.diameter_um),
                         "min_diameter_um": float(settings.min_diameter_um),
                         "max_diameter_um": float(settings.max_diameter_um),
                     },
                 )
-                outcome.saved = True
+                # Read it back rather than trusting that the write returned. A
+                # label map is the point of the run, and "saved" being reported
+                # for something that is not in the file is the failure that
+                # costs a whole batch — it is only noticed days later, when the
+                # counts are wanted and the files are empty.
+                outcome.saved = _stored_ok(path, outcome.label_key, result.masks.shape)
+                if not outcome.saved:
+                    raise OSError(
+                        f"the labels did not survive being written into {path.name} — "
+                        f"{path.name} has no readable /ARGUS/Labels/{outcome.label_key}"
+                    )
         except BatchCancelled:
             break
         except Exception as exc:
@@ -552,6 +572,36 @@ def run_batch(
                 f"{prefix}: {outcome.error or f'{outcome.n_objects} object(s)'}"
             )
     return outcomes
+
+
+def _stored_ok(path: Path, key: str, shape: Sequence[int]) -> bool:
+    """Whether the label map just written is there and the right shape.
+
+    Shape rather than contents: reading a 4 GB volume back to compare it would
+    cost as much as the segmentation did, while a truncated or half-written
+    dataset shows up in the shape immediately.
+    """
+    if not key:
+        return False
+    try:
+        with_key = ims_store.list_labels(path)
+        if key not in with_key:
+            logger.error(
+                "%s does not contain %r after writing it (it has: %s)",
+                path.name, key, ", ".join(with_key) or "nothing",
+            )
+            return False
+        stored_shape = ims_store.label_shape(path, key)
+    except Exception:
+        logger.exception("could not verify the labels written into %s", path.name)
+        return False
+    if stored_shape != tuple(int(n) for n in shape):
+        logger.error(
+            "%s stored %r with shape %s, expected %s",
+            path.name, key, stored_shape, tuple(int(n) for n in shape),
+        )
+        return False
+    return True
 
 
 def _load_channel(path: Path, options: BatchOptions):
@@ -595,6 +645,11 @@ def _load_channel(path: Path, options: BatchOptions):
     return image, measure, voxel, names[index]
 
 
+# ---------------------------------------------------------------------------
+# The workbook
+# ---------------------------------------------------------------------------
+
+
 def batch_dataframe(outcomes: Sequence[BatchOutcome]):
     """One row per file: what was segmented, how many, how long, what failed."""
     import pandas as pd
@@ -602,8 +657,10 @@ def batch_dataframe(outcomes: Sequence[BatchOutcome]):
     rows = [
         {
             "Sample": outcome.name,
+            "Genotype": outcome.genotype,
             "Channel": outcome.channel_name,
             "Objects": outcome.n_objects,
+            "Regions": len(outcome.region_rois),
             "Seconds": round(outcome.elapsed_s, 1),
             "Saved as": outcome.label_key if outcome.saved else "",
             "Problem": outcome.error,
@@ -612,24 +669,231 @@ def batch_dataframe(outcomes: Sequence[BatchOutcome]):
         for outcome in outcomes
     ]
     return pd.DataFrame(
-        rows, columns=["Sample", "Channel", "Objects", "Seconds", "Saved as", "Problem", "File"]
+        rows,
+        columns=[
+            "Sample", "Genotype", "Channel", "Objects", "Regions",
+            "Seconds", "Saved as", "Problem", "File",
+        ],
     )
 
 
 def objects_dataframe(outcomes: Sequence[BatchOutcome]):
-    """Every object from every file, with the sample it came from."""
+    """Every object from every file, with the sample and region it came from.
+
+    The region column is what makes this table answer the question the counts
+    only summarise: a cerebellar count that looks wrong is traced back through
+    the objects that produced it, and without the assignment on each row there
+    is nothing to trace it through.
+    """
     import pandas as pd
 
+    from .regions import assign_objects
     from .segmentation import OBJECT_COLUMNS, object_headers
 
     rows = []
     ndim = next((outcome.ndim for outcome in outcomes if outcome.stats), 3)
     for outcome in outcomes:
-        for stat in outcome.stats:
+        assignment = assign_objects(outcome.stats, regions_of(outcome))
+        for stat, region in zip(outcome.stats, assignment):
             row = stat.as_row()
             row["sample"] = outcome.name
+            row["genotype"] = outcome.genotype
             row["channel"] = outcome.channel_name
+            row["region"] = region
             rows.append(row)
-    frame = pd.DataFrame(rows, columns=["sample", "channel", *OBJECT_COLUMNS])
-    headers = {"sample": "Sample", "channel": "Channel", **object_headers(ndim)}
+    frame = pd.DataFrame(
+        rows, columns=["sample", "genotype", "channel", "region", *OBJECT_COLUMNS]
+    )
+    headers = {
+        "sample": "Sample",
+        "genotype": "Genotype",
+        "channel": "Channel",
+        "region": "Region",
+        **object_headers(ndim),
+    }
     return frame.rename(columns=headers)
+
+
+def regions_of(outcome: BatchOutcome) -> list:
+    """The brain regions this sample was outlined with, as ``Region`` objects.
+
+    Taken from what was read at batch time, falling back to the file itself: a
+    batch run before the outlines were drawn can still be exported against them
+    afterwards without segmenting anything again.
+    """
+    from .regions import Region
+
+    stored = list(outcome.region_rois) or ims_store.load_rois(outcome.path)
+    return [
+        Region(name=roi.name, vertices_world=roi.vertices_um)
+        for roi in stored
+        if np.asarray(roi.vertices_um).reshape(-1, 2).shape[0] >= 3
+    ]
+
+
+#: The row a sample gets in the regions sheet when it carries no outlines. A row
+#: rather than an absence: a sample missing from the sheet reads as one that
+#: failed, and this one segmented perfectly well — nobody has drawn on it yet.
+NO_REGIONS = "(no regions stored)"
+
+#: Column order of the regions sheet. Named here so the sheet comes out with the
+#: same columns even when there is not a single row to infer them from.
+REGION_SHEET_COLUMNS = (
+    "Sample",
+    "Genotype",
+    "Channel",
+    "Region",
+    "Objects",
+    "Share of sample (%)",
+    "Region area (um2)",
+    "Region area (mm2)",
+    "Objects per mm2",
+    "Mean diameter (um)",
+    "Median diameter (um)",
+    "SD diameter (um)",
+    "Mean size",
+    "Median size",
+    "Total size",
+    "Mean intensity",
+    "Median intensity",
+    "Total integrated intensity",
+    "Outside every region",
+)
+
+
+def regions_dataframe(outcomes: Sequence[BatchOutcome]):
+    """One row per sample and region: how many objects, how big, how dense.
+
+    The table the experiment is actually about. Everything in it is per region
+    per sample, so it plots as counts or density against genotype without any
+    reshaping, and the morphometrics travel beside the count — an apparent
+    difference in number is worth much less without knowing whether the objects
+    were also a different size.
+
+    Objects are attributed by centroid and the first matching region wins, which
+    is :mod:`microscopy_viewer.regions`' rule throughout. The per-region counts
+    of a sample therefore sum to its total, including whatever fell outside
+    every outline, which gets its own row rather than quietly disappearing.
+    """
+    import pandas as pd
+
+    from .regions import UNASSIGNED, count_objects
+
+    rows: list[dict[str, Any]] = []
+    for outcome in outcomes:
+        regions = regions_of(outcome)
+        total = len(outcome.stats)
+        counts = (
+            count_objects(outcome.stats, regions)
+            if regions
+            else [_whole_sample_count(outcome)]
+        )
+        grouped = _stats_by_region(outcome, regions)
+        for count in counts:
+            rows.append(
+                {
+                    "Sample": outcome.name,
+                    "Genotype": outcome.genotype,
+                    "Channel": outcome.channel_name,
+                    "Region": count.region,
+                    "Objects": count.n_objects,
+                    "Share of sample (%)": (
+                        _round(100.0 * count.n_objects / total, 2) if total else float("nan")
+                    ),
+                    "Region area (um2)": _round(count.area_um2, 1),
+                    "Region area (mm2)": _round(count.area_um2 / 1e6, 5),
+                    "Objects per mm2": _round(count.density_per_mm2, 1),
+                    **_morphometrics(grouped.get(count.region, []), outcome.ndim),
+                    "Outside every region": count.region == UNASSIGNED,
+                }
+            )
+    frame = pd.DataFrame(rows, columns=list(REGION_SHEET_COLUMNS))
+    return frame.rename(columns=_region_sheet_headers(outcomes))
+
+
+def _region_sheet_headers(outcomes: Sequence[BatchOutcome]) -> dict[str, str]:
+    """Pretty headings for the regions sheet, with the right size unit.
+
+    A 2D run measures areas in µm² and a 3D one volumes in µm³. The number is
+    right either way — :func:`segmentation.object_table` multiplies by whatever
+    voxel size it was given — but a column headed "volume" over an area is a
+    wrong label on a right number, which is worse than a vague one.
+    """
+    ndim = next((outcome.ndim for outcome in outcomes if outcome.stats), 3)
+    size = "Volume (µm³)" if ndim >= 3 else "Area (µm²)"
+    return {
+        "Region area (um2)": "Region area (µm²)",
+        "Region area (mm2)": "Region area (mm²)",
+        "Objects per mm2": "Objects per mm²",
+        "Mean diameter (um)": "Mean diameter (µm)",
+        "Median diameter (um)": "Median diameter (µm)",
+        "SD diameter (um)": "SD diameter (µm)",
+        "Mean size": f"Mean {size}",
+        "Median size": f"Median {size}",
+        "Total size": f"Total {size}",
+    }
+
+
+def _whole_sample_count(outcome: BatchOutcome):
+    """The single row a sample with no outlines contributes to the sheet."""
+    from .regions import summarise_region
+
+    return summarise_region(NO_REGIONS, outcome.stats, 0.0)
+
+
+def _stats_by_region(outcome: BatchOutcome, regions: Sequence[Any]) -> dict[str, list]:
+    """The objects of one sample, grouped by the region they were attributed to.
+
+    Assigned once per sample rather than once per row: the point-in-polygon test
+    is the expensive part of the sheet, and a folder of thirty samples with six
+    regions each would otherwise run it a hundred and eighty times over the same
+    few thousand centroids.
+    """
+    from .regions import assign_objects
+
+    if not regions:
+        return {NO_REGIONS: list(outcome.stats)}
+    grouped: dict[str, list] = {}
+    for stat, name in zip(outcome.stats, assign_objects(outcome.stats, regions)):
+        grouped.setdefault(name, []).append(stat)
+    return grouped
+
+
+def _morphometrics(stats: Sequence[Any], ndim: int = 3) -> dict[str, float]:
+    """Size and intensity summaries of the objects in one region."""
+    if not len(stats):
+        return {
+            "Mean diameter (um)": float("nan"),
+            "Median diameter (um)": float("nan"),
+            "SD diameter (um)": float("nan"),
+            "Mean size": float("nan"),
+            "Median size": float("nan"),
+            "Total size": 0.0,
+            "Mean intensity": float("nan"),
+            "Median intensity": float("nan"),
+            "Total integrated intensity": 0.0,
+        }
+
+    diameters = np.array([float(stat.equivalent_diameter_um) for stat in stats], dtype=float)
+    sizes = np.array([float(stat.volume_um3) for stat in stats], dtype=float)
+    means = np.array([float(stat.mean) for stat in stats], dtype=float)
+    integrated = np.array([float(stat.integrated) for stat in stats], dtype=float)
+    return {
+        "Mean diameter (um)": _round(float(diameters.mean()), 3),
+        "Median diameter (um)": _round(float(np.median(diameters)), 3),
+        # Population, not sample: this is the spread of the objects that are
+        # there, not an estimate of some wider population's.
+        "SD diameter (um)": _round(float(diameters.std()), 3),
+        "Mean size": _round(float(sizes.mean()), 3),
+        "Median size": _round(float(np.median(sizes)), 3),
+        "Total size": _round(float(sizes.sum()), 1),
+        "Mean intensity": _round(float(means.mean()), 1),
+        "Median intensity": _round(float(np.median(means)), 1),
+        "Total integrated intensity": _round(float(integrated.sum()), 1),
+    }
+
+
+def _round(value: float, digits: int) -> float:
+    """Round for display, leaving NaN alone so an absent measure stays absent."""
+    number = float(value)
+    return number if not np.isfinite(number) else round(number, digits)
