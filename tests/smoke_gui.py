@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from qtpy.QtCore import QCoreApplication
+from qtpy.QtCore import QCoreApplication, Qt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -37,6 +37,28 @@ _NO_GL_MARKERS = (
 
 def _is_missing_gl(exc: BaseException) -> bool:
     return any(marker in str(exc) for marker in _NO_GL_MARKERS)
+
+
+def load_and_release(path):
+    """Read a file and give its handle straight back.
+
+    The readers hold files open for the life of the process so their lazy arrays
+    stay readable; in a temporary folder that is what stops Windows deleting it.
+    """
+    from microscopy_viewer.loaders import load_path, release
+
+    specs = load_path(path)
+    for spec in specs:
+        spec.data = np.asarray(spec.data[0] if spec.multiscale else spec.data)
+        spec.multiscale = False
+    release(path)
+    return specs
+
+
+def loader_release(path):
+    from microscopy_viewer.loaders import release
+
+    return release(path)
 
 
 def check(condition: bool, message: str) -> None:
@@ -537,6 +559,92 @@ def main() -> int:
         expected = -(-len(batch.selected_samples()) // 2)
         check(count == expected, f"{count} slide(s) at two rows each, as expected ({expected})")
     batch.close()
+    print(flush=True)
+
+    print("batch maximum projection", flush=True)
+    from microscopy_viewer import projection as pj
+    from microscopy_viewer.widgets.projection_dialog import ProjectionDialog
+
+    check("mip" in app.toolbar._buttons, "the batch MIP button is on the toolbar")
+    with tempfile.TemporaryDirectory() as directory:
+        stacks = Path(directory) / "stacks"
+        stacks.mkdir()
+        for name in ("fish_1", "fish_2"):
+            shutil.copy(SAMPLES / "sample_4d_2ch.ims", stacks / f"{name}.ims")
+        out = Path(directory) / "MIP"
+
+        layers_before = len(app.viewer.layers)
+        dialog = ProjectionDialog(stacks)
+        try:
+            dialog._input_edit.setText(str(stacks))
+            dialog.rescan()
+            for _ in range(1500):
+                QCoreApplication.processEvents()
+                if dialog._channel_list.count():
+                    break
+                time.sleep(0.01)
+            offered = [dialog._channel_list.item(row).text() for row in range(dialog._channel_list.count())]
+            check(offered == ["GFP", "mCherry"], f"channel names were read from the files ({offered})")
+            check(len(dialog._paths) == 2, f"both stacks were listed ({len(dialog._paths)})")
+
+            # Tick one channel by name; the point of the list is picking stains,
+            # not positions.
+            dialog._output_edit.setText(str(out))
+            dialog._all_channels.setChecked(False)
+            for row in range(dialog._channel_list.count()):
+                item = dialog._channel_list.item(row)
+                item.setCheckState(Qt.Checked if item.text() == "mCherry" else Qt.Unchecked)
+            check(dialog.chosen_channels() == ("mCherry",), "one channel ticked")
+
+            dialog._format_box.setCurrentIndex(1)  # Imaris
+            check(dialog.options().fmt == ".ims", f"the format combo yields a suffix ({dialog.options().fmt})")
+
+            dialog.run()
+            for _ in range(3000):
+                QCoreApplication.processEvents()
+                if dialog._worker is None and dialog.outcomes:
+                    break
+                time.sleep(0.01)
+            written = sorted(path.name for path in out.iterdir())
+            check(written == ["fish_1_MIP.ims", "fish_2_MIP.ims"], f"one output per stack ({written})")
+
+            source = load_and_release(stacks / "fish_1.ims")
+            result = load_and_release(out / "fish_1_MIP.ims")
+            check(
+                [spec.channel_name for spec in result] == ["mCherry"],
+                f"carrying only the ticked channel ({[s.channel_name for s in result]})",
+            )
+            reference = next(spec for spec in source if spec.channel_name == "mCherry")
+            expected = np.asarray(reference.data).max(axis=reference.axes.index("Z"))
+            check(
+                np.array_equal(np.asarray(result[0].data), expected),
+                "and it really is the maximum over Z, pixel for pixel",
+            )
+            check(
+                tuple(round(float(v), 4) for v in result[0].scale)[-2:] == (0.13, 0.13),
+                f"with the pixel size intact ({tuple(round(float(v), 4) for v in result[0].scale)})",
+            )
+            check(
+                len(app.viewer.layers) == layers_before,
+                f"and nothing was added to the viewer ({len(app.viewer.layers)})",
+            )
+
+            # A second pass must not silently rewrite what is already there.
+            dialog.run()
+            for _ in range(2000):
+                QCoreApplication.processEvents()
+                if dialog._worker is None and dialog.outcomes:
+                    break
+                time.sleep(0.01)
+            check(
+                all(outcome.skipped for outcome in dialog.outcomes),
+                "re-running skips outputs that already exist",
+            )
+            check("already existed" in dialog._status.text(), f"and says so ({dialog._status.text()[:60]!r})")
+        finally:
+            dialog.close()
+            for path in list(stacks.glob("*.ims")) + list(out.glob("*.ims")):
+                loader_release(path)
     print(flush=True)
 
     print("drag-and-drop path handling", flush=True)

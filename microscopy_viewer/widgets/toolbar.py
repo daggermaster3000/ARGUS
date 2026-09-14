@@ -50,6 +50,7 @@ class ViewerToolbar(QWidget):
             ("snapshot", "Export Snapshot", "Save the current view as PNG or TIFF (Ctrl+S)", self.export_snapshot),
             ("measurements", "Export Measurements", "Write all ROI measurements to an Excel workbook (Ctrl+E)", self.export_measurements),
             ("slide", "Export Slide", "Build a PowerPoint figure: one row per dataset, one column per channel, plus the merge (Ctrl+P)", self.export_slide),
+            ("mip", "Batch MIP", "Maximum-project a whole folder of stacks to TIFF or Imaris files (Ctrl+Shift+P)", self.batch_projection),
             ("movie", "Export Movie", "Write the time series as a .mov for PowerPoint (Ctrl+Shift+M)", self.export_movie),
             ("play", "Play / Pause", "Play the time series (Ctrl+Space)", self.toggle_play),
             ("auto", "Auto Contrast", "Stretch contrast to the visible data (Ctrl+Shift+A)", self.auto_contrast),
@@ -126,6 +127,21 @@ class ViewerToolbar(QWidget):
             return
         self._app.last_directory = Path(dialog.written).parent
         self.set_status(f"Slide saved to {dialog.written}")
+
+    def batch_projection(self) -> None:
+        """Flatten a folder of stacks, without opening any of them.
+
+        No guard on there being layers open: like the slide builder's batch mode,
+        the usual case is a folder nobody has loaded.
+        """
+        from .projection_dialog import ProjectionDialog
+
+        dialog = ProjectionDialog(self._app.last_directory, parent=self)
+        dialog.exec_()
+        written = [outcome for outcome in dialog.outcomes if outcome.ok and not outcome.skipped]
+        if written:
+            self._app.last_directory = Path(written[0].written).parent
+            self.set_status(f"Projected {len(written)} file(s) to {Path(written[0].written).parent}")
 
     def export_movie(self) -> None:
         """Write the time series out as a movie.

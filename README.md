@@ -178,6 +178,7 @@ extend `_BRIGHTFIELD_TOKENS` in
 | Export Measurements | `Ctrl+E` | write all ROI measurements to `.xlsx` |
 | Export Slide | `Ctrl+P` | build a PowerPoint figure: a row per dataset, a column per channel, plus the merge. Also batch mode — works with nothing open |
 | Export Movie | `Ctrl+Shift+M` | write the time series as a `.mov` for PowerPoint, or `.mp4` / `.gif` |
+| Batch MIP | `Ctrl+Shift+P` | maximum-project a folder of stacks to `.tif` or `.ims`. Works with nothing open |
 | Play / Pause | `Ctrl+Space` | play the time series at the rate set in the **Time series** panel |
 | Auto Contrast | `Ctrl+Shift+A` | stretch each visible layer to the 0.5–99.5 percentile of what is on screen |
 | Reset Contrast | `Ctrl+R` | back to the full data range |
@@ -781,6 +782,33 @@ Without it the panel still appears and says exactly that, the way the atlas pane
 reports a missing `antspyx`. `Backend` is a three-method interface here too, so
 StarDist or micro-SAM can be added beside Cellpose.
 
+### Batch maximum projection
+
+**Batch MIP** (Ctrl+Shift+P) flattens a folder of stacks in one go. A confocal
+folder is mostly Z, and most of what happens to it afterwards — figures, counting,
+sending a collaborator something they can open — happens on the projection.
+
+Pick the folder, tick the channels, pick where the output goes and in what format.
+Nothing is added to the viewer, and **nothing loads a whole stack**: the
+projection is computed through the lazy array the reader returns, so dask reduces
+it chunk by chunk and only the finished plane is ever in memory. On a real 7.8 GB
+three-channel stack that is a 16 MB output in 46 s with resident memory growing by
+0.2 GB — materialising those channels would have been about 6.6 GB.
+
+| Setting | What it does |
+|---|---|
+| **Channels** | Read from the first few files in the folder and ticked **by name**. The channel order is not the same in every acquisition, so an index quietly means a different stain from one file to the next. A name that matches nothing in a given file is reported against that file rather than passing unnoticed. |
+| **Format** | `.tif` is ImageJ-flavoured, so Fiji opens it as a calibrated hyperstack with the channels separated rather than reading three channels as RGB. `.ims` keeps the projection in the same format as its source, carrying the channel names, colours, pixel size and **stage position** — that last one is what lets a projection still be placed on an overview mosaic. |
+| **Name suffix** | Appended to each file's stem. It is what stops a projection written beside its source from landing on top of it; writing onto the source is refused outright. |
+| **Overwrite** | Off, so re-running after adding files to a folder costs nothing and cannot destroy a projection you have since edited. Existing outputs are reported as skipped. |
+
+A file that cannot be read is reported and skipped rather than stopping the run,
+and **Stop** ends it after the file it is on.
+
+Only Z is collapsed. A time series keeps its timepoints — each one projected over
+Z alone — and a stack whose axes say it has no Z is passed through untouched
+rather than being flattened over time.
+
 ### Brain regions
 
 **Brain regions** answers the question that follows every segmentation of a whole
@@ -1198,6 +1226,9 @@ python tests/test_overview.py       # overview detection, stitching, the locator
 python tests/test_registration.py   # atlas registration engine — no Qt; ANTs checks skip without antspyx
 python tests/test_segmentation.py   # segmentation engine, units, object table — no Qt; cellpose is never run
 python tests/test_busy.py           # the freeze watchdog and its animation process — no display needed
+python tests/test_projection.py     # batch MIP, and the TIFF / Imaris writers — no Qt needed
+python tests/test_regions.py        # region geometry and per-region counting — no Qt needed
+python tests/test_experiment.py     # folder scans, the in-file store, batch runs — no Qt needed
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 

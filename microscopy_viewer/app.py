@@ -200,6 +200,7 @@ class MicroscopyViewer:
             ("Control-R", self.toolbar.reset_contrast),
             ("Control-Space", self.toolbar.toggle_play),
             ("Control-Shift-M", self.toolbar.export_movie),
+            ("Control-Shift-P", self.toolbar.batch_projection),
         )
         for key, handler in bindings:
             try:

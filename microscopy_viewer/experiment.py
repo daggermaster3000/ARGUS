@@ -176,10 +176,10 @@ def _read_specs(path: Path):
 
 def _release(path: Path) -> None:
     """Give back the reader's handle on *path*, if it is holding one."""
-    from .loaders import ims as ims_reader
+    from .loaders import release
 
     try:
-        ims_reader.release(path)
+        release(path)
     except Exception:
         logger.debug("could not release the handle on %s", path, exc_info=True)
 
