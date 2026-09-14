@@ -407,7 +407,18 @@ class ExperimentWidget(QWidget):
     # -- opening and closing samples -----------------------------------------
 
     def open_selected(self) -> None:
-        """Add the selected samples to the viewer."""
+        """Show the selected samples, replacing whatever sample is on screen.
+
+        Replacing rather than adding is the point of stepping through a folder:
+        the panel is a way to look at thirty samples one after another, and
+        accumulating them would rebuild the layer list this panel exists to
+        avoid. The selection *is* what is shown, so opening two shows exactly
+        those two.
+
+        Only the samples go. Anything not backed by a file — the region outlines
+        above all — stays put, which is what makes drawing the same regions
+        across a folder possible.
+        """
         entries = [entry for entry in self.selected_entries() if entry.readable]
         if not entries:
             self._status.setText("Nothing readable selected.")
@@ -416,17 +427,40 @@ class ExperimentWidget(QWidget):
             answer = QMessageBox.question(
                 self,
                 "Microscopy Viewer",
-                f"Open all {len(entries)} samples? That is {sum(entry.n_channels for entry in entries)} "
-                "layers, and the point of this panel is not having to.",
+                f"Show all {len(entries)} samples at once? That is "
+                f"{sum(entry.n_channels for entry in entries)} layers, and the point of this "
+                "panel is not having to.",
             )
             if answer != QMessageBox.Yes:
                 return
+
+        closed = self._close_all_samples()
         opened = self._app.open_paths([entry.path for entry in entries])
-        self._log(f"Opened {opened} layer(s) from {len(entries)} sample(s).")
+        # Name the sample. Imaris records the acquiring machine's own path as the
+        # image name, so every file in a folder can produce identically named
+        # layers — and once opening replaces rather than adds, the layer list
+        # stops being the thing that tells you which sample is on screen.
+        shown = ", ".join(entry.name for entry in entries[:3])
+        if len(entries) > 3:
+            shown += f" and {len(entries) - 3} more"
+        message = f"Showing {shown} — {opened} layer(s)."
+        if closed:
+            message += f" Replaced the {closed} layer(s) that were on screen."
+        self._log(message)
 
     def close_selected(self) -> int:
         """Take the selected samples off screen and release their files."""
         return self._close_paths([entry.path for entry in self.selected_entries()])
+
+    def _close_all_samples(self) -> int:
+        """Close every layer that came from a file, whichever panel opened it."""
+        sources = []
+        for layer in self._viewer.layers:
+            meta = layer.metadata.get("mv_metadata")
+            source = str(getattr(meta, "file_path", "") or "") if meta is not None else ""
+            if source and source not in sources:
+                sources.append(source)
+        return self._close_paths(sources) if sources else 0
 
     def _close_paths(self, paths) -> int:
         """Remove every layer backed by these files, then give the handles back.

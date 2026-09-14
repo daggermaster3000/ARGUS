@@ -875,13 +875,20 @@ says how many of each it closed.
 The workflow the panel is shaped around:
 
 1. **Choose** the folder and **Scan** it.
-2. **Open** one sample, draw the outlines on the `Brain regions` layer, then
-   **Write to selected** — into that one sample, or into every sample selected at
+2. **Open** replaces the sample on screen rather than adding to it — the panel is
+   a way to look at thirty samples one after another, and accumulating them would
+   rebuild the layer list it exists to avoid. The selection *is* what is shown, so
+   selecting two shows exactly those two. Anything not backed by a file stays put,
+   the region outlines above all, which is what makes drawing the same regions
+   across a folder possible. The log line names the sample that is up: Imaris
+   records the acquiring machine's own path as the image name, so every file in a
+   folder can produce identically named layers.
+3. Draw the outlines on the `Brain regions` layer, then **Write to selected** — into that one sample, or into every sample selected at
    once. Writing to all of them is right when the samples are mounted and framed
    alike and wrong when they are not: the vertices are in micrometres from each
    image's own origin, so a fish sitting 200 µm further along its field gets an
    outline 200 µm out of place. **Load from sample** reads them back.
-3. **Run on selected.** The batch takes its model, mode, diameters and device from
+4. **Run on selected.** The batch takes its model, mode, diameters and device from
    the **Segmentation** panel rather than duplicating those controls — two sets of
    controls for one set of parameters is how a batch ends up run with settings
    nobody chose.

@@ -890,6 +890,71 @@ def main() -> int:
             fresh.viewer.close()
             ims_reader.release(folder / "fish_1.ims")
 
+        # Stepping through a folder replaces the sample on screen rather than
+        # piling samples up — that is the whole point of the panel. Its own
+        # viewer, because replacing closes every file-backed layer, including the
+        # ones the sections after this one still need.
+        stepper = MicroscopyViewer(show=False)
+        try:
+            panel = stepper.experiment_widget
+            panel._folder_edit.setText(str(folder))
+            panel.scan()
+            for _ in range(2000):
+                QCoreApplication.processEvents()
+                if panel._worker is None and panel._entries:
+                    break
+                time.sleep(0.01)
+
+            def _images():
+                from napari.layers import Image
+
+                return [layer for layer in stepper.viewer.layers if isinstance(layer, Image)]
+
+            def _show(row):
+                panel._grid.clearSelection()
+                panel._grid.item(row).setSelected(True)
+                panel.open_selected()
+
+            _show(0)
+            first = len(_images())
+            check(first == 2, f"opening a sample shows its two channels ({first})")
+            _show(1)
+            check(
+                len(_images()) == first,
+                f"opening the next one replaces it rather than adding ({len(_images())})",
+            )
+            check(
+                "Replaced" in panel._status.text() and "fish_2" in panel._status.text(),
+                f"and says which sample is up ({panel._status.text()!r})",
+            )
+            check(
+                not ims_reader.is_open(folder / "fish_1.ims"),
+                "the sample that went away released its file",
+            )
+
+            # Outlines are not samples: they must survive the swap, or drawing
+            # the same regions across a folder would be impossible.
+            kept = stepper.regions_widget.region_layer(create=True)
+            kept.add_rectangles(np.array([[0.0, 0.0], [0.0, 20.0], [30.0, 20.0], [30.0, 0.0]]))
+            stepper.regions_widget.refresh_regions()
+            _show(0)
+            check(
+                reg.REGION_LAYER_NAME in stepper.viewer.layers,
+                "the region layer survives a sample swap",
+            )
+            check(len(_images()) == first, "and the swap still replaced the images")
+
+            # Selecting two shows exactly two.
+            panel._grid.clearSelection()
+            for row in (0, 1):
+                panel._grid.item(row).setSelected(True)
+            panel.open_selected()
+            check(len(_images()) == 2 * first, f"two selected shows both ({len(_images())})")
+        finally:
+            stepper.viewer.close()
+            for name in ("fish_1.ims", "fish_2.ims"):
+                ims_reader.release(folder / name)
+
         # A sample carrying nothing must not conjure an empty region layer.
         bare = MicroscopyViewer(show=False)
         try:
