@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+import math
 import numpy as np
 
 from .utils import get_logger
@@ -847,7 +848,7 @@ class LabelSet:
 
         if self.sparse_key:
             for region_id, name, indices in self._iter_sparse_indices():
-                mask = np.zeros(int(np.prod(self.shape)), dtype=bool)
+                mask = np.zeros(math.prod(int(n) for n in self.shape), dtype=bool)
                 mask[indices] = True
                 yield region_id, name, mask.reshape(self.shape)
             return

@@ -282,6 +282,89 @@ def test_the_filter_runs_through_segment_volume() -> None:
     seg.register_backend(_StubBackend())
 
 
+def test_median_prefilter() -> None:
+    print("median filter before segmenting")
+
+    plane = np.zeros((64, 64), dtype=np.uint16)
+    plane[20:44, 20:44] = 1000  # an object with a sharp edge
+    noisy = plane.copy()
+    noisy[5, 5] = 60000  # a hot pixel in the background
+    noisy[30, 30] = 0  # a dead pixel inside the object
+
+    filtered = seg.denoise_median(noisy, 1)
+    check(int(filtered[5, 5]) == 0, "a hot pixel in the background is removed")
+    check(int(filtered[30, 30]) == 1000, "a dead pixel inside an object is filled in")
+    # A straight edge, which a median leaves exactly where it was. (Corners are a
+    # different matter: a 3x3 median rounds them off, which is the filter working.)
+    step = np.zeros((64, 64), dtype=np.uint16)
+    step[:, 32:] = 1000
+    edge = seg.denoise_median(step, 1)
+    check(
+        int(edge[:, :32].max()) == 0 and int(edge[:, 32:].min()) == 1000,
+        "a straight edge does not move — the point of a median rather than a blur",
+    )
+    check(seg.denoise_median(noisy, 0) is noisy, "radius 0 is a no-op, not a copy")
+
+    volume = np.zeros((5, 64, 64), dtype=np.uint16)
+    volume[2, 10, 10] = 60000
+    smoothed = seg.denoise_median(volume, 1)
+    check(smoothed.shape == volume.shape, "a stack keeps its shape")
+    check(int(smoothed.max()) == 0, "the hot pixel goes")
+    layered = np.zeros((3, 8, 8), dtype=np.uint16)
+    layered[1] = 500
+    check(
+        int(seg.denoise_median(layered, 1)[1].max()) == 500
+        and int(seg.denoise_median(layered, 1)[0].max()) == 0,
+        "Z is not filtered, so a bright plane does not bleed into its neighbours",
+    )
+
+
+def test_the_median_setting_reaches_the_run() -> None:
+    print("the median setting reaches the run")
+
+    stub = _StubBackend()
+    seg.register_backend(stub)
+
+    image = np.zeros((48, 48), dtype=np.float32)
+    image[10, 10] = 9999.0
+
+    plain = seg.segment_volume(image, (1.0, 1.0), settings=seg.SegmentationSettings(backend="stub"))
+    check(
+        float(np.asarray(stub.calls[-1]["image"]).max()) == 9999.0,
+        "with the filter off the backend gets the pixels as they were",
+    )
+    check(plain.median_radius_px == 0, "and the result says no filtering was done")
+
+    result = seg.segment_volume(
+        image, (1.0, 1.0), settings=seg.SegmentationSettings(backend="stub", median_radius_px=1)
+    )
+    check(
+        float(np.asarray(stub.calls[-1]["image"]).max()) == 0.0,
+        "with it on the backend gets the filtered channel",
+    )
+    check(result.median_radius_px == 1, "the radius is reported on the result")
+    check(
+        result.masks.shape == image.shape,
+        "the labels still come back on the grid that went in",
+    )
+
+    # Both stains are filtered, or the two channels stop matching.
+    nuclei = np.zeros((48, 48), dtype=np.float32)
+    nuclei[30, 30] = 9999.0
+    seg.segment_volume(
+        image,
+        (1.0, 1.0),
+        settings=seg.SegmentationSettings(backend="stub", median_radius_px=1),
+        nuclei=nuclei,
+    )
+    payload = np.asarray(stub.calls[-1]["image"])
+    check(
+        stub.calls[-1]["channel_axis"] == payload.ndim - 1 and float(payload.max()) == 0.0,
+        "a nuclear channel is filtered alongside the segmented one",
+    )
+    seg.register_backend(_StubBackend())
+
+
 def test_physical_units() -> None:
     print("physical units -> cellpose units")
 
@@ -732,6 +815,8 @@ def test_cellpose_call_shape() -> None:
 def main() -> int:
     for test in (
         test_physical_units,
+        test_median_prefilter,
+        test_the_median_setting_reaches_the_run,
         test_shape_descriptors,
         test_round_objects_are_filtered,
         test_the_filter_runs_through_segment_volume,

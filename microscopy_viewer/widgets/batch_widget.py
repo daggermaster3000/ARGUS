@@ -24,6 +24,7 @@ boundary with everything already finished safely on disk.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from qtpy.QtCore import Qt
@@ -75,6 +76,13 @@ class BatchSegmentationWidget(QWidget):
         self._outcomes: list[batch.ImageOutcome] = []
         self._running_jobs: tuple[batch.ImageJob, ...] = ()
 
+        # The Segmentation panel is handed the viewer, not the app, so it cannot
+        # reach this one to keep the shared median setting in step. Leave it a way.
+        try:
+            self._app.viewer._mv_batch_widget = self
+        except Exception:  # pragma: no cover - a viewer stub that refuses attributes
+            logger.debug("could not register the batch panel on the viewer", exc_info=True)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
@@ -94,6 +102,7 @@ class BatchSegmentationWidget(QWidget):
         inner.addWidget(self._build_plate_box())
         inner.addWidget(self._build_images_box())
         inner.addWidget(self._build_channels_box())
+        inner.addWidget(self._build_preprocessing_box())
         inner.addWidget(self._build_output_box())
         inner.addWidget(self._build_cellpose_box())
         inner.addStretch(1)
@@ -224,6 +233,38 @@ class BatchSegmentationWidget(QWidget):
             "on the reporter to get signal per nucleus."
         )
         form.addRow("Measure", self._measure_box)
+        return box
+
+    def _build_preprocessing_box(self) -> QGroupBox:
+        """What is done to a channel before Cellpose is given it.
+
+        The median filter is the same setting as the Segmentation panel's, shown
+        again here because a plate run is where it costs real time and this is the
+        panel that run is started from. The two spin boxes are kept in step, so
+        there is one value behind them rather than two that disagree.
+        """
+        box = QGroupBox("Before segmenting")
+        form = QFormLayout(box)
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self._median = QSpinBox()
+        self._median.setRange(0, 10)
+        self._median.setValue(0)
+        self._median.setSuffix(" px")
+        self._median.setSpecialValueText("off")
+        self._median.setToolTip(
+            "Median-filter each channel before segmenting it, with a square window of 2r+1 "
+            "px — shot noise and hot pixels go, edges stay put.\n\n"
+            "Only what Cellpose sees is filtered: the masks are written on the original grid "
+            "and the object intensities still come from the raw channel. Costs about 12 s per "
+            "12000 x 12000 image at radius 1 and 70 s at radius 3, on top of the run itself."
+        )
+        self._median.valueChanged.connect(self._median_changed)
+        form.addRow("Median filter", self._median)
+
+        self._median_cost = QLabel("—")
+        self._median_cost.setWordWrap(True)
+        form.addRow("", self._median_cost)
         return box
 
     def _build_output_box(self) -> QGroupBox:
@@ -484,6 +525,7 @@ class BatchSegmentationWidget(QWidget):
         elif already:
             text += f" {already} already have “{name}” and will be replaced."
         self._selection_summary.setText(text)
+        self._update_median_cost()
         self._update_enabled()
 
     def _update_level_note(self) -> None:
@@ -502,6 +544,46 @@ class BatchSegmentationWidget(QWidget):
             note += f" — the plate has {len(job.levels)} level(s), so the smallest is used"
         self._level_note.setText(note)
 
+    def median_radius(self) -> int:
+        return int(self._median.value())
+
+    def set_median_radius(self, radius: int) -> None:
+        if int(radius) != int(self._median.value()):
+            self._median.setValue(int(radius))
+
+    def _median_changed(self, radius: int) -> None:
+        panel = getattr(self._app, "segmentation_widget", None)
+        if panel is not None and hasattr(panel, "set_median_radius"):
+            panel.set_median_radius(int(radius))
+        self._update_median_cost()
+        self.refresh_settings_summary()
+
+    def _update_median_cost(self) -> None:
+        """Say what the filter will add to the run, in minutes, before it starts.
+
+        The filter is per image and scales with the window, so on a plate it is the
+        difference between half an hour and an afternoon; a number here beats
+        finding that out at image 40 of 46.
+        """
+        radius = self.median_radius()
+        jobs = self.selected_jobs()
+        if radius <= 0 or not jobs:
+            self._median_cost.setText("—")
+            return
+        # Measured on this machine: 12 s for a 144 Mpx plane at radius 1, and the cost
+        # grows roughly with the window area (40 s at radius 2, 69 s at radius 3).
+        level = self._survey.jobs[0].level(self._level.value()) if self._survey else None
+        pixels = 1.0
+        if level is not None:
+            for axis, size in zip(self._survey.jobs[0].axes, level.shape):
+                if axis in "YX":
+                    pixels *= int(size)
+        seconds = 12.0 * (pixels / 144e6) * ((2 * radius + 1) ** 2 / 9.0)
+        self._median_cost.setText(
+            f"about {seconds:.0f} s per image, {seconds * len(jobs) / 60:.0f} min over "
+            f"{len(jobs)} image(s)"
+        )
+
     def refresh_settings_summary(self) -> None:
         """Show the Cellpose settings this run would use, from the Segmentation panel."""
         settings = self.segmentation_settings()
@@ -510,17 +592,22 @@ class BatchSegmentationWidget(QWidget):
         text = f"{settings.resolved_model()}, {settings.mode}, diameter {diameter}"
         if settings.max_solidity > 0:
             text += f", solidity ≤ {settings.max_solidity:g}"
+        if self.median_radius() > 0:
+            text += f", median r={self.median_radius()} px"
         self._settings_summary.setText(f"{text} — {device.describe()}")
 
     def segmentation_settings(self) -> sg.SegmentationSettings:
         """The per-image settings, from the Segmentation panel when there is one."""
+        settings = sg.SegmentationSettings()
         panel = getattr(self._app, "segmentation_widget", None)
         if panel is not None and hasattr(panel, "settings"):
             try:
-                return panel.settings()
+                settings = panel.settings()
             except Exception:  # pragma: no cover - a half-built panel
                 logger.debug("could not read the segmentation panel settings", exc_info=True)
-        return sg.SegmentationSettings()
+        # This panel owns the median radius during a plate run: the two spin boxes
+        # track each other, but the one the user reached for last is here.
+        return replace(settings, median_radius_px=self.median_radius())
 
     def settings(self) -> batch.BatchSettings:
         table_dir = self._table_dir.text().strip()

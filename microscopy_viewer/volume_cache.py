@@ -19,6 +19,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+import math
 import numpy as np
 
 from .runtime import app_data_dir
@@ -146,7 +147,7 @@ def store(
 
     shape = tuple(int(n) for n in array.shape)
     dtype = np.dtype(array.dtype)
-    total_bytes = int(np.prod(shape)) * dtype.itemsize if shape else 0
+    total_bytes = math.prod(int(n) for n in shape) * dtype.itemsize if shape else 0
     if total_bytes < MIN_CACHE_BYTES:
         return None
 

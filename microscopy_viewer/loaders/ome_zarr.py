@@ -36,11 +36,16 @@ from .layer_spec import LayerSpec, apply_squeeze, channel_appearance, squeeze_pl
 
 logger = get_logger("ome_zarr")
 
+#: Files that mark a folder as a Zarr group. zarr 3 writes ``zarr.json`` for every
+#: group; zarr 2 writes ``.zattrs`` only when the group has attributes of its own,
+#: so a plate row — which has none — is marked by ``.zgroup`` alone.
+ZARR_MARKERS = (".zattrs", ".zgroup", "zarr.json")
+
 
 def can_read(path: Path) -> bool:
     if path.suffix.lower() in (".zarr", ".ngff"):
         return True
-    if path.is_dir() and ((path / ".zattrs").exists() or (path / "zarr.json").exists()):
+    if path.is_dir() and any((path / marker).exists() for marker in ZARR_MARKERS):
         return True
     return False
 
@@ -1002,9 +1007,7 @@ def _store_label(path: Path) -> str:
         # A row of a plate is a group with no attributes of its own — only a
         # ``.zgroup`` — so testing for ``.zattrs`` alone stops the walk one level
         # too early and a well ends up named "06".
-        if not any(
-            (parent / marker).exists() for marker in (".zattrs", ".zgroup", "zarr.json")
-        ):
+        if not any((parent / marker).exists() for marker in ZARR_MARKERS):
             break
         root = parent
     if root == path:

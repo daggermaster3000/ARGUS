@@ -11,6 +11,7 @@ from typing import Callable, Iterable, Sequence
 
 from ..utils import get_logger
 from . import ims, ome_zarr, tiff
+from .ome_zarr import ZARR_MARKERS
 from .layer_spec import COLORMAP_CYCLE, LayerSpec
 
 logger = get_logger("loaders")
@@ -44,10 +45,11 @@ def is_supported(path: str | Path) -> bool:
     candidate = Path(path)
     if candidate.suffix.lower() in SUPPORTED_SUFFIXES:
         return True
-    # A Zarr store is a folder, and need not be named ".zarr": zarr 2 marks the
-    # root with .zattrs, zarr 3 with zarr.json.
-    return candidate.is_dir() and (
-        (candidate / ".zattrs").exists() or (candidate / "zarr.json").exists()
+    # A Zarr store is a folder, and need not be named ".zarr". zarr 3 marks every
+    # group with zarr.json; zarr 2 writes .zattrs only when a group has attributes
+    # of its own, so a plate row — which has none — is marked by .zgroup alone.
+    return candidate.is_dir() and any(
+        (candidate / marker).exists() for marker in ZARR_MARKERS
     )
 
 
@@ -115,8 +117,7 @@ def expand_inputs(paths: Sequence[str | Path]) -> list[Path]:
         if (
             candidate.is_dir()
             and candidate.suffix.lower() not in (".zarr", ".ngff")
-            and not (candidate / ".zattrs").exists()
-            and not (candidate / "zarr.json").exists()
+            and not any((candidate / marker).exists() for marker in ZARR_MARKERS)
         ):
             out.extend(sorted(child for child in candidate.iterdir() if is_supported(child)))
         else:

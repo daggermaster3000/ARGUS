@@ -27,6 +27,7 @@ import threading
 from collections.abc import Sequence as _AbcSequence
 from typing import Callable, Iterable, Sequence
 
+import math
 import numpy as np
 
 from . import volume_cache
@@ -322,7 +323,7 @@ def level_bytes(level) -> int:
     shape = tuple(int(n) for n in getattr(level, "shape", ()) or ())
     if not shape:
         return 0
-    return int(np.prod(shape)) * int(np.dtype(level.dtype).itemsize)
+    return math.prod(int(n) for n in shape) * int(np.dtype(level.dtype).itemsize)
 
 
 def levels_within_budget(levels: Sequence, budget: int) -> list[int]:

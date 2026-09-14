@@ -538,6 +538,14 @@ one mask per nucleus. On a kidney-organoid well here, a weak cytoplasmic channel
 alone found 55 objects; the same channel with its DAPI found 626. Both stains are
 decimated together, so a large volume stays paired.
 
+**Noise can be filtered out before Cellpose sees it.** **Median filter** smooths
+each channel with a square window of 2r+1 px before handing it over — shot noise
+and hot pixels go, edges stay where they are, which is what a Gaussian would not
+manage. Only the network's input is filtered: the masks come back on the original
+grid and per-object intensities are still read from the raw channel. It is not
+free, so it is off by default; the Batch segmentation panel estimates what it
+will add to a plate run before the run starts.
+
 **Round false positives can be thrown out by shape.** Cellpose labels debris,
 beads and out-of-focus blobs along with the cells, and what those have in common
 is that they come back as clean convex discs while a real nucleus packed against
@@ -569,6 +577,7 @@ decimated — the conversion happens after the decimation, not before.
 | **Measure** | The channel intensities are read from. Segment on DAPI, measure on the reporter, and every row is signal per nucleus. |
 | **Mode** | `2D + stitch` segments each plane and joins overlapping masks between planes — faster, and usually better on an anisotropic stack where a nucleus is four planes tall. `3D` computes flows in 3D. `2D per plane` leaves labels unconnected between planes. |
 | **Diameter** | Expected object diameter in µm. The setting that matters most; automatic is worth overriding. |
+| **Median filter** | Radius in pixels of a median filter applied to the channels before segmentation. `off` by default. Removes shot noise and hot pixels without moving edges. Costs time per image — see the estimate in the Batch panel. |
 | **Max solidity** | Objects rounder than this are dropped after the run: `0.985` throws out the convex discs that debris and beads produce and leaves the cells. `off` skips the measurement entirely; `1.000` measures every object and drops none, which is how you choose the cut. Needs scikit-image, which arrives with cellpose. |
 | **Segment at most** | Volumes above this are decimated **laterally** before segmentation — Z is left alone, since that is where objects are already only a few planes tall. The labels always come back on the original grid. |
 
@@ -668,6 +677,7 @@ seven times as long.
 |---|---|
 | **Wells** / **Acquisitions** | What to run. Everything, one row, one cycle — ctrl-click and shift-click. Wells that already carry the label set are marked. |
 | **Segment** / **Nuclei** / **Measure** | As in the Segmentation panel, but resolved per image by wavelength or label. **Nuclei** gives whole cells instead of nuclei. |
+| **Median filter** | The same setting as the Segmentation panel's, shown here because a plate run is where it costs real time; the two are kept in step. The line under it estimates what it adds to the selected images. |
 | **Label set** | Name written under `labels/`. Give a second run a different name to keep both. |
 | **Pyramid level** | Which level to segment. 0 is full resolution; each step up halves the image and quarters the time. The panel shows the resulting extent and µm/px. |
 | **Tables** | A per-image object table and a plate-level summary CSV — one row per image with counts, median size, median solidity, how many the shape filter dropped, and what went wrong. |

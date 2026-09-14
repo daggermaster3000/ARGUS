@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Callable, Sequence
 
+import math
 import numpy as np
 
 from . import gpu, volume_cache
@@ -50,7 +51,10 @@ def displayed_voxels(shape: Sequence[int]) -> int:
     not contribute to the size of the 3D texture.
     """
     spatial = tuple(int(n) for n in shape[-3:])
-    return int(np.prod(spatial)) if spatial else 0
+    # math.prod, not np.prod: numpy's default integer is 32-bit on Windows below
+    # numpy 2, so a volume past 2**31 voxels wraps to a negative number and every
+    # size check downstream of it silently passes.
+    return math.prod(spatial) if spatial else 0
 
 
 def choose_level(levels: Sequence, budget: int, max_axis: int | None = None) -> int:

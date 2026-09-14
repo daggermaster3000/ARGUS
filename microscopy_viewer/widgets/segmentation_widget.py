@@ -261,6 +261,22 @@ class SegmentationWidget(QWidget):
         )
         form.addRow("Max solidity", self._max_solidity)
 
+        self._median = QSpinBox()
+        self._median.setRange(0, 10)
+        self._median.setValue(0)
+        self._median.setSuffix(" px")
+        self._median.setSpecialValueText("off")
+        self._median.setToolTip(
+            "Median-filter the channels before segmenting them, with a square window of "
+            "2r+1 px. It removes shot noise and hot pixels without moving edges, which is "
+            "what a Gaussian would do.\n\n"
+            "Only what Cellpose sees is filtered: the labels come back on the original grid "
+            "and intensities are still measured on the raw channel. It is not cheap — on a "
+            "12000 x 12000 well, radius 1 costs about 12 s and radius 3 about 70 s, per image."
+        )
+        self._median.valueChanged.connect(self._median_changed)
+        form.addRow("Median filter", self._median)
+
         self._normalize = QCheckBox("Percentile-normalise before segmenting")
         self._normalize.setChecked(True)
         self._normalize.setToolTip(
@@ -484,11 +500,28 @@ class SegmentationWidget(QWidget):
             stitch_threshold=float(self._stitch.value()),
             min_size=int(self._min_size.value()),
             max_solidity=float(self._max_solidity.value()),
+            median_radius_px=int(self._median.value()),
             normalize=self._normalize.isChecked(),
             use_gpu=self._use_gpu.isChecked(),
             batch_size=int(self._batch_size.value()),
             max_voxels=int(self._max_voxels.value()) * 1_000_000,
         )
+
+    # The batch panel shows the same setting, so that a plate run can be filtered
+    # from the panel it is started in; these keep the two spin boxes as one value
+    # rather than two that drift apart.
+
+    def median_radius(self) -> int:
+        return int(self._median.value())
+
+    def set_median_radius(self, radius: int) -> None:
+        if int(radius) != int(self._median.value()):
+            self._median.setValue(int(radius))
+
+    def _median_changed(self, radius: int) -> None:
+        panel = getattr(self._viewer, "_mv_batch_widget", None)
+        if panel is not None and hasattr(panel, "set_median_radius"):
+            panel.set_median_radius(int(radius))
 
     def _layer_named(self, name: str):
         if not name:
@@ -649,6 +682,8 @@ class SegmentationWidget(QWidget):
             summary += f", diameter {result.diameter_px:.0f} px"
         if result.used_nuclear_channel:
             summary += ", two channels"
+        if result.median_radius_px:
+            summary += f", median r={result.median_radius_px} px"
         summary += ")."
         if result.n_dropped:
             summary += (

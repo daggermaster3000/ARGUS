@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+import math
 import numpy as np
 
 from .utils import get_logger
@@ -192,6 +193,11 @@ class SegmentationSettings:
     #: rest. Zero switches the whole step off, and 1.0 measures without dropping
     #: anything — which is how you look at the numbers before choosing a cut.
     max_solidity: float = 0.0
+    #: Radius, in pixels, of a median filter applied to the channels *before* they
+    #: are segmented. Zero is off. It changes what Cellpose sees and nothing else:
+    #: the label map comes back on the original grid and intensities are still
+    #: measured on the raw channel.
+    median_radius_px: int = 0
 
     def resolved_model(self) -> str:
         """What to hand the backend: a path if one is set, else the model name."""
@@ -223,6 +229,8 @@ class SegmentationResult:
     warnings: list[str] = field(default_factory=list)
     #: Whether a nuclear channel was passed alongside the segmented one.
     used_nuclear_channel: bool = False
+    #: Median-filter radius the channels were smoothed with, in pixels; 0 for none.
+    median_radius_px: int = 0
     #: Labels removed by the solidity filter, and the shape of everything measured.
     dropped_labels: list[int] = field(default_factory=list)
     shapes: dict[int, dict[str, float]] = field(default_factory=dict)
@@ -859,6 +867,28 @@ def rescale_image(array: np.ndarray, factors: Sequence[float]) -> np.ndarray:
     return _zoom(array.astype(np.float32, copy=False), factors, order=1)
 
 
+def denoise_median(array: np.ndarray, radius_px: int) -> np.ndarray:
+    """Median-filter *array* laterally, with a square footprint of 2r+1.
+
+    Median rather than Gaussian because it removes shot noise and hot pixels
+    without moving edges, which is what a segmentation network is looking at. Only
+    Y and X are filtered: Z is left alone for the same reason it is left out of
+    the decimation, an object is only a few planes tall to begin with and
+    smoothing across them merges the ones that touch.
+
+    Not cheap — the cost grows with the window — so the caller decides. On a
+    12000 x 12000 plane a radius of 1 is about 12 s and a radius of 3 about 70 s.
+    """
+    radius = int(radius_px)
+    if radius <= 0:
+        return array
+    from scipy import ndimage
+
+    width = 2 * radius + 1
+    size = (1,) * max(0, array.ndim - 2) + (width, width)
+    return ndimage.median_filter(array, size=size)
+
+
 def restore_masks(masks: np.ndarray, shape: Sequence[int]) -> np.ndarray:
     """Put a decimated label map back on the original grid.
 
@@ -1083,6 +1113,15 @@ def segment_volume(
         )
         nuclear = None
 
+    # Denoise before anything measures or decimates the array, so the filter sees
+    # the pixels as they were acquired and Cellpose sees the filtered ones.
+    if settings.median_radius_px > 0:
+        if progress is not None:
+            progress(f"median filter, radius {settings.median_radius_px} px")
+        array = denoise_median(array, settings.median_radius_px)
+        if nuclear is not None:
+            nuclear = denoise_median(nuclear, settings.median_radius_px)
+
     device = compute_device(prefer_gpu=settings.use_gpu)
     if settings.use_gpu and not device.is_gpu:
         warnings.append(
@@ -1100,7 +1139,7 @@ def segment_volume(
     if any(abs(float(f) - 1.0) > 1e-6 for f in factors):
         warnings.append(
             f"Volume decimated to {tuple(working.shape)} for segmentation "
-            f"({int(np.prod(array.shape)) / 1e6:.0f} Mvoxels is over the "
+            f"({math.prod(int(n) for n in array.shape) / 1e6:.0f} Mvoxels is over the "
             f"{settings.max_voxels / 1e6:.0f} Mvoxel limit); the labels come back on "
             "the original grid."
         )
@@ -1182,6 +1221,7 @@ def segment_volume(
         elapsed_s=elapsed,
         warnings=warnings,
         used_nuclear_channel=nuclear is not None,
+        median_radius_px=int(settings.median_radius_px),
         dropped_labels=dropped,
         shapes=shapes,
     )
