@@ -96,6 +96,11 @@ def _register_builtin_panels() -> None:
 
         return SegmentationWidget(app.viewer)
 
+    def _analysis(app):
+        from .analysis_widget import MeasurementAnalysisWidget
+
+        return MeasurementAnalysisWidget(app.viewer)
+
     def _batch(app):
         from .batch_widget import BatchSegmentationWidget
 
@@ -168,6 +173,17 @@ def _register_builtin_panels() -> None:
             attribute="segmentation_widget",
             tabify_with="intensity_comparison",
             order=50,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="measurement_analysis",
+            title="Measurement analysis",
+            factory=_analysis,
+            attribute="analysis_widget",
+            tabify_with="segmentation",
+            # After the panels that write the tables it reads.
+            order=70,
         )
     )
     register_panel(

@@ -693,6 +693,49 @@ image boundary with everything already finished safely on disk. On an RTX 4090 a
 12 000 × 12 000 well takes about 35 s including the read and the write, so a
 46-well cycle is roughly half an hour.
 
+### Measurement analysis
+
+A segmentation writes one row per object and then the numbers and the image go
+their separate ways — the table into Excel, the masks into the viewer, with
+nothing tying a row to the object it came from. **Measurement analysis** is the
+way back.
+
+Open any per-object table — the CSV a batch run writes, the workbook the
+Segmentation panel exports, or a table from elsewhere — and the panel
+
+- **shows it**, all of it. 18 000 rows is a normal well and opens instantly: the
+  view reads the cells it is about to draw rather than building a widget per cell.
+- **colours the labels by any column.** Pick *Mean intensity* and the
+  segmentation is redrawn as that measurement; pick *Solidity* and the round
+  false positives stand out as one end of the scale. Objects with no row in the
+  table are left transparent rather than painted the colour of zero, so a
+  partially measured plate shows you exactly what was measured.
+- **plots two columns against each other**, with the points carrying the same
+  colours as the labels, so a cluster in the plot and a region in the image are
+  recognisably the same thing.
+- **finds the layer itself.** A batch table is named after the image it came
+  from, so `G_07_0.csv` picks out `G/07 :: cycle 1 :: nuclei` in the layer list.
+  Change it in the combo when the guess is wrong.
+
+**The colour scale is clipped to 1–99 % by default**, and the values at both ends
+are shown. This matters more than it sounds: an object table always has a handful
+of enormous outliers — two nuclei segmented as one — and stretching the scale to
+the true maximum leaves every real object the same dark blue. Widen it to 0–100 %
+to see the raw range.
+
+Clicking a row selects that label in the viewer, which is how a suspicious number
+gets looked at rather than argued about. **Reset** puts the ordinary random label
+colours back.
+
+| Setting | What it does |
+|---|---|
+| **File** | The table. CSV, TSV or Excel; a semicolon-separated CSV from a European Excel is detected rather than read as one column. **Reload** re-reads it after a run has rewritten it. |
+| **Labels layer** | Which segmentation the table describes. Guessed from the file name. |
+| **Colour by** | The column the colours come from. Numeric columns only; text columns are not offered. |
+| **Colormap** | Perceptually uniform maps first — a measurement painted in a map with false edges is a measurement misread. |
+| **Percentiles** | Where the colour scale starts and stops. |
+| **x** / **y** | The scatter axes. Above 100 000 points the plot draws a random sample, and says so — random rather than the first N, because a table is written in label order and the first N would be one corner of the well. |
+
 ### Third-party napari plugins
 
 Most napari plugins declare their input as `napari.types.ImageData` and then treat
@@ -886,6 +929,7 @@ microscopy_viewer/
   intensity.py              ROI statistics, AUC / overlap; no Qt, runs off-thread
   registration.py           atlas registration and the per-region readout; no Qt
   segmentation.py           Cellpose segmentation, the GPU device, per-object stats; no Qt
+  analysis.py               object tables read back in: label colouring, plot helpers; no Qt
   batch.py                  plate-wide segmentation: survey, run, NGFF label writing; no Qt
   exports.py                snapshots and the Excel workbook
   slides.py                 channel/merge rendering and the PowerPoint slide; no Qt
@@ -906,6 +950,7 @@ microscopy_viewer/
     registration_widget.py  channel roles, the atlas, the region table
     segmentation_widget.py  channel, model and diameter; the object table
     batch_widget.py         plate, wells, cycles and channels; the run and its results
+    analysis_widget.py      the object table, the label colouring and the scatter plot
     slide_dialog.py         pick samples, name the stainings, write the .pptx
     movie_dialog.py         pick a range and a rate, render the frames
   utils.py                  logging, unit conversion, geometry helpers
@@ -957,6 +1002,7 @@ python tests/test_overview.py       # overview detection, stitching, the locator
 python tests/test_registration.py   # atlas registration engine — no Qt; ANTs checks skip without antspyx
 python tests/test_segmentation.py   # segmentation engine, units, object table — no Qt; cellpose is never run
 python tests/test_batch.py          # plate survey, channel matching, NGFF label writing — no Qt; cellpose is never run
+python tests/test_analysis.py       # object tables, colour scales, label colouring — no Qt needed
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 
