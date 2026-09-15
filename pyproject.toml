@@ -90,6 +90,12 @@ dashboard = [
     "squidpy>=1.3",
     "scanpy>=1.9",
     "matplotlib>=3.5",
+    # Leiden is the clustering the dashboard is built around. Without these two
+    # scanpy cannot run it and the dashboard falls back to k-means, which needs a
+    # cluster count guessed in advance and gives a visibly worse answer -- so they
+    # are a dependency rather than a suggestion.
+    "leidenalg>=0.9",
+    "igraph>=0.10",
 ]
 
 [project.urls]

@@ -11,6 +11,12 @@ This module is the part with no Streamlit in it: loading, filtering, clustering
 and the squidpy calls, each one testable on its own. The page that draws them is
 :mod:`microscopy_viewer.dashboard_app`, and :func:`launch` starts it.
 
+**The plate is a second question.** Everything spatial is per image, but the
+question *which wells differ from which* is not spatial at all — it is asked of
+all the objects at once, in feature space, which is what :func:`embed` and
+:func:`composition` are for. The two do not mix: a UMAP says two wells hold
+different phenotypes, a neighbourhood graph says where in one well they sit.
+
 **Coordinates are per image.** ``obsm["spatial"]`` holds positions within one
 well, so two wells overlap in that space. Every spatial statistic here is
 computed on one image at a time, and :func:`select_image` is how the page gets
@@ -57,6 +63,18 @@ DEFAULT_COMPONENTS = 15
 
 #: Neighbours for the expression graph the clustering runs on.
 DEFAULT_NEIGHBOURS = 15
+
+#: Objects taken per image when the whole plate is embedded. Per image rather
+#: than overall: this plate runs from 16 objects in one well to 46 394 in another,
+#: and a flat sample of the lot would be a picture of the big wells with the small
+#: ones invisible in it.
+DEFAULT_PER_IMAGE = 750
+
+#: UMAP neighbours and minimum distance. The defaults umap-learn ships, which are
+#: the ones every published figure used, so a plot made here is comparable to one
+#: made in a notebook.
+DEFAULT_UMAP_NEIGHBOURS = 15
+DEFAULT_MIN_DIST = 0.5
 
 #: How the spatial graph is built. Delaunay is the honest default for segmented
 #: objects: nuclei touch their neighbours, and a fixed radius in micrometres
@@ -245,9 +263,12 @@ def cluster(
         logger.info("leiden is unavailable; clustering with k-means", exc_info=True)
         from sklearn.cluster import KMeans
 
-        # Resolution is not a cluster count, but it is the knob the page offers,
-        # so it is mapped onto one rather than ignored.
-        k = int(max(2, min(20, round(4 * float(resolution)))))
+        # Resolution is not a cluster count and the two cannot be made to agree,
+        # but it is the knob the page offers, so it is mapped onto one rather than
+        # ignored. Scaled so the default lands near what leiden gives on this kind
+        # of data -- a dozen-ish groups -- instead of the two that a gentler
+        # mapping produces, which is not an answer to anything.
+        k = int(max(2, min(25, round(12 * float(resolution)))))
         labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(adata.obsm["X_pca"])
         adata.obs[key] = [str(value) for value in labels]
         method = f"k-means (k={k})"
@@ -255,6 +276,11 @@ def cluster(
     logger.info("dashboard: %s found %d cluster(s)", method, adata.obs[key].nunique())
     adata.uns[f"{key}_method"] = method
     return method
+
+
+def clustered_with_leiden(adata, key: str = CLUSTER_KEY) -> bool:
+    """Whether the grouping came from leiden rather than the k-means fallback."""
+    return str(adata.uns.get(f"{key}_method", "")).startswith("leiden")
 
 
 def bin_column(adata, column: str, bins: int = 4, key: str = CLUSTER_KEY) -> str:
@@ -278,6 +304,122 @@ def bin_column(adata, column: str, bins: int = 4, key: str = CLUSTER_KEY) -> str
     )
     adata.uns[f"{key}_method"] = f"{len(labels)} bins of {column}"
     return str(adata.uns[f"{key}_method"])
+
+
+# ---------------------------------------------------------------------------
+# The whole plate
+# ---------------------------------------------------------------------------
+
+
+def well_of(image: str) -> str:
+    """``G/07/0`` -> ``G/07``: the well an image belongs to.
+
+    Worth separating from the image because the seven 4i cycles of one well are
+    the same cells, so colouring a plate-wide embedding by image would show seven
+    points for every object and invite them to be read as seven conditions.
+    """
+    parts = str(image).strip("/").split("/")
+    return "/".join(parts[:2]) if len(parts) >= 2 else str(image)
+
+
+def row_column(image: str) -> tuple[str, str]:
+    """``G/07/0`` -> ``("G", "07")``, for laying a result out as a plate."""
+    parts = str(image).strip("/").split("/")
+    return (parts[0], parts[1]) if len(parts) >= 2 else (str(image), "")
+
+
+def stratified_subsample(adata, per_image: int = DEFAULT_PER_IMAGE, seed: int = 0):
+    """At most *per_image* objects from each image, drawn at random.
+
+    Equal footing rather than proportional representation: the point of a
+    plate-wide embedding is to compare wells, and a well with forty-six thousand
+    objects would otherwise draw the map that a well with sixteen is then judged
+    against. Wells smaller than the quota keep everything they have.
+    """
+    if IMAGE_KEY not in adata.obs:
+        return subsample(adata, per_image, seed=seed)
+
+    rng = np.random.default_rng(seed)
+    labels = adata.obs[IMAGE_KEY].astype(str).to_numpy()
+    chosen: list[np.ndarray] = []
+    for name in sorted(set(labels)):
+        where = np.flatnonzero(labels == name)
+        if where.size > int(per_image):
+            where = rng.choice(where, size=int(per_image), replace=False)
+        chosen.append(where)
+    picked = np.sort(np.concatenate(chosen)) if chosen else np.empty(0, dtype=int)
+    logger.info(
+        "dashboard: %d object(s) from %d image(s), at most %d each",
+        picked.size,
+        len(set(labels)),
+        per_image,
+    )
+    out = adata[picked].copy()
+    out.obs["well"] = [well_of(name) for name in out.obs[IMAGE_KEY].astype(str)]
+    out.obs["row"] = [row_column(name)[0] for name in out.obs[IMAGE_KEY].astype(str)]
+    out.obs["column"] = [row_column(name)[1] for name in out.obs[IMAGE_KEY].astype(str)]
+    for name in ("well", "row", "column"):
+        out.obs[name] = out.obs[name].astype("category")
+    return out
+
+
+def embed(
+    adata,
+    n_neighbors: int = DEFAULT_UMAP_NEIGHBOURS,
+    min_dist: float = DEFAULT_MIN_DIST,
+    seed: int = 0,
+) -> str:
+    """Lay the objects out by what they look like, into ``obsm["X_umap"]``.
+
+    Runs on the principal components rather than the raw columns, which is what
+    keeps the neighbour search honest when two features are the same measurement
+    twice — mean and median intensity of one channel are nearly the same column,
+    and a distance computed over both counts it twice.
+    """
+    import scanpy as sc
+
+    if "X_pca" not in adata.obsm:
+        prepare(adata)
+    sc.pp.neighbors(adata, n_neighbors=int(min(n_neighbors, max(2, adata.n_obs - 1))))
+    sc.tl.umap(adata, min_dist=float(min_dist), random_state=int(seed))
+    logger.info("dashboard: UMAP of %d object(s)", adata.n_obs)
+    return f"UMAP, {n_neighbors} neighbours, min_dist {min_dist:g}"
+
+
+def composition(adata, key: str = CLUSTER_KEY, by: str = "well"):
+    """What share of each well's objects fall in each group. Rows sum to 1.
+
+    The plate-level readout: a UMAP shows that phenotypes exist, and this shows
+    which wells have them. Shares rather than counts, because the wells hold
+    wildly different numbers of objects and a count table is a table of how full
+    each well was.
+    """
+    import pandas as pd
+
+    column = by if by in adata.obs else IMAGE_KEY
+    counts = pd.crosstab(adata.obs[column], adata.obs[key])
+    totals = counts.sum(axis=1).replace(0, np.nan)
+    return counts.div(totals, axis=0).fillna(0.0)
+
+
+def plate_grid(shares, group: str):
+    """One group's share laid out as the plate: rows down, columns across.
+
+    A plate is a physical object and the answer is usually physical too — an edge
+    effect, a column of controls, one row that did not take. A bar chart of
+    forty-four wells hides that; a grid does not.
+    """
+    import pandas as pd
+
+    if group not in shares.columns:
+        raise KeyError(f"{group!r} is not one of the groups")
+    rows: dict[str, dict[str, float]] = {}
+    for name, value in shares[group].items():
+        row, column = row_column(str(name))
+        rows.setdefault(row, {})[column] = float(value)
+    frame = pd.DataFrame(rows).T
+    frame = frame.reindex(sorted(frame.index))
+    return frame.reindex(columns=sorted(frame.columns, key=lambda c: (len(c), c)))
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,11 @@ the page — widgets, layout, and the plots. Started from the viewer by the
 
     streamlit run microscopy_viewer/dashboard_app.py -- --file G_07_0.h5ad
 
+There are two questions here, and they do not mix. **Across the plate** asks
+which wells hold which phenotypes, in feature space, using every well at once.
+The other three tabs ask where those phenotypes sit inside one well, which is
+spatial and has to be one image at a time because the coordinates are per image.
+
 The order of the page is the order of the argument: what is in the file, what the
 objects look like, how they are grouped, and only then where those groups sit and
 whether that arrangement means anything. The spatial statistics are last because
@@ -71,12 +76,171 @@ def _analysed(
     return adata, method, graph
 
 
+@st.cache_resource(show_spinner="Embedding the plate — this is the slow one…")
+def _plate(path: str, mtime: float, per_image: int, resolution: float,
+           n_neighbors: int, min_dist: float):
+    """Every well, sampled evenly, clustered and laid out. Cached: it is minutes."""
+    adata = db.stratified_subsample(_read(path, mtime), per_image)
+    db.prepare(adata)
+    method = db.cluster(adata, resolution=resolution)
+    how = db.embed(adata, n_neighbors=n_neighbors, min_dist=min_dist)
+    return adata, method, how
+
+
 def _figure(width: float = 6.0, height: float = PLOT_HEIGHT):
     from matplotlib.figure import Figure
 
     figure = Figure(figsize=(width, height), dpi=110)
     figure.patch.set_alpha(0.0)
     return figure
+
+
+def _plate_tab(path: str, mtime: float) -> None:
+    """Every well at once: a UMAP in feature space, and what each well is made of.
+
+    A function rather than inline, so that "there is nothing to show yet" can
+    return instead of calling st.stop() -- Streamlit renders every tab on the
+    same run, and stopping here would take the spatial tabs down with it.
+    """
+    if not db.images(_read(path, mtime)):
+        st.info(
+            "This file holds one image, so there is no plate to compare. Export the "
+            "whole folder as one AnnData — the Measurement analysis panel's "
+            "**…the whole folder as one** — to get a file with every well in it."
+        )
+    else:
+        st.markdown(
+            "**Which wells hold which phenotypes.** Every well at once, in feature "
+            "space rather than in the well — this is the question the spatial tabs "
+            "cannot ask, because the coordinates in them are per image."
+        )
+        settings = st.columns(4)
+        per_image = settings[0].number_input(
+            "Objects per image", 100, 5000, db.DEFAULT_PER_IMAGE, step=50,
+            help="Taken from each image separately. This plate runs from 16 objects "
+                 "in one well to 46 394 in another, and a flat sample of the lot "
+                 "would be a picture of the big wells with the small ones invisible.",
+        )
+        plate_resolution = settings[1].slider("Cluster resolution", 0.2, 2.0, 0.6, step=0.1,
+                                              key="plate_res")
+        umap_neighbours = settings[2].slider("UMAP neighbours", 5, 50,
+                                             db.DEFAULT_UMAP_NEIGHBOURS, key="umap_n")
+        min_dist = settings[3].slider("UMAP min_dist", 0.0, 1.0, db.DEFAULT_MIN_DIST,
+                                      step=0.05, key="umap_d")
+
+        n_images = len(db.images(_read(path, mtime)))
+        st.caption(
+            f"{n_images} images x {per_image} = up to {n_images * int(per_image):,} objects. "
+            "Computed once and remembered; changing a setting recomputes it."
+        )
+        # Behind a button because it is minutes, and remembered in the session
+        # rather than read off the button, which is only true on the click's own
+        # rerun -- every later interaction would otherwise wipe the plot.
+        if st.button("Embed the plate", key="plate_go"):
+            st.session_state["plate_embedded"] = True
+        if not st.session_state.get("plate_embedded"):
+            st.info("Press **Embed the plate** to compute it.")
+            return
+
+        try:
+            whole, plate_method, how = _plate(
+                path, mtime, int(per_image), plate_resolution, int(umap_neighbours), min_dist
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.exception(exc)
+            st.stop()
+
+        plate_groups = list(whole.obs[db.CLUSTER_KEY].cat.categories)
+        st.caption(
+            f"**{whole.n_obs:,} objects** from {whole.obs[db.IMAGE_KEY].nunique()} images "
+            f"· {plate_method} into {len(plate_groups)} · {how}"
+        )
+        if not db.clustered_with_leiden(whole):
+            st.warning(
+                f"Grouped with **{plate_method}** because leidenalg is not installed. "
+                "k-means needs the number of groups decided in advance, which is exactly "
+                "what you do not know yet — the map below is still the map, but the "
+                "colouring on it is cruder than it should be. "
+                "`pip install leidenalg igraph` and press Embed again."
+            )
+
+        left, right = st.columns(2)
+        umap = np.asarray(whole.obsm["X_umap"])
+        with left:
+            st.subheader("The map")
+            colour_by = st.selectbox(
+                "Colour by",
+                [db.CLUSTER_KEY, "well", "row", "column"] + db.feature_names(whole),
+                key="umap_colour",
+            )
+            figure = _figure(6.5, 6.0)
+            axes = figure.add_subplot(111)
+            if colour_by in whole.obs and str(whole.obs[colour_by].dtype) == "category":
+                levels = list(whole.obs[colour_by].cat.categories)
+                for level in levels:
+                    mask = (whole.obs[colour_by] == level).to_numpy()
+                    axes.scatter(umap[mask, 0], umap[mask, 1], s=3, linewidths=0, label=str(level))
+                if len(levels) <= 24:
+                    axes.legend(markerscale=4, fontsize=6, frameon=False, ncol=2)
+                else:
+                    axes.set_title(f"{len(levels)} {colour_by}s — too many to label", fontsize=8)
+            else:
+                values = db.values_of(whole, colour_by).astype(float)
+                low, high = np.nanpercentile(values, [1, 99])
+                dots = axes.scatter(umap[:, 0], umap[:, 1], c=values, s=3, linewidths=0,
+                                    cmap="viridis", vmin=low, vmax=high)
+                figure.colorbar(dots, ax=axes, shrink=0.75, label=colour_by)
+            axes.set_xlabel("UMAP 1", fontsize=8)
+            axes.set_ylabel("UMAP 2", fontsize=8)
+            axes.set_xticks([])
+            axes.set_yticks([])
+            st.pyplot(figure)
+            st.caption(
+                "Distances between clusters on a UMAP mean nothing; only what is "
+                "together and what is apart does. Two wells landing in different "
+                "places is a real difference — but it can be a difference in "
+                "staining or focus as easily as in biology, so check a couple in "
+                "the image before believing it."
+            )
+
+        with right:
+            st.subheader("What each well is made of")
+            shares = db.composition(whole, by="well")
+            st.bar_chart(shares)
+            st.caption(
+                "The share of each well's objects in each cluster — shares rather "
+                "than counts, because the wells hold wildly different numbers of "
+                "objects and a count chart is a chart of how full each well was."
+            )
+
+            st.subheader("As a plate")
+            which = st.selectbox("Share of cluster", plate_groups, key="plate_group")
+            grid = db.plate_grid(shares, which)
+            values = grid.to_numpy(dtype=float)
+            # A well the plate does not have must not look like a well full of this
+            # cluster: NaN draws transparent by default, and transparent over a
+            # white page is the same white as the top of magma.
+            from matplotlib import colormaps
+
+            shaded = colormaps["magma"].with_extremes(bad="0.85")
+            figure = _figure(6.0, 3.6)
+            axes = figure.add_subplot(111)
+            heat = axes.imshow(values, cmap=shaded, vmin=0.0,
+                               vmax=float(np.nanmax(values) or 1.0))
+            axes.set_xticks(range(len(grid.columns)), list(grid.columns), fontsize=7)
+            axes.set_yticks(range(len(grid.index)), list(grid.index), fontsize=7)
+            figure.colorbar(heat, ax=axes, shrink=0.8, label=f"share in {which}")
+            st.pyplot(figure)
+            st.caption(
+                "A plate is a physical object and the answer often is too — an edge "
+                "effect, a column of controls, a row that did not take. A bar chart "
+                "of forty-four wells hides that; the grid does not. Grey cells are "
+                "wells this plate does not have, which is not the same as a well "
+                "holding none of this cluster."
+            )
+
+        with st.expander("The numbers"):
+            st.dataframe(shares.style.format("{:.1%}"))
 
 
 def main() -> None:
@@ -185,8 +349,13 @@ def main() -> None:
         + f" · grouped by {method} into {len(groups)} · joined by {graph}"
     )
 
-    look, phenotype, space = st.tabs(["Where they are", "What they are", "Does it mean anything"])
+    plate, look, phenotype, space = st.tabs(
+        ["Across the plate", "Where they are", "What they are", "Does it mean anything"]
+    )
 
+    # -- every well at once ---------------------------------------------------
+    with plate:
+        _plate_tab(path, mtime)
     # -- where ----------------------------------------------------------------
     with look:
         left, right = st.columns([3, 2])

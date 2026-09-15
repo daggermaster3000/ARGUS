@@ -269,6 +269,139 @@ def test_blanks_do_not_poison_the_pca(directory: Path) -> None:
     )
 
 
+def test_the_whole_plate(directory: Path) -> None:
+    print("every well at once")
+
+    if not _has("anndata"):
+        print("  skip anndata is not installed")
+        return
+
+    check(db.well_of("G/07/0") == "G/07", "an image names its well")
+    check(
+        db.well_of("G/07/3") == db.well_of("G/07/0"),
+        "and the seven 4i cycles of one well are one well, not seven conditions",
+    )
+    check(db.row_column("G/07/0") == ("G", "07"), "which lays out as a plate")
+    check(db.well_of("odd") == "odd", "something that is not a well path is left alone")
+
+    # Wildly unequal images, which is what a real plate is: this one runs from 16
+    # objects in one well to 46 394 in another.
+    path = _plate_file(directory, images=3, per_image=120)
+    adata = db.read(path)
+    import anndata as ad
+
+    small = adata[adata.obs[db.IMAGE_KEY].astype(str) != "B/04/0"].copy()
+    tiny = adata[adata.obs[db.IMAGE_KEY].astype(str) == "B/04/0"][:9].copy()
+    uneven = ad.concat([small, tiny])
+
+    picked = db.stratified_subsample(uneven, per_image=50)
+    counts = picked.obs[db.IMAGE_KEY].value_counts()
+    check(
+        set(counts.index) == {"B/02/0", "B/03/0", "B/04/0"},
+        f"every image is represented, however small ({dict(counts)})",
+    )
+    check(int(counts.max()) == 50, f"a big image is capped at the quota ({int(counts.max())})")
+    check(
+        int(counts["B/04/0"]) == 9,
+        "and an image smaller than the quota keeps everything it has — the point is to "
+        "compare wells, not to let the biggest one draw the map",
+    )
+    check(
+        "well" in picked.obs and "row" in picked.obs and "column" in picked.obs,
+        f"the plate position is added, for colouring by it: {list(picked.obs.columns)}",
+    )
+
+    flat = db.subsample(uneven, 50)
+    check(
+        flat.obs[db.IMAGE_KEY].nunique() < 3 or int(flat.obs[db.IMAGE_KEY].value_counts().max()) > 20,
+        "a flat sample of the same data does not spread over the images, which is why "
+        "the stratified one exists",
+    )
+
+
+def test_composition_and_the_plate_grid(directory: Path) -> None:
+    print("what each well is made of")
+
+    if not _has("anndata"):
+        print("  skip anndata is not installed")
+        return
+    import pandas as pd
+
+    path = _plate_file(directory, images=3, per_image=60)
+    adata = db.stratified_subsample(db.read(path), 60)
+    # A grouping that does not need scanpy: the two blobs are large and small.
+    adata.obs[db.CLUSTER_KEY] = pd.Categorical(
+        np.where(db.values_of(adata, "Voxels") > 650, "big", "small"), categories=["big", "small"]
+    )
+
+    shares = db.composition(adata, by="well")
+    check(shares.shape == (3, 2), f"a row per well, a column per group {shares.shape}")
+    check(
+        bool(np.allclose(shares.sum(axis=1), 1.0)),
+        "shares, not counts — the wells hold different numbers of objects and a count "
+        "table is a table of how full each well was",
+    )
+    check(
+        0.3 < float(shares["big"].mean()) < 0.7,
+        f"and the halves come out about even, as the fixture made them "
+        f"({float(shares['big'].mean()):.2f})",
+    )
+
+    grid = db.plate_grid(shares, "big")
+    check(list(grid.index) == ["B"], f"laid out with rows down ({list(grid.index)})")
+    check(list(grid.columns) == ["02", "03", "04"], f"and columns across ({list(grid.columns)})")
+    check(
+        float(grid.loc["B", "02"]) == float(shares.loc["B/02", "big"]),
+        "with each well in its own place",
+    )
+
+    # A plate is rarely full, and an absent well is not a well holding none of this.
+    sparse = shares.drop(index="B/03")
+    holey = db.plate_grid(sparse, "big")
+    check(
+        bool(np.isnan(holey.to_numpy(dtype=float)).any()) if "03" in holey.columns else True,
+        "a well the plate does not have is blank rather than zero",
+    )
+
+    try:
+        db.plate_grid(shares, "nothing")
+        check(False, "an unknown group is refused")
+    except KeyError:
+        check(True, "an unknown group is refused by name")
+
+
+def test_the_embedding(directory: Path) -> None:
+    print("the UMAP")
+
+    if not (_has("scanpy") and _has("umap")):
+        print("  skip scanpy/umap-learn are not installed")
+        return
+
+    path = _plate_file(directory, images=3, per_image=120)
+    adata = db.stratified_subsample(db.read(path), 100)
+    # Captured before embedding: embed() scales the matrix in place, so afterwards
+    # every feature is in standard deviations and a threshold in voxels finds
+    # nothing at all.
+    big = db.values_of(adata, "Voxels") > 650
+    how = db.embed(adata, n_neighbors=10, min_dist=0.3)
+
+    check("X_umap" in adata.obsm, f"there is an embedding ({how})")
+    check(adata.obsm["X_umap"].shape == (adata.n_obs, 2), "two dimensions, one row per object")
+    check(bool(np.isfinite(adata.obsm["X_umap"]).all()), "and no NaN in it")
+    check("X_pca" in adata.obsm, "run on the components, so a duplicated column is not counted twice")
+
+    # The fixture is two well-separated blobs; an embedding that does not pull
+    # them apart is an embedding that is not working.
+    check(
+        int(big.sum()) > 10 and int((~big).sum()) > 10,
+        f"both populations are in the sample ({int(big.sum())} large, {int((~big).sum())} small)",
+    )
+    centres = [adata.obsm["X_umap"][big].mean(axis=0), adata.obsm["X_umap"][~big].mean(axis=0)]
+    apart = float(np.linalg.norm(centres[0] - centres[1]))
+    spread = float(np.std(adata.obsm["X_umap"]))
+    check(apart > spread, f"the two populations land apart ({apart:.1f} against a spread of {spread:.1f})")
+
+
 def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-dashboard-"))
     try:
@@ -277,6 +410,9 @@ def main() -> int:
         for name, test in (
             ("slice", test_reading_and_slicing),
             ("analysis", test_the_analysis),
+            ("plate", test_the_whole_plate),
+            ("composition", test_composition_and_the_plate_grid),
+            ("umap", test_the_embedding),
             ("blanks", test_blanks_do_not_poison_the_pca),
         ):
             case = directory / name

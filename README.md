@@ -937,13 +937,53 @@ process: the spatial work is minutes of CPU that has no business blocking the
 window the images are in, and Streamlit's event loop would fight Qt's. Closing
 the viewer leaves it running.
 
-Three tabs, in the order of the argument:
+Four tabs. The first asks a different kind of question from the other three:
 
 | Tab | What it answers |
 |---|---|
+| **Across the plate** | which wells hold which phenotypes — every well at once, in feature space, as a UMAP |
 | **Where they are** | the well as a scatter, coloured by phenotype or by any measurement, with how many objects fall in each group |
 | **What they are** | which measurements separate the groups — a box per group, and any two features against each other |
 | **Does it mean anything** | neighbourhood enrichment, Ripley's L, co-occurrence, Moran's I, centrality |
+
+#### Across the plate
+
+Feature space, not the well: *which wells differ from which* is not a spatial
+question, and it is the one the other three tabs cannot ask, because their
+coordinates are per image. Give it a combined `.h5ad` — the analysis panel's
+**…the whole folder as one** — and it embeds every well together.
+
+**Sampled per image, not overall.** This plate runs from 16 objects in one well
+to 46 394 in another; a flat sample of the lot would be a picture of the big
+wells with the small ones invisible in it. Each image contributes up to the same
+quota, and a well smaller than the quota keeps everything it has:
+
+```
+557 915 objects, 44 images, from 16 to 46 394 each
+  ->  29 644 objects, at most 750 per image
+      the 16-object well kept all 16; a 46 394-object well capped at 750
+```
+
+Colour the map by phenotype, by **well**, by **row**, by **column**, or by any
+measurement. Row and column are the ones to look at first: if the map separates
+by plate row rather than by anything biological, what you are looking at is the
+plate, not the sample.
+
+Beside it, **what each well is made of** — the share of each well's objects in
+each cluster — and the same thing **as a plate**, rows down and columns across,
+because a plate is a physical object and the answer often is too: an edge effect,
+a column of controls, a row that did not take. Grey cells are wells the plate does
+not have, which is not the same as a well holding none of that cluster.
+
+It sits behind an **Embed the plate** button because it is the slow one — about
+45 s for 30 000 objects — and is remembered afterwards, so recolouring the map
+costs nothing.
+
+Two things to hold on to. Distances between clusters on a UMAP mean nothing; only
+what is together and what is apart does. And a cluster that turns out to be 98 %
+one well is usually that well looking different — staining, focus, density —
+rather than a phenotype, so check a couple of its objects in the image before
+believing it.
 
 **Objects are grouped first**, because every neighbourhood statistic needs a label
 per object. Either a Leiden clustering on the features — phenotypes, but ones you
@@ -970,10 +1010,14 @@ minutes, on eight thousand it is seconds and the answer is the same shape.
 What it looks like on a real well:
 
 ```
-G/07 cycle 1, 8000 of 18428 objects, leiden -> 10 groups, Delaunay
+one well  — G/07 cycle 1, 8000 of 18428 objects, leiden -> 10 groups, Delaunay
   neighbourhood enrichment   strongest self-association z = 36.6
   Moran's I  Median intensity (Green488-bCAT)  0.563   p_adj = 0
              Median intensity (FarRed641-CDH1) 0.540   p_adj = 0
+
+the plate — 29 644 objects, 750 per image, 44 wells, leiden -> 17 groups
+  scale + PCA  1.2 s   cluster  34 s   UMAP  11 s
+  most well-to-well variation: cluster 14, 98 % of E/03 and under 1 % anywhere else
 ```
 
 — the β-catenin signal comes in patches rather than cell by cell, and every
@@ -985,8 +1029,10 @@ It can also be run by hand, with or without the viewer:
 streamlit run microscopy_viewer/dashboard_app.py -- --file G_07_0.h5ad
 ```
 
-`pip install "microscopy-viewer[dashboard]"`. A **separate extra** from
-`[analysis]` on purpose: squidpy brings scanpy, scikit-learn and a graph library,
+`pip install "microscopy-viewer[dashboard]"`, which includes `leidenalg` — without
+it scanpy cannot run Leiden and the dashboard falls back to k-means, which needs
+the number of groups decided in advance and says so on the page. A **separate
+extra** from `[analysis]` on purpose: squidpy brings scanpy, scikit-learn and a graph library,
 and because the dashboard is its own process it can perfectly well live in an
 environment of its own rather than beside napari. The button says exactly what is
 missing if it is not installed, and starts nothing.
