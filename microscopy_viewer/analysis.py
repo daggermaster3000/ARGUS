@@ -10,7 +10,10 @@ from. This module is the way back. Give it the table a run wrote and it will
   looked at *as* the measurement — nuclei shaded by area, by mean intensity, by
   solidity — instead of as 18 000 arbitrary colours;
 * guess which layer in the viewer the table belongs to, from the file name a
-  batch run gave it.
+  batch run gave it;
+* find one object in the image, from its centroid;
+* hand the whole table to `AnnData <https://anndata.readthedocs.io>`_, which is
+  what squidpy, scanpy and the rest of the single-cell stack read.
 
 No Qt and no napari here: the widget is a thin layer over these functions, and
 everything below is testable headless.
@@ -240,6 +243,242 @@ def dim_unselected(
         red, green, blue, opacity = (float(c) for c in colour)
         faded[key] = (red, green, blue, opacity if int(key) in chosen else opacity * float(alpha))
     return faded
+
+
+#: Centroid columns as this viewer's exporter writes them, in ``(z, y, x)`` order.
+#: These are already in micrometres, which is the world unit napari puts a
+#: calibrated layer in, so a centroid is a viewer coordinate without conversion.
+CENTROID_COLUMNS = ("Centroid Z (µm)", "Centroid Y (µm)", "Centroid X (µm)")
+
+#: Fallbacks for tables written by something else. Matched case-insensitively on
+#: a name with the units and separators stripped.
+CENTROID_KEYS = {
+    "z": ("centroidz", "z", "centroid0", "centerz"),
+    "y": ("centroidy", "y", "centroid1", "centery"),
+    "x": ("centroidx", "x", "centroid2", "centerx"),
+}
+
+#: How much of the shorter canvas edge one object should take up when the viewer
+#: is sent to it. Not the whole canvas: an object with nothing around it is an
+#: object you cannot place, and the neighbours are usually the reason you looked.
+ZOOM_FILL = 0.25
+
+#: Zoom used when the table says nothing about how big the object is.
+FALLBACK_DIAMETER_UM = 20.0
+
+
+def _squashed(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name).lower().replace("µm", "").replace("um", ""))
+
+
+def centroid_columns(frame) -> dict[str, str]:
+    """``{axis: column}`` for whichever of z, y and x the table carries."""
+    found: dict[str, str] = {}
+    exact = {name: axis for name, axis in zip(CENTROID_COLUMNS, "zyx")}
+    for name in frame.columns:
+        axis = exact.get(str(name))
+        if axis is not None:
+            found[axis] = str(name)
+    if len(found) >= 2:
+        return found
+
+    squashed = {_squashed(name): str(name) for name in frame.columns}
+    for axis, keys in CENTROID_KEYS.items():
+        if axis in found:
+            continue
+        for key in keys:
+            if key in squashed:
+                found[axis] = squashed[key]
+                break
+    return found
+
+
+def object_centroid(frame, row: int) -> tuple[float, ...] | None:
+    """The ``(z, y, x)`` centroid of one row in micrometres, or None.
+
+    Z is dropped when the table has no Z column; a 2D table gives ``(y, x)``, and
+    the caller pads it against the viewer's own dimensionality rather than
+    guessing a plane here.
+    """
+    columns = centroid_columns(frame)
+    if "y" not in columns or "x" not in columns:
+        return None
+    try:
+        values = []
+        for axis in ("z", "y", "x"):
+            if axis not in columns:
+                continue
+            value = float(frame[columns[axis]].iat[int(row)])
+            if not np.isfinite(value):
+                return None
+            values.append(value)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    return tuple(values)
+
+
+def object_diameter(frame, row: int) -> float:
+    """How wide the object at *row* is, in micrometres, for choosing a zoom."""
+    for name in frame.columns:
+        if _squashed(name) in ("equivalentdiameter", "diameter", "equivdiameter"):
+            try:
+                value = float(frame[name].iat[int(row)])
+            except (IndexError, TypeError, ValueError):
+                break
+            if np.isfinite(value) and value > 0:
+                return value
+            break
+    return FALLBACK_DIAMETER_UM
+
+
+def zoom_for(diameter_um: float, canvas_px: float, fill: float = ZOOM_FILL) -> float:
+    """Canvas pixels per micrometre that puts an object of *diameter_um* at *fill*.
+
+    napari's ``camera.zoom`` is exactly that ratio, so this is the whole of the
+    arithmetic: how many screen pixels one micrometre should be worth for a
+    nucleus to take up a quarter of the window.
+    """
+    diameter = float(diameter_um) if float(diameter_um) > 0 else FALLBACK_DIAMETER_UM
+    span = max(1.0, float(canvas_px)) * float(fill)
+    return float(span / diameter)
+
+
+# ---------------------------------------------------------------------------
+# Out to the single-cell stack
+# ---------------------------------------------------------------------------
+
+#: Columns kept out of the feature matrix: an identifier and three coordinates are
+#: not measurements, and leaving them in ``X`` means every clustering in squidpy
+#: is partly a clustering on position.
+NON_FEATURE_COLUMNS = frozenset({"label", "labels", "label_id", "objectnumber", "object_id", "id"})
+
+
+def feature_columns(frame, label_column: str | None = None) -> list[str]:
+    """Numeric columns that are measurements, in table order."""
+    centroids = set(centroid_columns(frame).values())
+    skip = {str(label_column)} if label_column else set()
+    return [
+        name
+        for name in numeric_columns(frame, exclude=skip)
+        if name not in centroids and _squashed(name) not in NON_FEATURE_COLUMNS
+    ]
+
+
+def to_anndata(frame, label_column: str | None = None, source: str | Path | None = None):
+    """The object table as an ``AnnData``, laid out the way squidpy expects.
+
+    * ``X`` is the measurements, one row per object and one column per feature.
+    * ``obs`` carries the label id, the centroids and any text column, indexed by
+      the label so a result can be joined back to the mask it came from.
+    * ``obsm["spatial"]`` is the centroid as ``(x, y)`` — or ``(x, y, z)`` when the
+      table describes a volume — which is the array
+      :func:`squidpy.gr.spatial_neighbors` builds its graph from.
+
+    The label is deliberately *not* a feature. It is an identifier; clustering on
+    it would be clustering on the order Cellpose happened to number things in.
+    """
+    import anndata as ad
+    import pandas as pd
+
+    if label_column is None:
+        label_column = label_column_of(frame)
+    features = feature_columns(frame, label_column)
+    if not features:
+        raise ValueError("the table has no numeric measurement columns to export")
+
+    matrix = frame[features].to_numpy(dtype=np.float32, copy=True)
+
+    observations = pd.DataFrame(index=_obs_index(frame, label_column))
+    if label_column:
+        observations["label"] = frame[label_column].to_numpy()
+    centroids = centroid_columns(frame)
+    for axis in ("z", "y", "x"):
+        if axis in centroids:
+            observations[f"centroid_{axis}_um"] = frame[centroids[axis]].to_numpy(dtype=float)
+    for name in frame.columns:
+        if name not in features and name != label_column and name not in centroids.values():
+            observations[str(name)] = frame[name].to_numpy()
+
+    adata = ad.AnnData(
+        X=matrix,
+        obs=observations,
+        var=pd.DataFrame(index=pd.Index([str(name) for name in features], name="feature")),
+    )
+
+    spatial = _spatial_matrix(frame, centroids)
+    if spatial is not None:
+        adata.obsm["spatial"] = spatial
+    else:
+        logger.warning("the table has no centroid columns; obsm['spatial'] was not written")
+
+    adata.uns["microscopy_viewer"] = {
+        "source": "" if source is None else str(source),
+        "image": component_from_name(Path(str(source)).stem) if source else "",
+        "label_column": str(label_column or ""),
+        "spatial_units": "micrometer",
+        "spatial_axes": "xy" if spatial is not None and spatial.shape[1] == 2 else "xyz",
+    }
+    logger.info(
+        "AnnData: %d object(s) x %d feature(s)%s",
+        adata.n_obs,
+        adata.n_vars,
+        "" if spatial is None else f", spatial {spatial.shape[1]}D",
+    )
+    return adata
+
+
+def _obs_index(frame, label_column: str | None):
+    """Observation names: the label ids as strings, or the row numbers without one.
+
+    Named ``object`` rather than ``label``: ``obs`` also carries the label as an
+    integer column, and h5ad refuses an index whose name is a column holding
+    different values — which strings and integers are.
+    """
+    import pandas as pd
+
+    if label_column and label_column in frame.columns:
+        return pd.Index([str(value) for value in frame[label_column]], name="object")
+    return pd.Index([str(i) for i in range(len(frame))], name="object")
+
+
+def _spatial_matrix(frame, centroids: dict[str, str]) -> np.ndarray | None:
+    """``obsm['spatial']`` as ``(x, y)`` or ``(x, y, z)``, or None when there is none.
+
+    X before Y because that is the order squidpy's plotting reads, and Z only when
+    it varies: a plate image is one plane deep, and a column of zeros would make
+    every neighbour graph a 3D one built on a degenerate axis.
+    """
+    if "y" not in centroids or "x" not in centroids:
+        return None
+    columns = [centroids["x"], centroids["y"]]
+    if "z" in centroids:
+        z = frame[centroids["z"]].to_numpy(dtype=float)
+        if np.nanmax(z) - np.nanmin(z) > 0:
+            columns.append(centroids["z"])
+    return np.ascontiguousarray(frame[columns].to_numpy(dtype=float))
+
+
+def label_column_of(frame) -> str | None:
+    """:func:`label_column`, under a name that does not shadow a local variable."""
+    return label_column(frame)
+
+
+def anndata_path(table: str | Path) -> Path:
+    """Where the ``.h5ad`` for a table goes: beside it, same stem."""
+    source = Path(table)
+    return source.with_suffix(".h5ad")
+
+
+def write_anndata(
+    frame, path: str | Path, label_column: str | None = None, source: str | Path | None = None
+) -> Path:
+    """Write the table as ``.h5ad`` and return where it went."""
+    adata = to_anndata(frame, label_column=label_column, source=source)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    adata.write_h5ad(target)
+    logger.info("wrote %s (%.1f kB)", target, target.stat().st_size / 1024)
+    return target
 
 
 def scatter_sample(count: int, limit: int = MAX_SCATTER_POINTS, seed: int = 0) -> np.ndarray | None:

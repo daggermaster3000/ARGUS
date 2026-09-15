@@ -282,6 +282,44 @@ def test_the_filter_runs_through_segment_volume() -> None:
     seg.register_backend(_StubBackend())
 
 
+def test_a_flat_stack_is_measured_as_a_disc() -> None:
+    print("a plate image is one plane deep")
+
+    check(seg.spatial_ndim((1, 400, 400)) == 2, "a stack one plane deep is two-dimensional")
+    check(seg.spatial_ndim((40, 400, 400)) == 3, "and a real volume is three")
+    check(seg.spatial_ndim((400, 400)) == 2, "a plain image is two")
+    check(seg.spatial_ndim((1, 1, 400)) == 1, "a line is one, rather than zero")
+
+    # A plate mask is (1, Y, X): three axes, one plane. Measuring it as a sphere
+    # spends a third of the volume on a Z extent the object does not have, and
+    # understates the width of a 20 um nucleus as 8 um.
+    flat = np.zeros((1, 40, 40), dtype=np.int32)
+    flat[0, 10:20, 10:20] = 1
+    stat = seg.object_table(flat, None, (1.0, 0.5, 0.5))[0]
+    disc = 2.0 * np.sqrt(stat.volume_um3 / np.pi)
+    check(
+        abs(stat.equivalent_diameter_um - disc) < 1e-6,
+        f"it is measured as a disc ({stat.equivalent_diameter_um:.3f} um, disc is {disc:.3f})",
+    )
+
+    solid = np.zeros((20, 40, 40), dtype=np.int32)
+    solid[5:15, 10:20, 10:20] = 1
+    volume_stat = seg.object_table(solid, None, (1.0, 1.0, 1.0))[0]
+    sphere = 2.0 * (3.0 * volume_stat.volume_um3 / (4.0 * np.pi)) ** (1.0 / 3.0)
+    check(
+        abs(volume_stat.equivalent_diameter_um - sphere) < 1e-6,
+        f"while a real volume is still a sphere ({volume_stat.equivalent_diameter_um:.3f} um)",
+    )
+
+    plain = np.zeros((40, 40), dtype=np.int32)
+    plain[10:20, 10:20] = 1
+    check(
+        seg.object_table(plain, None, (1.0, 1.0))[0].equivalent_diameter_um
+        == seg.object_table(plain[np.newaxis], None, (1.0, 1.0, 1.0))[0].equivalent_diameter_um,
+        "and an image measures the same whether or not it is wrapped in a Z axis",
+    )
+
+
 def test_intensities_belong_to_the_objects() -> None:
     print("intensities are measured on the object's own voxels")
 
@@ -901,6 +939,7 @@ def test_cellpose_call_shape() -> None:
 def main() -> int:
     for test in (
         test_physical_units,
+        test_a_flat_stack_is_measured_as_a_disc,
         test_intensities_belong_to_the_objects,
         test_every_channel_can_be_measured,
         test_median_prefilter,

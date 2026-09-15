@@ -7,9 +7,11 @@ with the same colours under a scatter plot of any two columns.
 
 Three things it is built around.
 
-**A row is an object.** Clicking a row selects that label in the viewer and
-centres nothing — the point is that the identity survives the round trip through
-Excel, so a suspicious row can be looked at.
+**A row is an object.** Clicking a row selects that label in the viewer *and
+sends the camera to it*, because the identity surviving the round trip through
+Excel is only useful if the object can then be found. Sort by any column and the
+first row is the largest, the roundest or the brightest object in the well, one
+click from being on screen.
 
 **The colour scale is clipped by default.** Object tables have a handful of huge
 outliers, usually two nuclei merged into one, and scaling to the true maximum
@@ -38,6 +40,7 @@ import numpy as np
 from qtpy.QtCore import QAbstractTableModel, QModelIndex, Qt
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -80,6 +83,21 @@ def _figure_canvas():
     return FigureCanvasQTAgg
 
 
+def _as_tuple(values) -> tuple[float, ...]:
+    """A layer's scale or translate as plain floats, empty when there is none.
+
+    napari hands these back as numpy arrays, so the usual ``value or default``
+    guard raises rather than defaulting — an array of more than one element has no
+    truth value.
+    """
+    if values is None:
+        return ()
+    try:
+        return tuple(float(value) for value in np.atleast_1d(np.asarray(values)))
+    except (TypeError, ValueError):
+        return ()
+
+
 class FrameModel(QAbstractTableModel):
     """A read-only Qt model over a pandas DataFrame.
 
@@ -91,11 +109,57 @@ class FrameModel(QAbstractTableModel):
     def __init__(self, frame=None, parent=None):
         super().__init__(parent)
         self._frame = frame
+        # View row -> frame row. Sorting builds one of these rather than
+        # reordering the DataFrame, because the plot, the region selection and the
+        # label colouring all address objects by their position in the table; a
+        # sort that moved the rows would silently repaint the wrong nuclei.
+        self._order: np.ndarray | None = None
 
     def set_frame(self, frame) -> None:
         self.beginResetModel()
         self._frame = frame
+        self._order = None
         self.endResetModel()
+
+    def source_row(self, view_row: int) -> int:
+        """The row of the DataFrame showing at *view_row*."""
+        row = int(view_row)
+        if self._order is None:
+            return row
+        return int(self._order[row]) if 0 <= row < self._order.size else row
+
+    def view_row(self, source_row: int) -> int:
+        """Where the DataFrame's *source_row* is currently showing."""
+        row = int(source_row)
+        if self._order is None:
+            return row
+        found = np.flatnonzero(self._order == row)
+        return int(found[0]) if found.size else row
+
+    def sort(self, column: int, order=Qt.AscendingOrder) -> None:
+        """Order the view by *column*. Blanks sort last whichever way it is read.
+
+        A column of measurements has NaNs in it — an object too small for
+        scikit-image to fit a hull to — and a blank that floats to the top on a
+        descending sort buries the answer the sort was asked for.
+        """
+        if self._frame is None or not (0 <= column < len(self._frame.columns)):
+            return
+        name = self._frame.columns[column]
+        ascending = order == Qt.AscendingOrder
+        try:
+            ranked = self._frame[name].sort_values(
+                ascending=ascending, kind="stable", na_position="last"
+            )
+            new_order = np.asarray(
+                [self._frame.index.get_loc(key) for key in ranked.index], dtype=int
+            )
+        except Exception:
+            logger.exception("could not sort on %r", name)
+            return
+        self.layoutAboutToBeChanged.emit()
+        self._order = new_order
+        self.layoutChanged.emit()
 
     @property
     def frame(self):
@@ -114,7 +178,7 @@ class FrameModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid() or self._frame is None or role != Qt.DisplayRole:
             return None
-        value = self._frame.iat[index.row(), index.column()]
+        value = self._frame.iat[self.source_row(index.row()), index.column()]
         if isinstance(value, (float, np.floating)):
             return format_number(value)
         return str(value)
@@ -124,7 +188,7 @@ class FrameModel(QAbstractTableModel):
             return None
         if orientation == Qt.Horizontal:
             return str(self._frame.columns[section])
-        return str(self._frame.index[section])
+        return str(self._frame.index[self.source_row(section)])
 
     def column_name(self, index: int) -> str:
         return "" if self._frame is None else str(self._frame.columns[index])
@@ -234,7 +298,9 @@ class MeasurementAnalysisWidget(QWidget):
         page = QWidget()
         outer = QVBoxLayout(page)
         outer.setContentsMargins(2, 2, 2, 2)
-        outer.addWidget(QLabel("One row per object. Click a row to select that label."))
+        outer.addWidget(
+            QLabel("One row per object. Click a header to sort, a row to go to that object.")
+        )
 
         self._model = FrameModel(parent=self)
         self._table = QTableView()
@@ -243,11 +309,36 @@ class MeasurementAnalysisWidget(QWidget):
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.setAlternatingRowColors(False)
-        self._table.setSortingEnabled(False)
+        self._table.setSortingEnabled(True)
+        self._table.horizontalHeader().setSortIndicatorShown(True)
+        self._table.horizontalHeader().setToolTip(
+            "Click to sort by this measurement; click again to reverse it. Blanks sort "
+            "last either way, so a descending sort really does start at the largest."
+        )
         self._table.verticalHeader().setVisible(False)
         self._table.setMinimumHeight(140)
         self._table.clicked.connect(self._on_row_clicked)
         outer.addWidget(self._table, stretch=1)
+
+        row = QHBoxLayout()
+        self._follow = QCheckBox("go to the object")
+        self._follow.setChecked(True)
+        self._follow.setToolTip(
+            "Centre the viewer on the clicked object and zoom in on it.\n\n"
+            "Untick to select the label without moving the camera — useful when you are "
+            "already framed on something and only want to step through rows."
+        )
+        row.addWidget(self._follow)
+        row.addStretch(1)
+        self._export_button = QPushButton("Export as AnnData…")
+        self._export_button.setToolTip(
+            "Write the table as .h5ad: measurements in X, the label and centroids in obs, "
+            "and the centroid in obsm[\"spatial\"] — which is what squidpy builds its "
+            "neighbourhood graph from."
+        )
+        self._export_button.clicked.connect(self.export_anndata)
+        row.addWidget(self._export_button)
+        outer.addLayout(row)
         return page
 
     def _build_colour_box(self) -> QGroupBox:
@@ -875,19 +966,137 @@ class MeasurementAnalysisWidget(QWidget):
         The identity of an object is what survives the trip through a CSV, so a row
         that looks wrong in the table can be found in the image without counting.
         """
-        if self._frame is None or not self._label_column or not index.isValid():
+        if self._frame is None or not index.isValid():
             return
+        row = self._model.source_row(index.row())
+
         layer = self._selected_layer()
-        if layer is None:
+        label = None
+        if layer is not None and self._label_column:
+            try:
+                label = int(self._frame[self._label_column].iat[row])
+                layer.selected_label = label
+                layer.show_selected_label = True
+            except Exception:
+                logger.debug("could not select a label from the table", exc_info=True)
+                label = None
+
+        moved = self.go_to_row(row) if self._follow.isChecked() else False
+        if label is None:
+            self._status.setText(
+                "Centred on that object." if moved else "That row names no label to select."
+            )
+            return
+        message = f"Label {label}"
+        message += f" selected in “{layer.name}”" if layer is not None else ""
+        message += " and centred." if moved else " — untick “show selected” to see the rest again."
+        self._status.setText(message)
+
+    def go_to_row(self, row: int) -> bool:
+        """Put the object at *row* in the middle of the canvas, zoomed in on it.
+
+        The centroids in the table are in micrometres, and a calibrated layer's
+        world coordinates are micrometres too, so the centroid *is* a camera
+        position — no conversion, and it stays right when the viewer is showing a
+        coarser pyramid level.
+        """
+        if self._frame is None:
+            return False
+        centre = analysis.object_centroid(self._frame, row)
+        if centre is None:
+            return False
+
+        layer = self._selected_layer()
+        # Not ``getattr(...) or ()``: a layer's translate is a numpy array, and
+        # asking an array of more than one element whether it is truthy raises.
+        offset = _as_tuple(getattr(layer, "translate", None))
+        if len(offset) >= len(centre):
+            centre = tuple(c + o for c, o in zip(centre, offset[-len(centre) :]))
+
+        try:
+            # napari's camera centre is always (z, y, x); a 2D table gives (y, x).
+            padded = (0.0,) * (3 - len(centre)) + tuple(centre)
+            self._viewer.camera.center = padded[-3:]
+            self._viewer.camera.zoom = analysis.zoom_for(
+                analysis.object_diameter(self._frame, row), self._canvas_edge()
+            )
+        except Exception:
+            logger.exception("could not move the camera to row %d", row)
+            return False
+
+        self._step_to_plane(layer, centre)
+        return True
+
+    def _canvas_edge(self) -> float:
+        """The shorter edge of the canvas in pixels, for working out the zoom."""
+        try:
+            size = self._viewer.window._qt_viewer.canvas.size
+            edge = min(float(size[0]), float(size[1]))
+            if edge > 1:
+                return edge
+        except Exception:
+            logger.debug("could not measure the canvas; using a default", exc_info=True)
+        return 600.0
+
+    def _step_to_plane(self, layer, centre) -> None:
+        """Move the Z slider to the plane the object is in, if there is one.
+
+        Centring the camera on a volume does not change which slice is displayed,
+        so without this the camera is over an object that is not on screen.
+        """
+        if layer is None or len(centre) < 3 or self._viewer.dims.ndisplay != 2:
             return
         try:
-            label = int(self._frame[self._label_column].iat[index.row()])
-            layer.selected_label = label
-            layer.show_selected_label = True
+            scale = _as_tuple(getattr(layer, "scale", None))
+            if len(scale) < 3 or scale[-3] <= 0:
+                return
+            axis = self._viewer.dims.ndim - 3
+            if axis < 0:
+                return
+            plane = int(round(float(centre[0]) / scale[-3]))
+            limit = int(self._viewer.dims.nsteps[axis]) - 1
+            self._viewer.dims.set_current_step(axis, max(0, min(plane, limit)))
         except Exception:
-            logger.debug("could not select a label from the table", exc_info=True)
+            logger.debug("could not step to the object's plane", exc_info=True)
+
+    # -- out to the single-cell stack -----------------------------------------
+
+    def export_anndata(self) -> None:
+        """Write the loaded table as ``.h5ad`` for squidpy and the rest of that stack."""
+        if self._frame is None:
+            self._status.setText("Open a table first.")
             return
+        default = (
+            analysis.anndata_path(self._path)
+            if self._path is not None
+            else Path(default_stem("objects")).with_suffix(".h5ad")
+        )
+        path, _selected = QFileDialog.getSaveFileName(
+            self, "Export as AnnData", str(default), "AnnData (*.h5ad);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            written = analysis.write_anndata(
+                self._frame,
+                path,
+                label_column=self._label_column,
+                source=self._path,
+            )
+        except ImportError:
+            self._status.setText(
+                "anndata is not installed — pip install \"microscopy-viewer[analysis]\", "
+                "or pip install anndata."
+            )
+            return
+        except Exception as exc:
+            logger.exception("could not export %s", path)
+            self._status.setText(f"Could not export that table: {exc}")
+            QMessageBox.critical(self, "Microscopy Viewer", f"Could not export:\n{exc}")
+            return
+
+        features = len(analysis.feature_columns(self._frame, self._label_column))
         self._status.setText(
-            f"Label {label} selected in “{layer.name}” — untick “show selected” on the "
-            "layer to see the rest again."
+            f"Wrote {written.name}: {len(self._frame)} object(s) x {features} feature(s), "
+            "centroids in obsm[\"spatial\"]."
         )

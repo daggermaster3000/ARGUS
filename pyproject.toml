@@ -72,6 +72,14 @@ segmentation = [
     "scikit-image>=0.19",
 ]
 
+# Handing an object table to the single-cell stack. Optional because the viewer
+# writes CSVs without it and only the .h5ad export needs it; squidpy itself is
+# left to the user, since what it pulls in depends on the analysis being done.
+analysis = [
+    "anndata>=0.9",
+    "h5py>=3.6",
+]
+
 [project.urls]
 Homepage = "https://github.com/daggermaster3000/ARGUS"
 Issues = "https://github.com/daggermaster3000/ARGUS/issues"

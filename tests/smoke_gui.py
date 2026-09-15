@@ -765,6 +765,74 @@ def main() -> int:
         check(png_path.stat().st_size > 1000, f"histogram PNG written ({png_path.stat().st_size} bytes)")
     print(flush=True)
 
+    print("the analysis table sorts, and goes to an object", flush=True)
+    analysis_panel = app.panels.get("measurement_analysis")
+    if analysis_panel is None:
+        check(False, "the measurement analysis analysis_panel was built")
+    else:
+        import numpy as _np
+        import pandas as _pd
+        from qtpy.QtCore import Qt as _Qt
+
+        table_path = Path(tempfile.gettempdir()) / "mv_smoke_objects.csv"
+        _pd.DataFrame(
+            {
+                "Label": [1, 2, 3, 4],
+                "Volume (\u00b5m\u00b3)": [40.0, 10.0, 30.0, 20.0],
+                "Solidity": [0.9, float("nan"), 0.7, 0.8],
+                "Equivalent diameter (\u00b5m)": [4.0, 2.0, 3.5, 3.0],
+                "Centroid Z (\u00b5m)": [0.0, 0.0, 0.0, 0.0],
+                "Centroid Y (\u00b5m)": [1.0, 2.0, 3.0, 4.0],
+                "Centroid X (\u00b5m)": [5.0, 6.0, 7.0, 8.0],
+            }
+        ).to_csv(table_path, index=False, encoding="utf-8")
+        analysis_panel.open_table(table_path)
+        model = analysis_panel._model
+        check(model.rowCount() == 4, f"the table loaded ({model.rowCount()} rows)")
+
+        columns = [model.column_name(i) for i in range(model.columnCount())]
+        volume = columns.index("Volume (\u00b5m\u00b3)")
+        analysis_panel._table.sortByColumn(volume, _Qt.DescendingOrder)
+        order = [model.source_row(row) for row in range(4)]
+        check(order == [0, 2, 3, 1], f"descending by volume reorders the view ({order})")
+        check(
+            model.data(model.index(0, columns.index("Label"))) == "1",
+            "and a row still carries its own label, not the one that was in that position",
+        )
+        analysis_panel._table.sortByColumn(volume, _Qt.AscendingOrder)
+        check(
+            [model.source_row(row) for row in range(4)] == [1, 3, 2, 0],
+            "ascending is the other way round",
+        )
+        check(
+            analysis_panel._frame["Volume (\u00b5m\u00b3)"].tolist() == [40.0, 10.0, 30.0, 20.0],
+            "the DataFrame itself is untouched, so the plot and the colouring still line up",
+        )
+
+        analysis_panel._table.sortByColumn(columns.index("Solidity"), _Qt.DescendingOrder)
+        check(
+            model.source_row(3) == 1,
+            "a blank sorts last even descending, so the sort starts at the real maximum",
+        )
+
+        # Going to an object: the centroid is micrometres and so is the camera.
+        analysis_panel._table.sortByColumn(volume, _Qt.DescendingOrder)
+        moved = analysis_panel.go_to_row(2)
+        check(moved, "the viewer can be sent to an object")
+        check(
+            tuple(_np.round(app.viewer.camera.center, 3))[-2:] == (3.0, 7.0),
+            f"and lands on its centroid ({tuple(_np.round(app.viewer.camera.center, 3))})",
+        )
+        check(app.viewer.camera.zoom > 1.0, f"zoomed in on it ({app.viewer.camera.zoom:.1f})")
+        check(
+            not analysis_panel.go_to_row(99),
+            "a row that is not there moves nothing rather than raising",
+        )
+        table_path.unlink(missing_ok=True)
+    print(flush=True)
+
+    panel = app.intensity_widget
+
     print("threaded measurement keeps the UI responsive", flush=True)
     from qtpy.QtCore import QCoreApplication
 

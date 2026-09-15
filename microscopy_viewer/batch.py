@@ -573,6 +573,10 @@ class BatchSettings:
     overwrite: bool = False
     #: Write a per-image object table, and a plate-level summary, next to the plate.
     write_tables: bool = True
+    #: Also write each object table as ``.h5ad`` beside its CSV, for squidpy and
+    #: the rest of the single-cell stack. Costs a second per image and means the
+    #: spatial analysis does not start with a folder of CSVs to convert by hand.
+    write_anndata: bool = False
     #: Where those tables go. ``None`` puts them beside the plate.
     table_dir: Path | None = None
 
@@ -690,15 +694,32 @@ def _table_name(job: ImageJob) -> str:
     return job.component.replace("/", "_")
 
 
-def _write_table(stats, path: Path) -> Path | None:
+def _write_table(stats, path: Path, anndata: bool = False) -> tuple[Path | None, str]:
+    """Write one image's object table. Returns ``(path, note)``.
+
+    The AnnData copy is written from the same frame rather than by reading the CSV
+    back: a float that has been through a text file is not the float that was
+    measured, and the spatial analysis should not start from a rounded one.
+    """
     try:
         frame = sg.object_dataframe(stats)
     except ImportError:
         logger.warning("pandas is not installed; the object tables were not written")
-        return None
+        return None, "pandas is not installed, so no object table was written"
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(path, index=False, encoding="utf-8")
-    return path
+    if not anndata:
+        return path, ""
+    try:
+        from .analysis import anndata_path, write_anndata
+
+        write_anndata(frame, anndata_path(path), label_column="Label", source=path)
+    except ImportError:
+        return path, "anndata is not installed, so no .h5ad was written beside the table"
+    except Exception as exc:  # noqa: BLE001 - the CSV is already safely on disk
+        logger.exception("could not write the AnnData for %s", path.name)
+        return path, f"the .h5ad could not be written ({type(exc).__name__}: {exc})"
+    return path, ""
 
 
 def segment_job(
@@ -804,7 +825,11 @@ def segment_job(
             measured_extra=tuple(extra) if extra is not None else (),
         )
         if settings.write_tables and stats:
-            outcome.table_path = _write_table(stats, settings.table_path(job))
+            outcome.table_path, note = _write_table(
+                stats, settings.table_path(job), anndata=settings.write_anndata
+            )
+            if note:
+                outcome.message = "; ".join(part for part in (outcome.message, note) if part)
         return outcome
     except Exception as exc:  # noqa: BLE001 - reported per image, not raised
         logger.exception("batch: %s failed", job.component)

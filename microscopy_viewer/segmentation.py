@@ -281,6 +281,8 @@ class ObjectStat:
     label: int
     n_voxels: int
     volume_um3: float
+    #: Diameter of the sphere -- or, for an image one plane deep, the disc -- of
+    #: the same size. See :func:`spatial_ndim`.
     equivalent_diameter_um: float
     centroid_um: tuple[float, float, float]
     mean: float
@@ -1244,6 +1246,17 @@ def segment_volume(
 # ---------------------------------------------------------------------------
 
 
+def spatial_ndim(shape: Sequence[int]) -> int:
+    """How many dimensions an array is actually *shaped* in, ignoring flat axes.
+
+    A plate mask is ``(1, Y, X)``: three-dimensional in shape and one plane deep.
+    Measuring such an object as a sphere understates its width by a factor of two
+    and a half, because the sphere formula spends a third of the volume on a Z
+    extent the object does not have.
+    """
+    return max(1, sum(1 for size in shape if int(size) > 1))
+
+
 def _equivalent_diameter(volume: float, ndim: int) -> float:
     """Diameter of the sphere (or disc) of the same volume (or area)."""
     if volume <= 0:
@@ -1340,6 +1353,9 @@ def object_table(
     if len(voxel) < labels.ndim:
         voxel = (1.0,) * (labels.ndim - len(voxel)) + voxel
     voxel_volume = float(np.prod(voxel))
+    # The shape decides whether an object is a sphere or a disc, not the number of
+    # axes: a plate image has a Z axis one plane deep and its nuclei are discs.
+    flat_ndim = spatial_ndim(labels.shape)
 
     coordinates = np.unravel_index(indices, labels.shape)
     centroids: list[np.ndarray] = []
@@ -1382,7 +1398,7 @@ def object_table(
                 label=label,
                 n_voxels=n_voxels,
                 volume_um3=volume,
-                equivalent_diameter_um=_equivalent_diameter(volume, labels.ndim),
+                equivalent_diameter_um=_equivalent_diameter(volume, flat_ndim),
                 centroid_um=(
                     float(centroids[-3][label]),
                     float(centroids[-2][label]),

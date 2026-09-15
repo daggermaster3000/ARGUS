@@ -303,6 +303,138 @@ def test_dimming_outside_the_selection() -> None:
     )
 
 
+def test_finding_an_object(directory: Path) -> None:
+    print("going to one object")
+
+    import pandas as pd
+
+    frame = pd.DataFrame(
+        {
+            "Label": [1, 2],
+            "Centroid Z (\u00b5m)": [0.0, 0.0],
+            "Centroid Y (\u00b5m)": [10.0, 500.0],
+            "Centroid X (\u00b5m)": [20.0, 900.0],
+            "Equivalent diameter (\u00b5m)": [8.0, float("nan")],
+        }
+    )
+
+    columns = analysis.centroid_columns(frame)
+    check(set(columns) == {"z", "y", "x"}, f"the centroid columns are recognised ({columns})")
+    check(
+        analysis.object_centroid(frame, 1) == (0.0, 500.0, 900.0),
+        f"a row gives its centroid in z, y, x ({analysis.object_centroid(frame, 1)})",
+    )
+    check(
+        analysis.object_centroid(pd.DataFrame({"Label": [1]}), 0) is None,
+        "a table with no centroid says so rather than guessing at the origin",
+    )
+
+    # The centroids are micrometres and a calibrated layer's world coordinates are
+    # micrometres, so this is the camera position with nothing done to it.
+    two_d = frame.drop(columns=["Centroid Z (\u00b5m)"])
+    check(
+        analysis.object_centroid(two_d, 0) == (10.0, 20.0),
+        f"a 2D table gives (y, x) and does not invent a plane ({analysis.object_centroid(two_d, 0)})",
+    )
+    other = pd.DataFrame({"label": [1], "centroid-y": [3.0], "centroid_x": [4.0]})
+    check(
+        analysis.object_centroid(other, 0) == (3.0, 4.0),
+        "a table written by something else is still read",
+    )
+
+    check(analysis.object_diameter(frame, 0) == 8.0, "the size comes off the table")
+    check(
+        analysis.object_diameter(frame, 1) == analysis.FALLBACK_DIAMETER_UM,
+        "a blank size falls back rather than zooming to infinity",
+    )
+
+    zoom = analysis.zoom_for(10.0, 800.0, fill=0.25)
+    check(zoom == 20.0, f"an object a quarter of an 800 px canvas is 20 px per um ({zoom})")
+    check(
+        analysis.zoom_for(20.0, 800.0) < analysis.zoom_for(5.0, 800.0),
+        "a bigger object is zoomed out further, not in",
+    )
+    check(analysis.zoom_for(0.0, 800.0) > 0, "a zero size does not divide by zero")
+
+
+def test_anndata_export(directory: Path) -> None:
+    print("out to AnnData")
+
+    try:
+        import anndata as ad
+    except ImportError:
+        print("  skip anndata is not installed")
+        return
+
+    import pandas as pd
+
+    frame = pd.DataFrame(
+        {
+            "Label": [1, 2, 3],
+            "Voxels": [100, 200, 300],
+            "Centroid Z (\u00b5m)": [0.0, 0.0, 0.0],
+            "Centroid Y (\u00b5m)": [10.0, 20.0, 30.0],
+            "Centroid X (\u00b5m)": [40.0, 50.0, 60.0],
+            "Mean intensity": [5.0, 6.0, 7.0],
+            "Note": ["a", "b", "c"],
+        }
+    )
+
+    features = analysis.feature_columns(frame, "Label")
+    check(
+        features == ["Voxels", "Mean intensity"],
+        f"measurements are features; the id, the centroids and the text are not: {features}",
+    )
+
+    path = analysis.write_anndata(frame, directory / "objects.h5ad", source="G_07_0.csv")
+    check(path.exists() and path.stat().st_size > 0, f"a file is written ({path.name})")
+
+    adata = ad.read_h5ad(path)
+    check(adata.shape == (3, 2), f"one row per object, one column per feature {adata.shape}")
+    check(list(adata.var_names) == features, f"the features are named: {list(adata.var_names)}")
+    check(
+        "Label" not in adata.var_names,
+        "the label is not a feature — clustering on it would cluster on Cellpose's numbering",
+    )
+    check(list(adata.obs["label"]) == [1, 2, 3], "the label is kept, in obs, as an id")
+    check(
+        list(adata.obs_names) == ["1", "2", "3"],
+        f"and names the observations, so a result joins back to the mask ({list(adata.obs_names)})",
+    )
+    check("Note" in adata.obs.columns, "a text column is carried through rather than dropped")
+
+    spatial = adata.obsm["spatial"]
+    check(spatial.shape == (3, 2), f"the centroid reaches obsm['spatial'] ({spatial.shape})")
+    check(
+        list(spatial[0]) == [40.0, 10.0],
+        f"as (x, y), which is the order squidpy plots in ({list(spatial[0])})",
+    )
+    check(
+        adata.uns["microscopy_viewer"]["image"] == "G/07/0",
+        "and the image it came from is recorded, so a folder of these is still readable later",
+    )
+    check(
+        adata.uns["microscopy_viewer"]["spatial_units"] == "micrometer",
+        "with the units said out loud",
+    )
+
+    # Z is constant on a plate image; a third spatial column would make every
+    # neighbour graph a 3D one built on an axis that does not vary.
+    check(spatial.shape[1] == 2, "a flat image gives 2D coordinates")
+    volume = frame.copy()
+    volume["Centroid Z (\u00b5m)"] = [0.0, 5.0, 10.0]
+    check(
+        analysis.to_anndata(volume, "Label").obsm["spatial"].shape[1] == 3,
+        "but a real volume gives 3D ones",
+    )
+
+    try:
+        analysis.to_anndata(frame[["Label"]], "Label")
+        check(False, "a table with nothing to measure is refused")
+    except ValueError as exc:
+        check("no numeric measurement" in str(exc), f"a table with no features is refused: {exc}")
+
+
 def test_plot_helpers() -> None:
     print("plot helpers")
 
@@ -334,6 +466,10 @@ def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-analysis-"))
     try:
         test_reading(directory)
+        print()
+        test_finding_an_object(directory)
+        print()
+        test_anndata_export(directory)
         print()
         for test in (
             test_column_detection,

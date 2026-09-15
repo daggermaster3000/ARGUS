@@ -255,6 +255,19 @@ class BatchSegmentationWidget(QWidget):
         self._write_tables.setChecked(True)
         form.addRow("Tables", self._write_tables)
 
+        self._write_anndata = QCheckBox("and an .h5ad beside each one")
+        self._write_anndata.setToolTip(
+            "Also write each object table as AnnData, which is what squidpy, scanpy and "
+            "the rest of that stack read.\n\n"
+            "Measurements go in X, the label and centroids in obs, and the centroid in "
+            "obsm[\"spatial\"] — the array a neighbourhood graph is built from. Written "
+            "from the measured numbers rather than by reading the CSV back, so the "
+            "spatial analysis does not start from rounded floats.\n\n"
+            "Needs the anndata package."
+        )
+        self._write_tables.toggled.connect(self._write_anndata.setEnabled)
+        form.addRow("", self._write_anndata)
+
         row = QWidget()
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
@@ -503,6 +516,7 @@ class BatchSegmentationWidget(QWidget):
             level=int(self._level.value()),
             overwrite=self._overwrite.isChecked(),
             write_tables=self._write_tables.isChecked(),
+            write_anndata=self._write_anndata.isChecked(),
             table_dir=Path(table_dir) if table_dir else None,
         )
 

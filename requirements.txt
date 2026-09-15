@@ -38,6 +38,11 @@ scikit-image>=0.19
 pandas>=1.4
 openpyxl>=3.0
 
+# Object tables out to the single-cell stack, as .h5ad. Optional: the viewer
+# writes CSVs without it, and the export says so when it is missing. squidpy is
+# deliberately not listed — install it yourself for the analysis you are doing.
+anndata>=0.9
+
 # PowerPoint figure slides
 python-pptx>=0.6.21
 pillow>=9.0         # PNG encoding and high-quality downsampling for the slide

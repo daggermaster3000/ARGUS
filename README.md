@@ -740,6 +740,7 @@ seven times as long.
 | **Median filter** | The same setting as the Segmentation panel's, shown here because a plate run is where it costs real time; the two are kept in step. The line under it estimates what it adds to the selected images. |
 | **Label set** | Name written under `labels/`. Give a second run a different name to keep both. |
 | **Pyramid level** | Which level to segment. 0 is full resolution; each step up halves the image and quarters the time. The panel shows the resulting extent and µm/px. |
+| **and an .h5ad beside each one** | Also write each table as AnnData for squidpy. See [Out to squidpy](#out-to-squidpy-scanpy-and-the-rest). |
 | **Tables** | A per-image object table and a plate-level summary CSV — one row per image with counts, median size, median solidity, how many the shape filter dropped, and what went wrong. |
 
 **The intensity columns say which channel they came from.** `Mean intensity` is
@@ -757,6 +758,14 @@ read through the wrong voxels.
 
 Measuring every channel costs one extra read per channel: on a 12 000 × 12 000 well
 with 18 000 objects, four channels measure in about 9 s.
+
+> **Equivalent diameter changed in this version.** A plate mask is `(1, Y, X)` —
+> three axes, one plane deep — and the diameter was being computed with the sphere
+> formula, which spends a third of the volume on a Z extent the object does not
+> have. A nucleus 20 µm across was reported as 8 µm. Objects are now measured as
+> discs when the image is one plane deep and as spheres when it is a real volume;
+> tables written before this understate diameter by about 2.4× on plate data. The
+> voxel counts, volumes and intensities in those tables were always right.
 
 Cellpose settings — model, diameter, mode, thresholds, the solidity filter, GPU —
 are read from the **Segmentation** panel when the run starts, and shown here as one
@@ -781,6 +790,11 @@ Segmentation panel exports, or a table from elsewhere — and the panel
 
 - **shows it**, all of it. 18 000 rows is a normal well and opens instantly: the
   view reads the cells it is about to draw rather than building a widget per cell.
+- **sorts by any column.** Click a header, click again to reverse it. The first
+  row is then the largest, the roundest or the brightest object in the well — and
+  one click from being on screen. Blanks sort last either way, so a descending
+  sort really does start at the maximum rather than at the objects scikit-image
+  could not fit a hull to.
 - **colours the labels by any column.** Pick *Mean intensity* and the
   segmentation is redrawn as that measurement; pick *Solidity* and the round
   false positives stand out as one end of the scale. Objects with no row in the
@@ -803,6 +817,22 @@ AssayPlate_….zarr                       ← scanned in the File explorer
 AssayPlate_…_nuclei_objects/            ← listed as "nuclei_objects"
 AssayPlate_…_DAPITEST_objects/          ← listed as "DAPITEST_objects"
 ```
+
+**Clicking a row goes to that object.** The label is selected in the viewer, the
+camera centres on its centroid and zooms until it fills about a quarter of the
+canvas — not the whole canvas, because an object with nothing around it is an
+object you cannot place, and the neighbours are usually why you looked. On a
+stack the Z slider steps to the plane the object is in, which the camera alone
+would not do.
+
+The centroids in the table are micrometres and a calibrated layer's world
+coordinates are micrometres, so the centroid *is* the camera position: no
+conversion, and it stays right when the viewer is showing a coarser pyramid
+level. Untick **go to the object** to select the label without moving the camera.
+
+Sorting and going are the pair that make the table usable: sort by solidity
+descending, click the top row, and you are looking at the roundest object in the
+well — the one most likely to be a bubble rather than a nucleus.
 
 **The colour scale is clipped to 1–99 % by default**, and the values at both ends
 are shown. This matters more than it sounds: an object table always has a handful
@@ -837,6 +867,44 @@ colours back.
 | **Percentiles** | Where the colour scale starts and stops. |
 | **select** | `rectangle` or `lasso` to pick objects out of the plot; `off` leaves the drag to pan the axes. |
 | **x** / **y** | The scatter axes. Above 100 000 points the plot draws a random sample, and says so — random rather than the first N, because a table is written in label order and the first N would be one corner of the well. |
+
+#### Out to squidpy, scanpy and the rest
+
+**Export as AnnData…** writes the table as `.h5ad`, which is what the single-cell
+stack reads:
+
+| Where | What |
+|---|---|
+| `X` | the measurements, one row per object, one column per feature |
+| `var_names` | the column names — `Solidity`, `Mean intensity (Red568-pSTAT)`, … |
+| `obs` | the label id, the centroids, and any text column, indexed by label |
+| `obsm["spatial"]` | the centroid as `(x, y)` in µm — or `(x, y, z)` for a real volume |
+| `uns["microscopy_viewer"]` | which file and which image it came from, and the units |
+
+The label is deliberately **not** a feature. It is an identifier, and clustering
+on it would be clustering on the order Cellpose happened to number things in. The
+centroids are not features either, for the same reason in reverse: leave them in
+`X` and every clustering is partly a clustering on position, which is exactly what
+the spatial analysis is supposed to discover rather than assume.
+
+`obsm["spatial"]` is what `squidpy.gr.spatial_neighbors` builds its graph from, so
+a well is three lines from a neighbourhood enrichment:
+
+```python
+import anndata as ad, squidpy as sq
+
+adata = ad.read_h5ad("B_02_0.h5ad")      # 2971 objects x 27 features
+sq.gr.spatial_neighbors(adata)            # coordinates already in micrometres
+sq.gr.nhood_enrichment(adata, cluster_key="...")
+```
+
+The Batch segmentation panel can write one beside every CSV as it goes — tick
+**and an .h5ad beside each one** — built from the measured numbers rather than by
+reading the CSV back, because a float that has been through a text file is not
+the float that was measured.
+
+`pip install "microscopy-viewer[analysis]"` for the writer; squidpy is left to
+you, since what it pulls in depends on the analysis.
 
 ### Third-party napari plugins
 

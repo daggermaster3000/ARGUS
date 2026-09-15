@@ -548,6 +548,59 @@ def test_measuring_every_channel(directory: Path) -> None:
     )
 
 
+def test_anndata_beside_the_tables(directory: Path) -> None:
+    print("an .h5ad beside each table")
+
+    try:
+        import anndata as ad
+    except ImportError:
+        print("  skip anndata is not installed")
+        return
+
+    seg.register_backend(_StubBackend())
+    plate = _make_plate(directory)
+    survey = batch.survey_plate(plate)
+    jobs = batch.select_jobs(survey, wells=["B/02"], acquisitions=[1])
+
+    settings = _stub_settings(
+        write_tables=True, write_anndata=True, table_dir=directory / "tables"
+    )
+    report = batch.run_batch(jobs, settings, survey=survey)
+    outcome = report.outcomes[0]
+    check(outcome.ok, f"the run finishes ({outcome.message})")
+
+    csv = outcome.table_path
+    h5ad = csv.with_suffix(".h5ad")
+    check(csv.exists(), "the CSV is still written")
+    check(h5ad.exists(), f"and an .h5ad beside it ({h5ad.name})")
+
+    adata = ad.read_h5ad(h5ad)
+    check(adata.n_obs == outcome.n_objects, f"one observation per object ({adata.n_obs})")
+    check("spatial" in adata.obsm, "with the centroids in obsm['spatial'] for squidpy")
+    check(
+        adata.uns["microscopy_viewer"]["image"] == "B/02/0",
+        f"and the image it came from ({adata.uns['microscopy_viewer']['image']})",
+    )
+
+    # Written from the measured numbers, not by reading the CSV back: a float that
+    # has been through a text file is not the float that was measured.
+    import pandas as pd
+
+    frame = pd.read_csv(csv)
+    feature = list(adata.var_names)[0]
+    check(
+        float(adata.X[0, 0]) == float(np.float32(frame[feature].iloc[0])),
+        f"the matrix holds the measured values ({feature})",
+    )
+
+    plain = _stub_settings(overwrite=True, write_tables=True, table_dir=directory / "plain")
+    plain_report = batch.run_batch(jobs, plain, survey=survey)
+    check(
+        not plain_report.outcomes[0].table_path.with_suffix(".h5ad").exists(),
+        "a run that did not ask for one does not write it",
+    )
+
+
 def main() -> int:
     if not _has_zarr():
         print("zarr is not installed; the batch checks need it")
@@ -566,6 +619,7 @@ def main() -> int:
             ("tables", test_tables),
             ("measured", test_which_channel_was_measured),
             ("allchannels", test_measuring_every_channel),
+            ("anndata", test_anndata_beside_the_tables),
         ):
             case = directory / name
             case.mkdir()
