@@ -183,6 +183,65 @@ def label_colors(
     return mapping, (float(low), float(high))
 
 
+#: Alpha given to objects outside a selection. Not zero: the point of selecting a
+#: cluster in the plot is to see where it *is* in the image, and that needs the
+#: rest of the field still faintly there to place it against.
+DIM_ALPHA = 0.12
+
+
+def points_in_rectangle(
+    x: Sequence[float], y: Sequence[float], x0: float, x1: float, y0: float, y1: float
+) -> np.ndarray:
+    """Boolean mask of the points inside a rectangle, in either drag direction."""
+    xs = np.asarray(x, dtype=float)
+    ys = np.asarray(y, dtype=float)
+    left, right = (x0, x1) if x0 <= x1 else (x1, x0)
+    bottom, top = (y0, y1) if y0 <= y1 else (y1, y0)
+    return (xs >= left) & (xs <= right) & (ys >= bottom) & (ys <= top)
+
+
+def points_in_polygon(
+    x: Sequence[float], y: Sequence[float], vertices: Sequence[Sequence[float]]
+) -> np.ndarray:
+    """Boolean mask of the points inside a lassoed polygon.
+
+    Uses matplotlib's own point-in-path test, which is the same code that decides
+    whether a click landed on a patch, so a lasso selects exactly what it looks
+    like it encloses.
+    """
+    xs = np.asarray(x, dtype=float)
+    ys = np.asarray(y, dtype=float)
+    points = np.column_stack([xs, ys])
+    if len(vertices) < 3 or points.size == 0:
+        return np.zeros(xs.shape, dtype=bool)
+    from matplotlib.path import Path as MplPath
+
+    return MplPath(np.asarray(vertices, dtype=float)).contains_points(points)
+
+
+def dim_unselected(
+    mapping: dict, selected_labels: Sequence[int], alpha: float = DIM_ALPHA
+) -> dict:
+    """A copy of a label colour mapping with everything outside the selection faded.
+
+    The selected objects keep the colour their measurement gave them rather than
+    turning some highlight colour: the question being asked is "where are the
+    objects in that cluster", and the answer is easier to read when they still
+    carry the value that put them in it.
+    """
+    chosen = {int(label) for label in selected_labels}
+    if not chosen:
+        return dict(mapping)
+    faded = {}
+    for key, colour in mapping.items():
+        if key is None or not isinstance(key, (int, np.integer)) or int(key) <= 0:
+            faded[key] = colour
+            continue
+        red, green, blue, opacity = (float(c) for c in colour)
+        faded[key] = (red, green, blue, opacity if int(key) in chosen else opacity * float(alpha))
+    return faded
+
+
 def scatter_sample(count: int, limit: int = MAX_SCATTER_POINTS, seed: int = 0) -> np.ndarray | None:
     """Indices to plot when there are too many points, or None to plot them all.
 

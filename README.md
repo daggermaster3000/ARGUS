@@ -723,6 +723,20 @@ of enormous outliers — two nuclei segmented as one — and stretching the scal
 the true maximum leaves every real object the same dark blue. Widen it to 0–100 %
 to see the raw range.
 
+**Selecting a region of the plot selects those objects in the image.** Set
+**select** to `rectangle` and drag a band across one measurement, or to `lasso`
+and draw round a cluster: the points you enclosed keep their colour, everything
+else fades to 12 %, and the labels in the viewer fade with them. A group that is
+only visible as a cluster in the numbers becomes a group you can see the position
+of in the well — which nuclei they are, whether they are at an edge, whether they
+are all the same organoid.
+
+Faded rather than hidden, because the question being asked is *where* the cluster
+is, and that needs the rest of the field faintly there to place it against. The
+selected objects keep the colour their measurement gave them rather than turning
+some highlight colour, so they stay readable as values. The status line reports
+how many were caught and their distribution; **Clear** puts everything back.
+
 Clicking a row selects that label in the viewer, which is how a suspicious number
 gets looked at rather than argued about. **Reset** puts the ordinary random label
 colours back.
@@ -734,6 +748,7 @@ colours back.
 | **Colour by** | The column the colours come from. Numeric columns only; text columns are not offered. |
 | **Colormap** | Perceptually uniform maps first — a measurement painted in a map with false edges is a measurement misread. |
 | **Percentiles** | Where the colour scale starts and stops. |
+| **select** | `rectangle` or `lasso` to pick objects out of the plot; `off` leaves the drag to pan the axes. |
 | **x** / **y** | The scatter axes. Above 100 000 points the plot draws a random sample, and says so — random rather than the first N, because a table is written in label order and the first N would be one corner of the well. |
 
 ### Third-party napari plugins

@@ -56,6 +56,10 @@ logger = get_logger("analysis_widget")
 
 TABLE_FILTER = "Measurement tables (*.csv *.tsv *.txt *.xlsx *.xls);;All files (*)"
 
+#: How a region is picked out of the plot. Off by default, because a selector
+#: swallows the drag that otherwise pans the axes.
+SELECTION_MODES = ("off", "rectangle", "lasso")
+
 #: Metadata key the applied colouring is recorded under, so a second Apply knows
 #: what to put back and the panel can say what a layer is currently showing.
 COLOURING_KEY = "mv_label_colouring"
@@ -130,6 +134,17 @@ class MeasurementAnalysisWidget(QWidget):
         self._path: Path | None = None
         self._label_column: str | None = None
         self._updating = False
+
+        # Selection state. ``_plot_rows`` maps a point in the scatter back to its
+        # row in the table, which is not the identity when the plot is showing a
+        # subsample of a very large one.
+        self._scatter = None
+        self._plot_rows = np.empty(0, dtype=int)
+        self._plot_x = np.empty(0, dtype=float)
+        self._plot_y = np.empty(0, dtype=float)
+        self._plot_colors = None
+        self._selected_rows = np.empty(0, dtype=int)
+        self._selector = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -286,6 +301,28 @@ class MeasurementAnalysisWidget(QWidget):
             row.addWidget(combo, stretch=1)
         row.addStretch(1)
         outer.addLayout(row)
+
+        tools = QHBoxLayout()
+        tools.addWidget(QLabel("select"))
+        self._select_box = QComboBox()
+        self._select_box.addItems(list(SELECTION_MODES))
+        self._select_box.setToolTip(
+            "Drag on the plot to pick out a group of objects. “Rectangle” for a band of "
+            "one measurement, “Lasso” to draw round a cluster.\n\n"
+            "What is selected stays its own colour and everything else fades, in the plot "
+            "and in the image at once — which is how you find out where a cluster in the "
+            "numbers actually sits in the well."
+        )
+        self._select_box.currentTextChanged.connect(self._install_selector)
+        tools.addWidget(self._select_box)
+        clear = QPushButton("Clear")
+        clear.setToolTip("Drop the selection and put every object back.")
+        clear.clicked.connect(self.clear_selection)
+        tools.addWidget(clear)
+        tools.addStretch(1)
+        self._selection_label = QLabel("nothing selected")
+        tools.addWidget(self._selection_label)
+        outer.addLayout(tools)
 
         from matplotlib.figure import Figure
 
@@ -474,6 +511,9 @@ class MeasurementAnalysisWidget(QWidget):
         except Exception:  # pragma: no cover - a layer with an odd metadata dict
             logger.debug("could not record the colouring on the layer", exc_info=True)
 
+        # A selection made before the colour column changed still holds: the rows
+        # are the same rows, so re-apply the fade rather than dropping it.
+        self._apply_selection_to_layer()
         painted = sum(1 for key in mapping if isinstance(key, int) and key > 0)
         self._status.setText(
             f"“{layer.name}” coloured by {column}: {painted} object(s), "
@@ -509,6 +549,8 @@ class MeasurementAnalysisWidget(QWidget):
         axes = self._figure.add_subplot(111)
 
         x_name, y_name = self._x_box.currentText(), self._y_box.currentText()
+        self._scatter = None
+        self._selector = None
         if self._frame is None or not x_name or not y_name:
             axes.set_axis_off()
             axes.text(0.5, 0.5, "Open a table", ha="center", va="center", fontsize=9)
@@ -520,11 +562,13 @@ class MeasurementAnalysisWidget(QWidget):
         y = self._frame[y_name].to_numpy(dtype=float)
         _labels, values = self._current_values()
 
+        rows = np.arange(len(x))
         sample = analysis.scatter_sample(len(x))
         if sample is not None:
-            x, y = x[sample], y[sample]
+            rows = np.asarray(sample)
+            x, y = x[rows], y[rows]
             if values is not None:
-                values = np.asarray(values, dtype=float)[sample]
+                values = np.asarray(values, dtype=float)[rows]
 
         colors = None
         if values is not None:
@@ -535,18 +579,26 @@ class MeasurementAnalysisWidget(QWidget):
                 analysis.normalise(values, low, high), self._colormap_box.currentText()
             )
 
-        axes.scatter(
-            x,
-            y,
-            s=6,
-            c=colors if colors is not None else "#4c72b0",
-            linewidths=0,
-            alpha=0.6 if len(x) > 2000 else 0.9,
-        )
+        if colors is None:
+            # A single colour still has to be per-point: the selection fades the
+            # points it did not choose by rewriting their alpha.
+            colors = np.tile(np.array([0.298, 0.447, 0.690, 1.0]), (len(x), 1))
+        base_alpha = 0.6 if len(x) > 2000 else 0.9
+        colors = np.array(colors, dtype=float, copy=True)
+        colors[:, 3] *= base_alpha
+
+        self._plot_rows = rows
+        self._plot_x, self._plot_y = x, y
+        self._plot_colors = colors
+        self._scatter = axes.scatter(x, y, s=6, c=colors, linewidths=0)
         axes.set_xlabel(x_name, fontsize=9)
         axes.set_ylabel(y_name, fontsize=9)
         axes.tick_params(labelsize=8)
-        self._canvas.draw_idle()
+
+        # Selecting on stale axes selects the wrong points, so the selector is
+        # rebuilt with them.
+        self._install_selector(self._select_box.currentText())
+        self._apply_selection_to_plot()
 
         note = f"{len(x)} point(s)"
         if sample is not None:
@@ -554,6 +606,140 @@ class MeasurementAnalysisWidget(QWidget):
         if values is not None:
             note += f"; coloured by {self._column_box.currentText()}"
         self._plot_note.setText(note)
+
+    # -- selecting a region ---------------------------------------------------
+
+    def _install_selector(self, mode: str) -> None:
+        """Attach the chosen selector to the current axes, replacing any other."""
+        previous, self._selector = self._selector, None
+        if previous is not None:
+            try:
+                previous.set_active(False)
+                previous.disconnect_events()
+            except Exception:  # pragma: no cover - already torn down with the figure
+                logger.debug("could not detach the previous selector", exc_info=True)
+
+        if self._scatter is None or str(mode) == "off":
+            return
+        axes = self._scatter.axes
+        try:
+            from matplotlib.widgets import LassoSelector, RectangleSelector
+
+            if str(mode) == "rectangle":
+                # Held on the widget: matplotlib keeps only a weak reference, so a
+                # selector that is not stored is garbage-collected and does nothing.
+                self._selector = RectangleSelector(
+                    axes,
+                    self._on_rectangle,
+                    useblit=True,
+                    button=[1],
+                    props={"facecolor": "none", "edgecolor": "#d62728", "linewidth": 1.2},
+                )
+            else:
+                self._selector = LassoSelector(
+                    axes, self._on_lasso, useblit=True, props={"color": "#d62728", "linewidth": 1.2}
+                )
+        except Exception:
+            logger.exception("could not install the %s selector", mode)
+            self._status.setText(f"Region selection ({mode}) is not available in this matplotlib.")
+
+    def _on_rectangle(self, press, release) -> None:
+        if press is None or release is None:
+            return
+        if None in (press.xdata, press.ydata, release.xdata, release.ydata):
+            return  # a drag that started or ended outside the axes
+        mask = analysis.points_in_rectangle(
+            self._plot_x, self._plot_y, press.xdata, release.xdata, press.ydata, release.ydata
+        )
+        self._set_selection(mask)
+
+    def _on_lasso(self, vertices) -> None:
+        mask = analysis.points_in_polygon(self._plot_x, self._plot_y, vertices)
+        self._set_selection(mask)
+
+    def _set_selection(self, mask) -> None:
+        """Record which rows are selected, then show it in the plot and the image."""
+        mask = np.asarray(mask, dtype=bool)
+        self._selected_rows = self._plot_rows[mask] if mask.any() else np.empty(0, dtype=int)
+        self._apply_selection_to_plot()
+        self._apply_selection_to_layer()
+
+        count = int(self._selected_rows.size)
+        if not count:
+            self._selection_label.setText("nothing selected")
+            self._status.setText("Nothing inside that region.")
+            return
+        self._selection_label.setText(f"{count} selected")
+        column = self._column_box.currentText()
+        message = f"{count} of {len(self._frame)} object(s) selected"
+        if column and self._label_column:
+            values = self._frame[column].to_numpy(dtype=float)[self._selected_rows]
+            message += f"; {column} {analysis.describe_column(values)}"
+        self._status.setText(message + ".")
+
+    def clear_selection(self) -> None:
+        """Drop the selection and put every object back to full strength."""
+        self._selected_rows = np.empty(0, dtype=int)
+        self._apply_selection_to_plot()
+        self._apply_selection_to_layer()
+        self._selection_label.setText("nothing selected")
+        self._status.setText("Selection cleared.")
+
+    def selected_labels(self) -> list[int]:
+        """The label ids currently selected, in table order."""
+        if self._frame is None or not self._label_column or self._selected_rows.size == 0:
+            return []
+        chosen = self._frame[self._label_column].to_numpy()[self._selected_rows]
+        return [int(value) for value in chosen]
+
+    def _apply_selection_to_plot(self) -> None:
+        """Fade the points outside the selection, leaving the chosen ones as they were."""
+        if self._scatter is None or self._plot_colors is None:
+            return
+        colors = np.array(self._plot_colors, dtype=float, copy=True)
+        if self._selected_rows.size:
+            keep = np.isin(self._plot_rows, self._selected_rows)
+            colors[~keep, 3] *= analysis.DIM_ALPHA
+        try:
+            self._scatter.set_facecolors(colors)
+            self._canvas.draw_idle()
+        except Exception:  # pragma: no cover - figure torn down mid-update
+            logger.debug("could not redraw the selection", exc_info=True)
+
+    def _apply_selection_to_layer(self) -> None:
+        """Fade the labels outside the selection, if the layer is coloured by a column.
+
+        Only touches a layer this panel has painted: rewriting the colours of a
+        layer someone else set up would be a surprise, and there would be nothing
+        to put back afterwards.
+        """
+        layer = self._selected_layer()
+        if layer is None:
+            return
+        try:
+            record = dict(layer.metadata.get(COLOURING_KEY) or {})
+        except Exception:  # pragma: no cover - an odd metadata dict
+            record = {}
+        if not record:
+            return
+
+        labels, values = self._current_values()
+        if values is None:
+            return
+        try:
+            mapping, _range = analysis.label_colors(
+                labels,
+                values,
+                colormap=record.get("colormap", self._colormap_box.currentText()),
+                low=record.get("low"),
+                high=record.get("high"),
+            )
+            mapping = analysis.dim_unselected(mapping, self.selected_labels())
+            from napari.utils.colormaps import DirectLabelColormap
+
+            layer.colormap = DirectLabelColormap(color_dict=mapping)
+        except Exception:
+            logger.exception("could not show the selection on %s", layer.name)
 
     def save_figure(self) -> None:
         if self._frame is None:

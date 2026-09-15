@@ -231,6 +231,78 @@ def test_matching_a_layer() -> None:
     )
 
 
+def test_region_selection() -> None:
+    print("picking a region out of the plot")
+
+    x = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    y = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+
+    inside = analysis.points_in_rectangle(x, y, 0.5, 3.5, 0.5, 3.5)
+    check(list(inside) == [False, True, True, True, False], f"a rectangle selects what it covers ({list(inside)})")
+    check(
+        list(analysis.points_in_rectangle(x, y, 3.5, 0.5, 3.5, 0.5)) == list(inside),
+        "dragged the other way it selects the same points",
+    )
+    check(
+        not analysis.points_in_rectangle(x, y, 10.0, 11.0, 10.0, 11.0).any(),
+        "a rectangle over empty space selects nothing",
+    )
+
+    square = [(0.5, 0.5), (3.5, 0.5), (3.5, 3.5), (0.5, 3.5)]
+    check(
+        list(analysis.points_in_polygon(x, y, square)) == list(inside),
+        "a lasso round the same area selects the same points",
+    )
+    triangle = [(-0.5, -0.5), (1.5, -0.5), (-0.5, 1.5)]
+    check(
+        list(analysis.points_in_polygon(x, y, triangle)) == [True, False, False, False, False],
+        "and a shape that is not a box selects only what is really inside it",
+    )
+    check(
+        not analysis.points_in_polygon(x, y, [(0.0, 0.0), (1.0, 1.0)]).any(),
+        "a lasso with no area selects nothing rather than raising",
+    )
+    check(
+        not analysis.points_in_polygon([], [], square).any(),
+        "and neither does an empty plot",
+    )
+
+
+def test_dimming_outside_the_selection() -> None:
+    print("fading what was not selected")
+
+    mapping = {
+        None: (0.0, 0.0, 0.0, 0.0),
+        0: (0.0, 0.0, 0.0, 0.0),
+        1: (0.1, 0.2, 0.3, 1.0),
+        2: (0.4, 0.5, 0.6, 1.0),
+        3: (0.7, 0.8, 0.9, 0.5),
+    }
+    faded = analysis.dim_unselected(mapping, [1], alpha=0.1)
+
+    check(faded[1] == (0.1, 0.2, 0.3, 1.0), "a selected object is untouched, colour and all")
+    check(
+        faded[2][:3] == (0.4, 0.5, 0.6) and abs(faded[2][3] - 0.1) < 1e-9,
+        f"an unselected one keeps its colour and loses its opacity ({faded[2]})",
+    )
+    check(
+        abs(faded[3][3] - 0.05) < 1e-9,
+        f"fading is relative, so an already-faint object stays fainter ({faded[3][3]})",
+    )
+    check(
+        faded[None] == (0.0, 0.0, 0.0, 0.0) and faded[0] == (0.0, 0.0, 0.0, 0.0),
+        "background stays transparent rather than being faded twice",
+    )
+    check(
+        analysis.dim_unselected(mapping, []) == mapping,
+        "an empty selection means everything, not nothing",
+    )
+    check(
+        analysis.dim_unselected(mapping, [1]) is not mapping,
+        "the original mapping is left alone, so Clear has something to put back",
+    )
+
+
 def test_plot_helpers() -> None:
     print("plot helpers")
 
@@ -268,6 +340,8 @@ def main() -> int:
             test_scale_and_colours,
             test_label_colours,
             test_matching_a_layer,
+            test_region_selection,
+            test_dimming_outside_the_selection,
             test_plot_helpers,
         ):
             test()
