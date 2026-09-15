@@ -27,3 +27,9 @@ Thumbs.db
 
 # Stray duplicate of assets/microscopy_viewer.ico, left in the loaders package
 microscopy_viewer/loaders/favicon*.ico
+
+# Measurement data. These are experiment output, not source: an .h5ad of one
+# plate is a hundred megabytes and belongs beside the images it came from.
+*.h5ad
+*.zarr/
+*.csv

@@ -23,6 +23,11 @@ computed on one image at a time, and :func:`select_image` is how the page gets
 one — a neighbourhood graph built across a whole plate would join objects in
 different wells because they happen to sit at the same corner of each.
 
+**The neighbour search is the whole cost.** Everything else here is seconds; the
+k-nearest-neighbour graph the clustering and the UMAP are both built on is not,
+and which library computes it matters more than anything else on this page. See
+:func:`neighbours`.
+
 **These are not genes.** The columns are morphology and intensity, tens of them
 rather than twenty thousand, already on comparable scales and with no counts to
 normalise. So the preparation is a z-score and a PCA, not the log1p-and-
@@ -32,10 +37,13 @@ would take the log of a solidity.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -75,6 +83,12 @@ DEFAULT_PER_IMAGE = 750
 #: made in a notebook.
 DEFAULT_UMAP_NEIGHBOURS = 15
 DEFAULT_MIN_DIST = 0.5
+
+#: Objects above which the approximate neighbour search is used instead of the
+#: exact one. Below it scikit-learn is both faster and exact; above it the
+#: quadratic term catches up with pynndescent's fixed compilation cost. Measured
+#: at 30 000 objects in 15 dimensions: 8 s exact against 35 s approximate.
+EXACT_NEIGHBOURS_LIMIT = 60_000
 
 #: How the spatial graph is built. Delaunay is the honest default for segmented
 #: objects: nuclei touch their neighbours, and a fixed radius in micrometres
@@ -232,10 +246,104 @@ def prepare(adata, n_comps: int = DEFAULT_COMPONENTS, features: Sequence[str] | 
         matrix = np.where(finite, matrix, column_means)
         adata.X = matrix.astype(np.float32)
 
+    started = time.perf_counter()
     sc.pp.scale(adata, max_value=10.0)
     comps = int(max(2, min(int(n_comps), adata.n_vars - 1, adata.n_obs - 1)))
     sc.pp.pca(adata, n_comps=comps)
+    logger.info(
+        "prepare: %d x %d scaled, %d component(s), %.1f s",
+        adata.n_obs,
+        adata.n_vars,
+        comps,
+        time.perf_counter() - started,
+    )
     return comps
+
+
+def neighbours(adata, n_neighbors: int = DEFAULT_NEIGHBOURS, force: bool = False) -> str:
+    """Build the k-nearest-neighbour graph, and say how. Reused if one already fits.
+
+    This is the slow step, and almost all of the slowness is not the arithmetic.
+    scanpy's default backend is pynndescent, whose kernels numba compiles on first
+    use — about thirty-five seconds, paid on *every* launch, because the parallel
+    kernels cannot be written to the numba cache. The work itself takes two.
+
+    Below :data:`EXACT_NEIGHBOURS_LIMIT` objects, scikit-learn's exact search is
+    handed to scanpy instead: no compilation, no approximation, and four times
+    faster end to end on a plate-sized sample. Above it the exact search's
+    quadratic term wins out and pynndescent is the right tool again.
+    """
+    import scanpy as sc
+
+    wanted = int(min(n_neighbors, max(2, adata.n_obs - 1)))
+    existing = adata.uns.get("neighbors")
+    if not force and existing and "connectivities" in adata.obsp:
+        already = int((existing.get("params") or {}).get("n_neighbors", 0))
+        if already == wanted:
+            logger.info("neighbours: reusing the graph already built (k=%d)", wanted)
+            return f"{wanted} neighbours (already built)"
+
+    started = time.perf_counter()
+    how = "approximate (pynndescent)"
+    transformer = None
+    if adata.n_obs <= EXACT_NEIGHBOURS_LIMIT:
+        try:
+            from sklearn.neighbors import KNeighborsTransformer
+
+            transformer = KNeighborsTransformer(
+                n_neighbors=wanted, algorithm="auto", n_jobs=-1, metric="euclidean"
+            )
+            how = "exact (scikit-learn)"
+        except ImportError:  # pragma: no cover - sklearn arrives with scanpy
+            logger.info("scikit-learn is unavailable; using the approximate search")
+
+    if transformer is not None:
+        sc.pp.neighbors(adata, n_neighbors=wanted, transformer=transformer)
+    else:
+        sc.pp.neighbors(adata, n_neighbors=wanted)
+    elapsed = time.perf_counter() - started
+    logger.info(
+        "neighbours: %s, k=%d over %d object(s) in %.1f s", how, wanted, adata.n_obs, elapsed
+    )
+    return f"{wanted} neighbours, {how}, {elapsed:.1f} s"
+
+
+_warmed = threading.Lock()
+_warm_done = False
+
+
+def warm_up() -> float:
+    """Force the just-in-time compilation now, on a handful of points.
+
+    scanpy builds its connectivities through numba-compiled kernels, and the first
+    call in a process pays twelve to fifteen seconds to compile them whatever the
+    size of the data — the same cost for three thousand objects as for thirty
+    thousand. Paying it on sixty fake points while the user is still choosing a
+    file is the difference between a page that takes fifteen seconds to answer and
+    one that takes one.
+    """
+    global _warm_done
+
+    with _warmed:
+        if _warm_done:
+            return 0.0
+        _warm_done = True
+
+    started = time.perf_counter()
+    try:
+        import anndata as ad
+        import scanpy as sc
+
+        rng = np.random.default_rng(0)
+        toy = ad.AnnData(X=rng.normal(size=(60, 4)).astype(np.float32))
+        toy.obsm["X_pca"] = np.asarray(toy.X)
+        neighbours(toy, n_neighbors=5)
+        sc.tl.leiden(toy, key_added="c", flavor="igraph", n_iterations=1, directed=False)
+    except Exception:  # noqa: BLE001 - a warm-up that fails costs nothing but time
+        logger.debug("warm-up did not complete", exc_info=True)
+    elapsed = time.perf_counter() - started
+    logger.info("warm-up: compiled in %.1f s; the first real run will not pay this", elapsed)
+    return elapsed
 
 
 def cluster(
@@ -254,7 +362,8 @@ def cluster(
 
     if "X_pca" not in adata.obsm:
         prepare(adata)
-    sc.pp.neighbors(adata, n_neighbors=int(min(n_neighbors, max(2, adata.n_obs - 1))))
+    neighbours(adata, n_neighbors)
+    started = time.perf_counter()
     try:
         sc.tl.leiden(adata, resolution=float(resolution), key_added=key, flavor="igraph",
                      n_iterations=2, directed=False)
@@ -273,7 +382,12 @@ def cluster(
         adata.obs[key] = [str(value) for value in labels]
         method = f"k-means (k={k})"
     adata.obs[key] = adata.obs[key].astype("category")
-    logger.info("dashboard: %s found %d cluster(s)", method, adata.obs[key].nunique())
+    logger.info(
+        "cluster: %s found %d group(s) in %.1f s",
+        method,
+        adata.obs[key].nunique(),
+        time.perf_counter() - started,
+    )
     adata.uns[f"{key}_method"] = method
     return method
 
@@ -380,10 +494,12 @@ def embed(
 
     if "X_pca" not in adata.obsm:
         prepare(adata)
-    sc.pp.neighbors(adata, n_neighbors=int(min(n_neighbors, max(2, adata.n_obs - 1))))
+    neighbours(adata, n_neighbors)
+    started = time.perf_counter()
     sc.tl.umap(adata, min_dist=float(min_dist), random_state=int(seed))
-    logger.info("dashboard: UMAP of %d object(s)", adata.n_obs)
-    return f"UMAP, {n_neighbors} neighbours, min_dist {min_dist:g}"
+    elapsed = time.perf_counter() - started
+    logger.info("umap: %d object(s) laid out in %.1f s", adata.n_obs, elapsed)
+    return f"UMAP, {n_neighbors} neighbours, min_dist {min_dist:g} ({elapsed:.1f} s)"
 
 
 def composition(adata, key: str = CLUSTER_KEY, by: str = "well"):
@@ -525,6 +641,12 @@ def command(path: str | Path | None = None, port: int = 8501, python: str | None
         str(int(port)),
         "--server.headless",
         "true",
+        # Loopback only. Streamlit's default binds every interface, which puts the
+        # object tables -- and on a university network, potentially the internet --
+        # in front of anyone who can reach this machine's address. Nothing here
+        # has any authentication in front of it.
+        "--server.address",
+        "127.0.0.1",
         # Without this the first run stops at a terminal prompt asking for an
         # email address, and the window never opens.
         "--browser.gatherUsageStats",
@@ -532,6 +654,28 @@ def command(path: str | Path | None = None, port: int = 8501, python: str | None
     ]
     if path is not None:
         argv += ["--", "--file", str(path)]
+    return argv
+
+
+def module_command(
+    path: str | Path | None = None,
+    port: int = 8501,
+    python: str | None = None,
+    open_browser: bool = True,
+) -> list[str]:
+    """The command the shortcut runs, and the one the viewer's button runs too.
+
+    ``-m microscopy_viewer.dashboard`` rather than ``-m streamlit run …``: the
+    banner, the log formatting and the warm-up all live in :func:`main`, and a
+    dashboard started from the viewer should be the same program as one started
+    from the shortcut rather than a second arrangement that drifts from it.
+    """
+    argv = [str(python or sys.executable), "-m", "microscopy_viewer.dashboard"]
+    if path is not None:
+        argv.append(str(path))
+    argv += ["--port", str(int(port))]
+    if not open_browser:
+        argv.append("--no-browser")
     return argv
 
 
@@ -556,44 +700,147 @@ def launch(
     port: int | None = None,
     python: str | None = None,
     open_browser: bool = True,
+    show_console: bool = True,
 ) -> tuple[subprocess.Popen, str]:
     """Start the dashboard as its own process. Returns ``(process, url)``.
 
     A separate process on purpose. Streamlit runs its own event loop and would
     fight Qt's inside the viewer; and the spatial work is minutes of CPU that has
     no business blocking the window the images are in.
+
+    *show_console* opens a terminal of its own and lets the output go to it. On by
+    default, and worth keeping on: the first neighbour search on a plate takes the
+    better part of a minute, and a page that is merely sitting there is
+    indistinguishable from a page that has hung unless something is saying what it
+    is doing. The window closing is also how you know the server stopped.
     """
     missing = missing_packages()
     if missing:
         raise RuntimeError(install_hint(missing))
 
     chosen = int(port) if port else free_port()
-    argv = command(path, port=chosen, python=python)
+    argv = module_command(path, port=chosen, python=python, open_browser=open_browser)
     url = f"http://localhost:{chosen}"
 
     creation = 0
+    streams: dict[str, Any] = {}
     if os.name == "nt":
-        # Detached, so closing the viewer does not take the dashboard with it and
-        # no console window appears in front of the image.
-        creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if show_console:
+            # Its own window, so the log is readable and outlives the viewer.
+            creation = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        else:
+            creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if not show_console:
+        # Captured rather than inherited, so a hidden dashboard cannot write over
+        # whatever the parent is printing.
+        streams = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
 
     logger.info("dashboard: %s", " ".join(argv))
     process = subprocess.Popen(
         argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
         creationflags=creation,
         cwd=str(Path(__file__).resolve().parent.parent),
+        env=_child_environment(),
+        **streams,
     )
-    if open_browser:
-        import threading
-        import webbrowser
-
-        # Streamlit takes a couple of seconds to bind the port; opening the
-        # browser straight away gives the user a connection-refused page.
-        threading.Timer(3.0, lambda: webbrowser.open(url)).start()
+    # The browser is opened by the child, which knows when it is actually
+    # listening; opening it from here would race the server's own start-up.
     return process, url
+
+
+def _child_environment() -> dict[str, str]:
+    """The environment the dashboard process runs in.
+
+    Python buffers stdout when it is a pipe rather than a terminal, and a console
+    that shows nothing for forty seconds and then everything at once is worse than
+    no console at all.
+    """
+    environment = dict(os.environ)
+    environment["PYTHONUNBUFFERED"] = "1"
+    environment.setdefault("PYTHONIOENCODING", "utf-8")
+    return environment
 
 
 def streamlit_available() -> bool:
     return shutil.which("streamlit") is not None or not missing_packages()
+
+
+# ---------------------------------------------------------------------------
+# Starting it without the viewer
+# ---------------------------------------------------------------------------
+
+
+def configure_logging(level: int = logging.INFO) -> None:
+    """Send this package's log to stdout, timestamped.
+
+    The dashboard's own console is the only place the timings appear, and they are
+    the point of having one: which step is slow, and whether anything is happening
+    at all.
+    """
+    root = logging.getLogger("microscopy_viewer")
+    root.setLevel(level)
+    if any(isinstance(handler, logging.StreamHandler) for handler in root.handlers):
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(asctime)s  %(name)-28s %(message)s", "%H:%M:%S"))
+    root.addHandler(handler)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """``python -m microscopy_viewer.dashboard [file.h5ad]``.
+
+    Runs Streamlit in *this* process rather than starting another one: started
+    from a shortcut there is already a console, and a second process inside it
+    would put the log one layer further from the window that is showing it.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="microscopy-viewer-dashboard",
+        description="The spatial dashboard: squidpy statistics on an object table.",
+    )
+    parser.add_argument("file", nargs="?", default=None, help="an .h5ad to open")
+    parser.add_argument("--port", type=int, default=None, help="port to serve on")
+    parser.add_argument("--no-browser", action="store_true", help="do not open a browser")
+    arguments = parser.parse_args(list(argv) if argv is not None else None)
+
+    configure_logging()
+    missing = missing_packages()
+    if missing:
+        print(install_hint(missing))
+        return 2
+
+    port = int(arguments.port) if arguments.port else free_port()
+    url = f"http://localhost:{port}"
+    print(f"Microscopy Viewer — spatial dashboard\n{url}\n")
+    if arguments.file:
+        print(f"opening {arguments.file}")
+    print("Close this window to stop the server.\n", flush=True)
+
+    # Started here as well as by the page: the page only runs when a browser
+    # connects, and the seconds before that are seconds the compiler could be
+    # using. Whichever gets there first does it; the other returns at once.
+    threading.Thread(target=warm_up, name="warm-up", daemon=True).start()
+
+    if not arguments.no_browser:
+        import webbrowser
+
+        # Streamlit takes a couple of seconds to bind the port; opening the
+        # browser straight away gives a connection-refused page. The warm-up is
+        # started by the page itself, which every way of running this goes through.
+        threading.Timer(3.0, lambda: webbrowser.open(url)).start()
+
+    from streamlit.web import cli as stcli
+
+    sys.argv = command(arguments.file, port=port)[2:]  # drop "python -m"
+    try:
+        return int(stcli.main(standalone_mode=False) or 0)
+    except SystemExit as exit_code:  # click raises this on a clean stop
+        return int(exit_code.code or 0)
+    except KeyboardInterrupt:
+        print("\nstopped")
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

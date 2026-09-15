@@ -360,8 +360,10 @@ class MeasurementAnalysisWidget(QWidget):
         self._dashboard_button.setToolTip(
             "Open the squidpy dashboard on an .h5ad — neighbourhood enrichment, Ripley's L, "
             "co-occurrence and Moran's I, in a browser tab.\n\n"
-            "It runs as its own process: the spatial statistics are minutes of CPU that have "
-            "no business blocking the window the images are in."
+            "It runs as its own process, with a terminal of its own showing what it is "
+            "doing: the spatial statistics are minutes of CPU that have no business "
+            "blocking the window the images are in, and a page that is merely thinking "
+            "looks exactly like one that has hung."
         )
         self._dashboard_button.clicked.connect(self.open_dashboard)
         row.addWidget(self._dashboard_button)
@@ -1143,7 +1145,9 @@ class MeasurementAnalysisWidget(QWidget):
         self._dashboard_process = process
         self._status.setText(
             f"Dashboard starting at {url} on {Path(path).name} — it opens in your browser in "
-            "a few seconds. Closing the viewer leaves it running."
+            "a few seconds. A terminal opens with it: that is where it says which step it is "
+            "on and how long each took. Closing the viewer leaves it running; closing the "
+            "terminal stops it."
         )
 
     def export_folder_anndata(self) -> None:

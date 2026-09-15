@@ -104,6 +104,11 @@ Issues = "https://github.com/daggermaster3000/ARGUS/issues"
 
 [project.scripts]
 microscopy-viewer = "microscopy_viewer.__main__:main"
+# Deliberately a console script and not a gui-script: the dashboard's terminal is
+# the feature, not an accident. The first neighbour search on a plate takes the
+# better part of a minute and a browser tab that is merely sitting there looks
+# exactly like one that has hung.
+microscopy-viewer-dashboard = "microscopy_viewer.dashboard:main"
 
 [project.gui-scripts]
 # Same entry point without a console window attached, which is what a double-click

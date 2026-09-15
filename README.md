@@ -1023,11 +1023,60 @@ the plate — 29 644 objects, 750 per image, 44 wells, leiden -> 17 groups
 — the β-catenin signal comes in patches rather than cell by cell, and every
 phenotype keeps its own company, which for an organoid is what you would hope.
 
-It can also be run by hand, with or without the viewer:
+#### Running it on its own
+
+The dashboard is a program in its own right and does not need the viewer:
 
 ```powershell
-streamlit run microscopy_viewer/dashboard_app.py -- --file G_07_0.h5ad
+python -m microscopy_viewer.dashboard G_07_0.h5ad     # or: microscopy-viewer-dashboard
+python install_shortcut.py --dashboard                 # a desktop shortcut for it
 ```
+
+**The terminal is the feature.** The shortcut opens a console and leaves it open,
+and so does the viewer's button. A plate's first analysis spends ten to fifteen
+seconds inside numba compiling scanpy's kernels, and a browser tab that is merely
+thinking looks exactly like one that has hung. The console says which step it is
+on and what each cost:
+
+```
+Microscopy Viewer — spatial dashboard
+http://localhost:8501
+Close this window to stop the server.
+
+16:12:03  microscopy_viewer.dashboard  warm-up: compiled in 9.9 s; the first real run will not pay this
+16:12:20  microscopy_viewer.dashboard  prepare: 29644 x 27 scaled, 15 component(s), 0.4 s
+16:12:32  microscopy_viewer.dashboard  neighbours: exact (scikit-learn), k=15 over 29644 object(s) in 12.0 s
+16:12:33  microscopy_viewer.dashboard  cluster: leiden found 14 group(s) in 0.8 s
+16:12:33  microscopy_viewer.dashboard  neighbours: reusing the graph already built (k=15)
+16:12:43  microscopy_viewer.dashboard  umap: 29644 object(s) laid out in 10.1 s
+```
+
+Closing the terminal stops the server; closing the viewer does not.
+
+**It is served to this machine only.** Streamlit's own default binds every
+interface, which on a university network would put an unauthenticated page
+holding your object tables in front of anyone who can route to it. This binds
+`127.0.0.1`.
+
+#### Why it used to be slow, and is less so
+
+A plate embedding was 48 s and is now 26 s, none of it from doing less work:
+
+| | Before | After |
+|---|---|---|
+| neighbour graph, 30 000 objects | 35 s — pynndescent, mostly numba compiling | **12 s** — scikit-learn, exact |
+| the same graph for the UMAP | built a second time | **reused** |
+| the compiler's fixed cost | paid on the first click | **paid at start-up**, in the background |
+
+The neighbour search is nearly all of the cost, and nearly all of *that* was
+compilation rather than arithmetic: pynndescent's parallel kernels cannot be
+written to numba's on-disk cache, so the price is paid on every launch. Below
+60 000 objects scikit-learn's **exact** search is handed to scanpy instead — no
+compilation, no approximation, four times faster end to end. Above it the exact
+search's quadratic term wins and pynndescent is the right tool again.
+
+What remains is compiled while the browser is still opening, so a per-image
+analysis that used to take 14 s now takes 0.1 s.
 
 `pip install "microscopy-viewer[dashboard]"`, which includes `leidenalg` — without
 it scanpy cannot run Leiden and the dashboard falls back to k-means, which needs

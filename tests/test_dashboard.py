@@ -117,6 +117,101 @@ def test_starting_it() -> None:
         check(hint == "", "nothing missing, nothing to say")
 
 
+def test_running_it_standalone() -> None:
+    print("starting it on its own")
+
+    argv = db.module_command("objects.h5ad", port=8600)
+    check(
+        argv[1:3] == ["-m", "microscopy_viewer.dashboard"],
+        f"the shortcut runs this package, not streamlit directly: {argv[1:3]}",
+    )
+    check("objects.h5ad" in argv and "8600" in argv, f"with the file and the port: {argv[3:]}")
+    check(
+        "--no-browser" not in argv,
+        "and opens a browser by default, which is the whole point of a shortcut",
+    )
+    check(
+        "--no-browser" in db.module_command("x.h5ad", open_browser=False),
+        "unless it is told not to",
+    )
+    check(
+        db.module_command(None)[3] == "--port",
+        f"no file is still a valid start: {db.module_command(None)[1:]}",
+    )
+
+    # The page is served to this machine and no further. Streamlit's own default
+    # binds every interface, which on a university network puts an unauthenticated
+    # page holding the object tables in front of anyone who can route to it.
+    streamlit_argv = db.command("x.h5ad", port=8600)
+    check(
+        "--server.address" in streamlit_argv
+        and streamlit_argv[streamlit_argv.index("--server.address") + 1] == "127.0.0.1",
+        "it binds to loopback only, not to every interface",
+    )
+
+
+def test_the_warm_up() -> None:
+    print("paying the compiler up front")
+
+    if not _has("scanpy"):
+        print("  skip scanpy is not installed")
+        return
+
+    first = db.warm_up()
+    check(first >= 0.0, f"the warm-up runs ({first:.1f} s)")
+    second = db.warm_up()
+    check(
+        second == 0.0,
+        "and only once per process — two callers racing it would compile twice",
+    )
+
+    # What it bought: scanpy's connectivity kernels cost twelve to fifteen seconds
+    # to compile whatever the size of the data, so a small analysis afterwards is
+    # a hundred times faster than the same one cold.
+    import anndata as ad
+
+    rng = np.random.default_rng(0)
+    toy = ad.AnnData(X=rng.normal(size=(800, 8)).astype(np.float32))
+    toy.obsm["X_pca"] = np.asarray(toy.X)
+    import time as _time
+
+    started = _time.perf_counter()
+    db.neighbours(toy, n_neighbors=10)
+    elapsed = _time.perf_counter() - started
+    check(elapsed < 3.0, f"a real graph afterwards takes under three seconds ({elapsed:.1f} s)")
+
+
+def test_the_neighbour_graph_is_reused() -> None:
+    print("not building the same graph twice")
+
+    if not _has("scanpy"):
+        print("  skip scanpy is not installed")
+        return
+    import anndata as ad
+
+    rng = np.random.default_rng(2)
+    adata = ad.AnnData(X=rng.normal(size=(600, 8)).astype(np.float32))
+    adata.obsm["X_pca"] = np.asarray(adata.X)
+
+    first = db.neighbours(adata, n_neighbors=10)
+    check("neighbours" in first and "already built" not in first, f"the first call builds it: {first}")
+    again = db.neighbours(adata, n_neighbors=10)
+    check("already built" in again, f"the second reuses it: {again}")
+    check(
+        "already built" not in db.neighbours(adata, n_neighbors=20),
+        "but a different k is a different graph and is built",
+    )
+    check(
+        "already built" not in db.neighbours(adata, n_neighbors=20, force=True),
+        "and force rebuilds whatever is there",
+    )
+
+    check(
+        db.EXACT_NEIGHBOURS_LIMIT > 0,
+        "there is a size past which the approximate search takes over",
+    )
+
+
 def test_reading_and_slicing(directory: Path) -> None:
     print("one image out of a plate")
 
@@ -406,6 +501,12 @@ def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-dashboard-"))
     try:
         test_starting_it()
+        print()
+        test_running_it_standalone()
+        print()
+        test_the_warm_up()
+        print()
+        test_the_neighbour_graph_is_reused()
         print()
         for name, test in (
             ("slice", test_reading_and_slicing),

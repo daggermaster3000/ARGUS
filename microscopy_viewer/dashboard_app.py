@@ -35,6 +35,29 @@ from microscopy_viewer import dashboard as db  # noqa: E402
 
 st.set_page_config(page_title="Spatial dashboard", layout="wide")
 
+# Streamlit reruns this file on every interaction, so this is called many times;
+# configure_logging only attaches a handler once. The timings it prints are the
+# only sign, in the console the shortcut opens, that a forty-second neighbour
+# search is working rather than hung.
+db.configure_logging()
+
+
+@st.cache_resource(show_spinner=False)
+def _warm_up_once() -> bool:
+    """Compile the numba kernels in the background, while the page is being read.
+
+    Streamlit reruns this file on every interaction; the cache is what makes this
+    happen once per server rather than once per click. A daemon thread, so it
+    never holds the process open.
+    """
+    import threading
+
+    threading.Thread(target=db.warm_up, name="warm-up", daemon=True).start()
+    return True
+
+
+_warm_up_once()
+
 PLOT_HEIGHT = 5.0
 
 

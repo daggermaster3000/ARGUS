@@ -30,6 +30,12 @@ from pathlib import Path
 SHORTCUT_NAME = "Microscopy Viewer"
 PROJECT_ROOT = Path(__file__).resolve().parent
 LAUNCHER = PROJECT_ROOT / "launch_viewer.py"
+
+#: The dashboard shortcut. Always a console shortcut, never a windowless one: the
+#: terminal is the point. A plate's first neighbour search takes the better part
+#: of a minute, and a browser tab that is merely sitting there looks exactly like
+#: one that has hung — the console is where it says which step it is on.
+DASHBOARD_NAME = "Microscopy Viewer Dashboard"
 ASSETS = PROJECT_ROOT / "assets"
 DESCRIPTION = "Open microscopy images (.ims, TIFF, OME-TIFF, OME-Zarr) in napari"
 
@@ -169,9 +175,16 @@ link.Save
             pass
 
 
-def create_shortcut(directory: Path, name: str, console: bool) -> Path:
-    """Write ``<directory>/<name>.lnk`` pointing at the launcher."""
-    if not LAUNCHER.exists():
+def create_shortcut(
+    directory: Path, name: str, console: bool, arguments: str | None = None
+) -> Path:
+    """Write ``<directory>/<name>.lnk``.
+
+    *arguments* defaults to the viewer's launcher script; the dashboard passes
+    ``-m microscopy_viewer.dashboard`` instead, which is the same environment and
+    a different program.
+    """
+    if arguments is None and not LAUNCHER.exists():
         raise InstallError(f"launcher not found: {LAUNCHER}")
 
     interpreter = find_interpreter(console)
@@ -179,7 +192,8 @@ def create_shortcut(directory: Path, name: str, console: bool) -> Path:
         raise InstallError(f"interpreter not found: {interpreter}")
 
     link = directory / f"{name}.lnk"
-    arguments = f'"{LAUNCHER}"'
+    if arguments is None:
+        arguments = f'"{LAUNCHER}"'
     icon = ensure_icon()
 
     if not _write_with_pywin32(link, interpreter, arguments, PROJECT_ROOT, icon):
@@ -223,14 +237,44 @@ def _check_environment() -> list[str]:
     return problems
 
 
+def _check_dashboard() -> list[str]:
+    """Warn about anything the dashboard needs and does not have."""
+    problems: list[str] = []
+    for module, note in (
+        ("streamlit", "required — the dashboard is a Streamlit page"),
+        ("anndata", "required — it reads .h5ad"),
+        ("scanpy", "required — scaling, PCA, clustering"),
+        ("squidpy", "required — the spatial statistics"),
+        ("matplotlib", "required — every plot on the page"),
+        ("leidenalg", "strongly recommended — without it the clustering falls back to k-means"),
+        ("sklearn", "recommended — the exact neighbour search, four times faster than the default"),
+    ):
+        try:
+            __import__(module)
+        except Exception:
+            problems.append(f"{module} is not installed ({note})")
+    return problems
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--name", default=SHORTCUT_NAME, help=f"shortcut name (default: {SHORTCUT_NAME})")
+    parser.add_argument("--name", default=None, help=f"shortcut name (default: {SHORTCUT_NAME})")
     parser.add_argument("--start-menu", action="store_true", help="also create a Start Menu entry")
     parser.add_argument("--no-desktop", action="store_true", help="skip the desktop shortcut")
     parser.add_argument("--console", action="store_true", help="launch via python.exe so a console stays open")
+    parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="make the spatial dashboard's shortcut instead of the viewer's; it always "
+        "keeps its console, which is where the timings appear",
+    )
     parser.add_argument("--uninstall", action="store_true", help="delete the shortcuts instead of creating them")
     args = parser.parse_args(argv)
+
+    # The dashboard is a console program by definition, whatever --console says.
+    console = bool(args.console or args.dashboard)
+    arguments = "-m microscopy_viewer.dashboard" if args.dashboard else None
+    name = args.name or (DASHBOARD_NAME if args.dashboard else SHORTCUT_NAME)
 
     targets: list[tuple[str, Path]] = []
     if not args.no_desktop:
@@ -243,24 +287,32 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.uninstall:
         for label, directory in targets:
-            if remove_shortcut(directory, args.name):
-                print(f"Removed: {directory / (args.name + '.lnk')}")
+            if remove_shortcut(directory, name):
+                print(f"Removed: {directory / (name + '.lnk')}")
             else:
-                print(f"Not present on the {label}: {args.name}.lnk")
+                print(f"Not present on the {label}: {name}.lnk")
         return 0
 
-    problems = _check_environment()
+    problems = _check_dashboard() if args.dashboard else _check_environment()
     for problem in problems:
         print(f"warning: {problem}")
 
     for label, directory in targets:
-        link = create_shortcut(directory, args.name, args.console)
+        link = create_shortcut(directory, name, console, arguments)
         print(f"{label} shortcut created: {link}")
 
     print()
-    print(f"Interpreter : {find_interpreter(args.console)}")
-    print(f"Launcher    : {LAUNCHER}")
-    print("Double-click the shortcut to start, or drop image files onto it to open them.")
+    print(f"Interpreter : {find_interpreter(console)}")
+    if args.dashboard:
+        print("Runs        : -m microscopy_viewer.dashboard")
+        print(
+            "Double-click the shortcut to start the dashboard. A terminal opens with it "
+            "and stays open: that is where the timings appear, and closing it stops the "
+            "server."
+        )
+    else:
+        print(f"Launcher    : {LAUNCHER}")
+        print("Double-click the shortcut to start, or drop image files onto it to open them.")
     if problems:
         print("\nInstall the missing packages listed above before using the shortcut.")
         return 1
