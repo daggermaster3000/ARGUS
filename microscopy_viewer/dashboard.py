@@ -23,6 +23,13 @@ computed on one image at a time, and :func:`select_image` is how the page gets
 one — a neighbourhood graph built across a whole plate would join objects in
 different wells because they happen to sit at the same corner of each.
 
+**One colour per group, everywhere.** A cluster is the same colour in the UMAP,
+in the well, in the composition bar and in the box plot, because reading these
+means carrying a colour from one panel to the next. :func:`colour_map` is the
+single place that decides, and its palette is forty long rather than matplotlib's
+ten — a plate that clusters into seventeen drew clusters 0 and 10 in the same
+blue before it existed.
+
 **The neighbour search is the whole cost.** Everything else here is seconds; the
 k-nearest-neighbour graph the clustering and the UMAP are both built on is not,
 and which library computes it matters more than anything else on this page. See
@@ -94,6 +101,62 @@ EXACT_NEIGHBOURS_LIMIT = 60_000
 #: objects: nuclei touch their neighbours, and a fixed radius in micrometres
 #: either misses them in a sparse field or joins half the well in a dense one.
 GRAPH_MODES = ("delaunay", "knn", "radius")
+
+
+#: Colours groups are drawn in, in order. Forty of them rather than matplotlib's
+#: ten: a plate that clusters into seventeen drew cluster 0 and cluster 10 in the
+#: same blue, in every plot, with nothing to say they were different.
+#:
+#: Ordered greedily by CIELAB distance -- each colour is the one furthest from
+#: everything already in the list -- so the first twenty are at least 22 deltaE
+#: apart, which is well past telling-apart. A palette that merely *has* forty
+#: entries is not enough when the tenth and the eleventh are two similar blues.
+PALETTE: tuple[str, ...] = (
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#843c39", "#e7cb94",
+    "#ce6dbd", "#9edae5", "#bcbd22", "#d62728", "#637939",
+    "#ff9896", "#7f7f7f", "#a1d99b", "#c5b0d5", "#6b6ecf",
+    "#7b4173", "#e7ba52", "#8c6d31", "#393b79", "#6baed6",
+    "#b5cf6b", "#c49c94", "#17becf", "#fdae6b", "#c7c7c7",
+    "#d6616b", "#de9ed6", "#9c9ede", "#e6550d", "#31a354",
+    "#f7b6d2", "#8ca252", "#aec7e8", "#cedb9c", "#9467bd",
+    "#74c476", "#756bb1", "#fd8d3c", "#c7e9c0", "#a55194",
+)
+
+#: Drawn for a group the palette has run out of colours for. Grey on purpose: an
+#: unnamed colour repeated is worse than an obvious "and the rest".
+OVERFLOW_COLOUR = "#bbbbbb"
+
+
+def colour_map(categories: Sequence[Any]) -> dict[str, str]:
+    """``{category: hex}``, assigned by position and stable for a given order.
+
+    Every plot on the page takes its colours from one of these, so a cluster is
+    the same colour in the UMAP, in the well, in the composition bar and in the
+    box plot. Reading a figure means carrying a colour from one panel to the next,
+    and a page where that does not hold is a page that cannot be read.
+    """
+    names = [str(value) for value in categories]
+    return {
+        name: PALETTE[index] if index < len(PALETTE) else OVERFLOW_COLOUR
+        for index, name in enumerate(names)
+    }
+
+
+def colours_for(values: Sequence[Any], mapping: dict[str, str]) -> list[str]:
+    """One colour per value, looked up in *mapping*."""
+    return [mapping.get(str(value), OVERFLOW_COLOUR) for value in values]
+
+
+def scale_for(mapping: dict[str, str]) -> tuple[list[str], list[str]]:
+    """``(domain, range)`` for a Vega colour scale, in the mapping's own order."""
+    return list(mapping), [mapping[name] for name in mapping]
+
+
+def group_colours(adata, key: str = CLUSTER_KEY) -> dict[str, str]:
+    """The colour map for a categorical column of *adata*, in its category order."""
+    column = adata.obs[key]
+    categories = list(column.cat.categories) if hasattr(column, "cat") else sorted(set(column))
+    return colour_map(categories)
 
 
 # ---------------------------------------------------------------------------

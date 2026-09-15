@@ -979,6 +979,13 @@ It sits behind an **Embed the plate** button because it is the slow one — abou
 45 s for 30 000 objects — and is remembered afterwards, so recolouring the map
 costs nothing.
 
+**Point at anything to see what it is.** The scatters are interactive: hovering a
+point names its well, its cluster and its label, which is how you find out whether
+a corner of the map is one well or many. The composition bars say the well, the
+cluster and the share. Above 20 000 points the plot is subsampled and says so —
+the page holds the data for hovering, and all of them would stop the tab
+responding.
+
 Two things to hold on to. Distances between clusters on a UMAP mean nothing; only
 what is together and what is apart does. And a cluster that turns out to be 98 %
 one well is usually that well looking different — staining, focus, density —
@@ -1057,6 +1064,26 @@ Closing the terminal stops the server; closing the viewer does not.
 interface, which on a university network would put an unauthenticated page
 holding your object tables in front of anyone who can route to it. This binds
 `127.0.0.1`.
+
+#### Colour
+
+One colour per group, in every plot on the tab: the UMAP, the well, the
+composition bar, the box plot, Ripley's lines, the co-occurrence curves, and the
+tick labels of the enrichment matrix. Reading these means carrying a colour from
+one panel to the next, and a page where that does not hold cannot be read.
+
+The palette is forty colours rather than matplotlib's ten, ordered greedily by
+CIELAB distance so that the first twenty are at least 22 ΔE apart. Both halves
+matter: with the default cycle a plate clustering into fourteen drew **clusters 0
+and 10 in the same blue, 1 and 11 in the same orange, 2/12 and 3/13 likewise** —
+four colliding pairs, in every plot, with nothing to say they were different.
+Past forty groups the extras go grey rather than repeating a colour that already
+means something else; hovering still names them.
+
+Colours are shared *within* a tab, not across. The plate tab clusters every well
+together and the spatial tabs cluster one well on its own, so cluster 3 in one is
+not cluster 3 in the other — colouring them alike would claim a sameness that is
+not there, and the page says so.
 
 #### Why it used to be slow, and is less so
 

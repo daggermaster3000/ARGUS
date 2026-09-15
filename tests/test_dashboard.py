@@ -212,6 +212,77 @@ def test_the_neighbour_graph_is_reused() -> None:
     )
 
 
+def test_colours_are_shared() -> None:
+    print("one colour per group, everywhere")
+
+    groups = [str(i) for i in range(17)]
+    mapping = db.colour_map(groups)
+    check(len(mapping) == 17, "a colour for every group")
+    check(
+        len(set(mapping.values())) == 17,
+        f"all of them distinct ({len(set(mapping.values()))}) — matplotlib's own cycle is "
+        "ten long, so a plate that clusters into seventeen drew 0 and 10 the same blue",
+    )
+    check(mapping["0"] != mapping["10"], "which is exactly the pair that used to clash")
+    check(
+        all(colour.startswith("#") and len(colour) == 7 for colour in mapping.values()),
+        "hex, which is what both matplotlib and Vega take",
+    )
+    check(
+        db.colour_map(groups) == mapping,
+        "and the same every time, or a plot redrawn would recolour itself",
+    )
+    check(
+        db.colour_map(["a", "b"])["a"] == db.colour_map(["a", "z"])["a"],
+        "assigned by position, so two plots of the same groups in the same order agree",
+    )
+
+    many = db.colour_map([str(i) for i in range(len(db.PALETTE) + 5)])
+    check(
+        list(many.values()).count(db.OVERFLOW_COLOUR) == 5,
+        "past the end of the palette the extras go grey, rather than repeating a "
+        "colour that already means something else",
+    )
+
+    check(
+        db.colours_for(["1", "2", "nope"], mapping)
+        == [mapping["1"], mapping["2"], db.OVERFLOW_COLOUR],
+        "looking values up gives one colour per value, and grey for a stranger",
+    )
+
+    domain, scheme = db.scale_for(mapping)
+    check(
+        domain == groups and scheme == [mapping[g] for g in groups],
+        "and a Vega scale comes out in the mapping's own order",
+    )
+
+
+def test_colours_follow_the_categories(directory: Path) -> None:
+    print("the colour map comes off the data")
+
+    if not _has("anndata"):
+        print("  skip anndata is not installed")
+        return
+    import pandas as pd
+
+    path = _plate_file(directory, images=2, per_image=40)
+    adata = db.stratified_subsample(db.read(path), 40)
+    adata.obs[db.CLUSTER_KEY] = pd.Categorical(
+        ["a", "b"] * (adata.n_obs // 2), categories=["a", "b"]
+    )
+
+    mapping = db.group_colours(adata)
+    check(list(mapping) == ["a", "b"], f"in the category order, not alphabetical luck: {list(mapping)}")
+    check(
+        db.group_colours(adata, "well") != mapping or adata.obs["well"].nunique() == 2,
+        "a different column gets its own map",
+    )
+    check(
+        len(db.group_colours(adata, "well")) == adata.obs["well"].nunique(),
+        "with one entry per well",
+    )
+
+
 def test_reading_and_slicing(directory: Path) -> None:
     print("one image out of a plate")
 
@@ -508,12 +579,15 @@ def main() -> int:
         print()
         test_the_neighbour_graph_is_reused()
         print()
+        test_colours_are_shared()
+        print()
         for name, test in (
             ("slice", test_reading_and_slicing),
             ("analysis", test_the_analysis),
             ("plate", test_the_whole_plate),
             ("composition", test_composition_and_the_plate_grid),
             ("umap", test_the_embedding),
+            ("colours", test_colours_follow_the_categories),
             ("blanks", test_blanks_do_not_poison_the_pca),
         ):
             case = directory / name

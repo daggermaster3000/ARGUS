@@ -6,6 +6,16 @@ the page — widgets, layout, and the plots. Started from the viewer by the
 
     streamlit run microscopy_viewer/dashboard_app.py -- --file G_07_0.h5ad
 
+The scatters are Altair rather than matplotlib, so a point can be hovered and say
+which well and which cluster it belongs to — the question every one of these
+plots provokes. Altair ships with Streamlit, so this costs no dependency. The
+heatmaps and line plots stay matplotlib, which draws them better and which
+nothing is gained by hovering.
+
+Colour is decided in one place, :func:`microscopy_viewer.dashboard.colour_map`,
+and every plot takes it from there: a cluster is the same colour in the UMAP, in
+the well, in the composition bar and in the box plot.
+
 There are two questions here, and they do not mix. **Across the plate** asks
 which wells hold which phenotypes, in feature space, using every well at once.
 The other three tabs ask where those phenotypes sit inside one well, which is
@@ -24,6 +34,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import altair as alt
 import numpy as np
 import streamlit as st
 
@@ -59,6 +70,100 @@ def _warm_up_once() -> bool:
 _warm_up_once()
 
 PLOT_HEIGHT = 5.0
+
+#: Points drawn in an interactive scatter. Vega holds the data in the page, so a
+#: hoverable plot of half a million points is a browser tab that stops responding;
+#: this is where hovering stays instant.
+HOVER_POINT_LIMIT = 20_000
+
+# Vega refuses more than five thousand rows unless told otherwise, which is well
+# below a single well.
+alt.data_transformers.disable_max_rows()
+
+
+def _points(adata, x, y, colour: str, extra: list[str] | None = None):
+    """A DataFrame of what to plot, with the columns the tooltip will show."""
+    import pandas as pd
+
+    frame = pd.DataFrame({"x": np.asarray(x, dtype=float), "y": np.asarray(y, dtype=float)})
+    frame["object"] = list(adata.obs_names)
+    for name in [colour] + list(extra or []):
+        if name and name not in frame.columns:
+            try:
+                frame[name] = db.values_of(adata, name)
+            except KeyError:
+                continue
+    return frame
+
+
+def _scatter(
+    frame,
+    colour: str,
+    mapping: dict | None,
+    x_title: str,
+    y_title: str,
+    tooltips: list[str],
+    height: int = 460,
+    equal: bool = False,
+    flip_y: bool = False,
+):
+    """An Altair scatter that says what a point is when you point at it.
+
+    *mapping* fixes the colours to the ones every other plot on the page uses; a
+    continuous column passes ``None`` and gets a viridis scale instead.
+    """
+    shown = frame
+    note = ""
+    if len(frame) > HOVER_POINT_LIMIT:
+        shown = frame.sample(HOVER_POINT_LIMIT, random_state=0).sort_index()
+        note = (
+            f"{HOVER_POINT_LIMIT:,} of {len(frame):,} points drawn — the page holds the "
+            "data for hovering, and all of them would stop the tab responding."
+        )
+
+    if mapping is not None:
+        domain, scheme = db.scale_for(mapping)
+        encoding = alt.Color(
+            f"{colour}:N",
+            scale=alt.Scale(domain=domain, range=scheme),
+            legend=alt.Legend(title=colour, symbolSize=80),
+        )
+    else:
+        values = shown[colour].astype(float)
+        low, high = (float(v) for v in np.nanpercentile(values, [1, 99]))
+        encoding = alt.Color(
+            f"{colour}:Q",
+            scale=alt.Scale(scheme="viridis", domain=[low, high], clamp=True),
+            legend=alt.Legend(title=colour),
+        )
+
+    chart = (
+        alt.Chart(shown)
+        .mark_circle(size=14, opacity=0.75)
+        .encode(
+            x=alt.X("x:Q", title=x_title, scale=alt.Scale(zero=False, nice=False)),
+            y=alt.Y(
+                "y:Q",
+                title=y_title,
+                scale=alt.Scale(zero=False, nice=False, reverse=flip_y),
+            ),
+            color=encoding,
+            tooltip=[alt.Tooltip(name, title=name) for name in tooltips if name in shown.columns],
+        )
+        .properties(height=height)
+        .interactive()
+    )
+    return chart, note
+
+
+def _tooltip_columns(adata, colour: str) -> list[str]:
+    """What a point should say about itself: where it is, and what it is."""
+    wanted = ["object", db.CLUSTER_KEY, "well", db.IMAGE_KEY, "label", colour]
+    seen: list[str] = []
+    for name in wanted:
+        if name and name not in seen and (name == "object" or name in adata.obs or name in adata.var_names):
+            seen.append(name)
+    return seen
 
 
 def _argument_file() -> str:
@@ -178,6 +283,12 @@ def _plate_tab(path: str, mtime: float) -> None:
             f"**{whole.n_obs:,} objects** from {whole.obs[db.IMAGE_KEY].nunique()} images "
             f"· {plate_method} into {len(plate_groups)} · {how}"
         )
+        st.caption(
+            "Every plot in this tab shares one colour per cluster. The spatial tabs "
+            "cluster one well on its own, so their colours are a different set of "
+            "groups — cluster 3 here and cluster 3 there are not the same thing, and "
+            "colouring them alike would claim they were."
+        )
         if not db.clustered_with_leiden(whole):
             st.warning(
                 f"Grouped with **{plate_method}** because leidenalg is not installed. "
@@ -196,28 +307,29 @@ def _plate_tab(path: str, mtime: float) -> None:
                 [db.CLUSTER_KEY, "well", "row", "column"] + db.feature_names(whole),
                 key="umap_colour",
             )
-            figure = _figure(6.5, 6.0)
-            axes = figure.add_subplot(111)
-            if colour_by in whole.obs and str(whole.obs[colour_by].dtype) == "category":
-                levels = list(whole.obs[colour_by].cat.categories)
-                for level in levels:
-                    mask = (whole.obs[colour_by] == level).to_numpy()
-                    axes.scatter(umap[mask, 0], umap[mask, 1], s=3, linewidths=0, label=str(level))
-                if len(levels) <= 24:
-                    axes.legend(markerscale=4, fontsize=6, frameon=False, ncol=2)
-                else:
-                    axes.set_title(f"{len(levels)} {colour_by}s — too many to label", fontsize=8)
-            else:
-                values = db.values_of(whole, colour_by).astype(float)
-                low, high = np.nanpercentile(values, [1, 99])
-                dots = axes.scatter(umap[:, 0], umap[:, 1], c=values, s=3, linewidths=0,
-                                    cmap="viridis", vmin=low, vmax=high)
-                figure.colorbar(dots, ax=axes, shrink=0.75, label=colour_by)
-            axes.set_xlabel("UMAP 1", fontsize=8)
-            axes.set_ylabel("UMAP 2", fontsize=8)
-            axes.set_xticks([])
-            axes.set_yticks([])
-            st.pyplot(figure)
+            categorical = (
+                colour_by in whole.obs and str(whole.obs[colour_by].dtype) == "category"
+            )
+            mapping = db.group_colours(whole, colour_by) if categorical else None
+            tooltips = _tooltip_columns(whole, colour_by)
+            frame = _points(whole, umap[:, 0], umap[:, 1], colour_by, extra=tooltips)
+            chart, note = _scatter(
+                frame, colour_by, mapping, "UMAP 1", "UMAP 2", tooltips, height=520
+            )
+            st.altair_chart(chart)
+            hints = [
+                "Point at an object to see its well and its cluster — which is how you "
+                "find out whether a corner of this map is one well or many."
+            ]
+            if note:
+                hints.append(note)
+            if mapping is not None and db.OVERFLOW_COLOUR in mapping.values():
+                spare = sum(1 for c in mapping.values() if c == db.OVERFLOW_COLOUR)
+                hints.append(
+                    f"{spare} of the {len(mapping)} {colour_by}s share grey — the palette "
+                    "holds forty distinct colours and this is past it. Hover still names them."
+                )
+            st.caption(" ".join(hints))
             st.caption(
                 "Distances between clusters on a UMAP mean nothing; only what is "
                 "together and what is apart does. Two wells landing in different "
@@ -229,7 +341,33 @@ def _plate_tab(path: str, mtime: float) -> None:
         with right:
             st.subheader("What each well is made of")
             shares = db.composition(whole, by="well")
-            st.bar_chart(shares)
+            stacked = shares.reset_index()
+            stacked = stacked.melt(
+                id_vars=stacked.columns[0], var_name=db.CLUSTER_KEY, value_name="share"
+            )
+            stacked.columns = ["well", db.CLUSTER_KEY, "share"]
+            stacked[db.CLUSTER_KEY] = stacked[db.CLUSTER_KEY].astype(str)
+            plate_colours = db.colour_map(plate_groups)
+            plate_domain, plate_scheme = db.scale_for(plate_colours)
+            st.altair_chart(
+                alt.Chart(stacked)
+                .mark_bar()
+                .encode(
+                    x=alt.X("well:N", title=None, sort=list(shares.index)),
+                    y=alt.Y("share:Q", stack="normalize", axis=alt.Axis(format="%")),
+                    color=alt.Color(
+                        f"{db.CLUSTER_KEY}:N",
+                        scale=alt.Scale(domain=plate_domain, range=plate_scheme),
+                        legend=alt.Legend(title="cluster"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("well:N"),
+                        alt.Tooltip(f"{db.CLUSTER_KEY}:N", title="cluster"),
+                        alt.Tooltip("share:Q", format=".1%"),
+                    ],
+                )
+                .properties(height=260),
+            )
             st.caption(
                 "The share of each well's objects in each cluster — shares rather "
                 "than counts, because the wells hold wildly different numbers of "
@@ -238,6 +376,13 @@ def _plate_tab(path: str, mtime: float) -> None:
 
             st.subheader("As a plate")
             which = st.selectbox("Share of cluster", plate_groups, key="plate_group")
+            swatch = plate_colours.get(str(which), db.OVERFLOW_COLOUR)
+            st.markdown(
+                f'<span style="display:inline-block;width:12px;height:12px;'
+                f'background:{swatch};border-radius:2px;margin-right:6px;"></span>'
+                f"cluster {which}, the same colour it is above",
+                unsafe_allow_html=True,
+            )
             grid = db.plate_grid(shares, which)
             values = grid.to_numpy(dtype=float)
             # A well the plate does not have must not look like a well full of this
@@ -366,6 +511,7 @@ def main() -> None:
         st.stop()
 
     groups = list(adata.obs[db.CLUSTER_KEY].cat.categories)
+    colours = db.group_colours(adata)
     st.caption(
         f"**{adata.n_obs:,} objects**"
         + (f" from {image}" if image else "")
@@ -388,33 +534,49 @@ def main() -> None:
                 "Colour by",
                 [db.CLUSTER_KEY] + db.feature_names(adata) + db.obs_columns(adata, numeric_only=True),
             )
-            figure = _figure(7.0, 6.0)
-            axes = figure.add_subplot(111)
             xy = np.asarray(adata.obsm["spatial"])
-            if colour == db.CLUSTER_KEY:
-                for group in groups:
-                    mask = (adata.obs[db.CLUSTER_KEY] == group).to_numpy()
-                    axes.scatter(xy[mask, 0], xy[mask, 1], s=4, linewidths=0, label=str(group))
-                axes.legend(markerscale=3, fontsize=7, frameon=False, loc="upper right")
-            else:
-                values = db.values_of(adata, colour).astype(float)
-                low, high = np.nanpercentile(values, [1, 99])
-                dots = axes.scatter(
-                    xy[:, 0], xy[:, 1], c=values, s=4, linewidths=0,
-                    cmap="viridis", vmin=low, vmax=high,
-                )
-                figure.colorbar(dots, ax=axes, shrink=0.75, label=colour)
-            axes.set_xlabel("x (um)", fontsize=8)
-            axes.set_ylabel("y (um)", fontsize=8)
-            axes.set_aspect("equal")
-            axes.invert_yaxis()  # image convention: y runs down
-            axes.tick_params(labelsize=7)
-            st.pyplot(figure)
+            points = _points(adata, xy[:, 0], xy[:, 1], colour, extra=_tooltip_columns(adata, colour))
+            chart, note = _scatter(
+                points,
+                colour,
+                colours if colour == db.CLUSTER_KEY else None,
+                "x (um)",
+                "y (um)",
+                _tooltip_columns(adata, colour) + ["x", "y"],
+                height=520,
+                # Image convention: y runs down the well, as it does in the viewer.
+                flip_y=True,
+            )
+            st.altair_chart(chart)
+            st.caption(
+                "Point at an object to see which cluster it is in and what it measures. "
+                + note
+            )
 
         with right:
             st.subheader("How many of each")
             counts = adata.obs[db.CLUSTER_KEY].value_counts().sort_index()
-            st.bar_chart(counts)
+            import pandas as pd
+
+            tally = counts.rename("objects").reset_index()
+            tally.columns = [db.CLUSTER_KEY, "objects"]
+            tally[db.CLUSTER_KEY] = tally[db.CLUSTER_KEY].astype(str)
+            domain, scheme = db.scale_for(colours)
+            st.altair_chart(
+                alt.Chart(tally)
+                .mark_bar()
+                .encode(
+                    x=alt.X(f"{db.CLUSTER_KEY}:N", sort=domain, title="cluster"),
+                    y=alt.Y("objects:Q"),
+                    color=alt.Color(
+                        f"{db.CLUSTER_KEY}:N",
+                        scale=alt.Scale(domain=domain, range=scheme),
+                        legend=None,
+                    ),
+                    tooltip=["cluster", "objects"],
+                )
+                .properties(height=200),
+            )
             st.dataframe(
                 counts.rename("objects").to_frame().assign(
                     share=lambda frame: (frame["objects"] / frame["objects"].sum()).map("{:.1%}".format)
@@ -435,7 +597,15 @@ def main() -> None:
             # The ticks are set afterwards rather than passed in: matplotlib
             # renamed boxplot's `labels` to `tick_labels` in 3.9 and removed the
             # old spelling, and this has to draw on both sides of that.
-            axes.boxplot(data, showfliers=False)
+            drawn = axes.boxplot(data, showfliers=False, patch_artist=True)
+            # Painted to match: a box plot beside a scatter of the same groups in
+            # different colours is two plots the reader has to reconcile by hand.
+            for patch, group in zip(drawn["boxes"], groups):
+                patch.set_facecolor(colours.get(str(group), db.OVERFLOW_COLOUR))
+                patch.set_alpha(0.85)
+                patch.set_edgecolor("0.3")
+            for median in drawn["medians"]:
+                median.set_color("0.2")
             axes.set_xticks(range(1, len(groups) + 1), [str(g) for g in groups], rotation=45)
             axes.set_ylabel(feature, fontsize=8)
             axes.tick_params(labelsize=7)
@@ -449,17 +619,20 @@ def main() -> None:
             pair = st.selectbox(
                 "against", [f for f in db.feature_names(adata) if f != feature], key="pair"
             )
-            figure = _figure()
-            axes = figure.add_subplot(111)
             x, y = db.values_of(adata, feature), db.values_of(adata, pair)
-            for group in groups:
-                mask = (adata.obs[db.CLUSTER_KEY] == group).to_numpy()
-                axes.scatter(x[mask], y[mask], s=4, linewidths=0, alpha=0.5, label=str(group))
-            axes.set_xlabel(feature, fontsize=8)
-            axes.set_ylabel(pair, fontsize=8)
-            axes.legend(markerscale=3, fontsize=7, frameon=False)
-            axes.tick_params(labelsize=7)
-            st.pyplot(figure)
+            frame = _points(adata, x, y, db.CLUSTER_KEY, extra=_tooltip_columns(adata, feature))
+            chart, note = _scatter(
+                frame,
+                db.CLUSTER_KEY,
+                colours,
+                feature,
+                pair,
+                _tooltip_columns(adata, db.CLUSTER_KEY) + ["x", "y"],
+                height=380,
+            )
+            st.altair_chart(chart)
+            if note:
+                st.caption(note)
 
     # -- does it mean anything ------------------------------------------------
     with space:
@@ -486,6 +659,12 @@ def main() -> None:
                 image_plot = axes.imshow(zscore, cmap="RdBu_r", vmin=-limit_z, vmax=limit_z)
                 axes.set_xticks(range(len(groups)), [str(g) for g in groups], rotation=45, fontsize=7)
                 axes.set_yticks(range(len(groups)), [str(g) for g in groups], fontsize=7)
+                # The tick labels carry the group's colour, so a cell in this matrix
+                # can be traced back to the two clusters in the scatter above.
+                for ticks in (axes.get_xticklabels(), axes.get_yticklabels()):
+                    for tick, group in zip(ticks, groups):
+                        tick.set_color(colours.get(str(group), db.OVERFLOW_COLOUR))
+                        tick.set_fontweight("bold")
                 figure.colorbar(image_plot, ax=axes, shrink=0.8, label="z-score")
                 st.pyplot(figure)
 
@@ -503,7 +682,10 @@ def main() -> None:
                 table = result["L_stat"]
                 for group in groups:
                     part = table[table[db.CLUSTER_KEY] == group]
-                    axes.plot(part["bins"], part["stats"], label=str(group), linewidth=1.2)
+                    axes.plot(
+                        part["bins"], part["stats"], label=str(group), linewidth=1.2,
+                        color=colours.get(str(group), db.OVERFLOW_COLOUR),
+                    )
                 if "sims_stat" in result:
                     sims = result["sims_stat"]
                     axes.plot(sims["bins"], sims["stats"], color="0.6", linestyle="--",
@@ -528,7 +710,10 @@ def main() -> None:
                 figure = _figure(6.0, 4.5)
                 axes = figure.add_subplot(111)
                 for position, group in enumerate(groups):
-                    axes.plot(interval[:-1], occ[index, position, :], label=str(group), linewidth=1.2)
+                    axes.plot(
+                        interval[:-1], occ[index, position, :], label=str(group), linewidth=1.2,
+                        color=colours.get(str(group), db.OVERFLOW_COLOUR),
+                    )
                 axes.axhline(1.0, color="0.6", linestyle="--", linewidth=1.0)
                 axes.set_xlabel("distance (um)", fontsize=8)
                 axes.set_ylabel(f"p(group | {anchor}) / p(group)", fontsize=8)
