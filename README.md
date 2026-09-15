@@ -929,6 +929,68 @@ was measured.
 `pip install "microscopy-viewer[analysis]"` for the writer; squidpy is left to
 you, since what it pulls in depends on the analysis.
 
+### Spatial dashboard
+
+`.h5ad` in hand, **Spatial dashboard…** in the Measurement analysis panel opens a
+browser tab with the squidpy statistics already wired up. It runs as its own
+process: the spatial work is minutes of CPU that has no business blocking the
+window the images are in, and Streamlit's event loop would fight Qt's. Closing
+the viewer leaves it running.
+
+Three tabs, in the order of the argument:
+
+| Tab | What it answers |
+|---|---|
+| **Where they are** | the well as a scatter, coloured by phenotype or by any measurement, with how many objects fall in each group |
+| **What they are** | which measurements separate the groups — a box per group, and any two features against each other |
+| **Does it mean anything** | neighbourhood enrichment, Ripley's L, co-occurrence, Moran's I, centrality |
+
+**Objects are grouped first**, because every neighbourhood statistic needs a label
+per object. Either a Leiden clustering on the features — phenotypes, but ones you
+then have to interpret — or **bins of one measurement**, which is cruder and far
+easier to explain: quartiles of solidity is a perfectly good question to ask a
+neighbourhood about, and one you can defend in a figure legend.
+
+**The graph is a Delaunay triangulation by default**, which joins each object to
+the ones it actually abuts. A fixed radius in micrometres misses the neighbours
+in a sparse field and joins half the well in a dense one. kNN and radius are
+there when you want them.
+
+**These are not genes.** The preparation is a z-score and a PCA, not the
+log1p-and-highly-variable-genes recipe a scanpy tutorial opens with — that belongs
+to counts, and taking the log of a solidity is not a thing to do. Scaling is still
+needed, because integrated intensity is six figures and solidity is below one.
+
+**One image at a time.** `obsm["spatial"]` holds positions *within a well*, so two
+wells overlap in that space; a graph across a plate would join objects that are
+merely in the same corner of different wells. The sidebar picks the image, and a
+run is subsampled above 20 000 objects — a permutation test on fifty thousand is
+minutes, on eight thousand it is seconds and the answer is the same shape.
+
+What it looks like on a real well:
+
+```
+G/07 cycle 1, 8000 of 18428 objects, leiden -> 10 groups, Delaunay
+  neighbourhood enrichment   strongest self-association z = 36.6
+  Moran's I  Median intensity (Green488-bCAT)  0.563   p_adj = 0
+             Median intensity (FarRed641-CDH1) 0.540   p_adj = 0
+```
+
+— the β-catenin signal comes in patches rather than cell by cell, and every
+phenotype keeps its own company, which for an organoid is what you would hope.
+
+It can also be run by hand, with or without the viewer:
+
+```powershell
+streamlit run microscopy_viewer/dashboard_app.py -- --file G_07_0.h5ad
+```
+
+`pip install "microscopy-viewer[dashboard]"`. A **separate extra** from
+`[analysis]` on purpose: squidpy brings scanpy, scikit-learn and a graph library,
+and because the dashboard is its own process it can perfectly well live in an
+environment of its own rather than beside napari. The button says exactly what is
+missing if it is not installed, and starts nothing.
+
 ### Third-party napari plugins
 
 Most napari plugins declare their input as `napari.types.ImageData` and then treat
@@ -1123,6 +1185,8 @@ microscopy_viewer/
   registration.py           atlas registration and the per-region readout; no Qt
   segmentation.py           Cellpose segmentation, the GPU device, per-object stats; no Qt
   analysis.py               object tables read back in: label colouring, plot helpers; no Qt
+  dashboard.py              the spatial dashboard's own analysis, and starting it; no Qt
+  dashboard_app.py          the Streamlit page: run by streamlit, not imported by the viewer
   batch.py                  plate-wide segmentation: survey, run, NGFF label writing; no Qt
   explorer.py               browsing a plate: rows, miniatures, layer building, table folders; no Qt
   exports.py                snapshots and the Excel workbook
@@ -1200,6 +1264,7 @@ python tests/test_segmentation.py   # segmentation engine, units, object table �
 python tests/test_batch.py          # plate survey, channel matching, NGFF label writing — no Qt; cellpose is never run
 python tests/test_analysis.py       # object tables, colour scales, label colouring — no Qt needed
 python tests/test_explorer.py       # plate rows, miniatures, layer building, table folders — no Qt needed
+python tests/test_dashboard.py      # dashboard slicing, grouping, squidpy calls — no Qt; the squidpy half skips without it
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 

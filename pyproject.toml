@@ -80,6 +80,18 @@ analysis = [
     "h5py>=3.6",
 ]
 
+# The spatial dashboard. A separate extra from `analysis` because it is a much
+# larger install -- squidpy brings scanpy, scikit-learn and a graph library --
+# and because the dashboard runs as its own process, so it can perfectly well
+# live in an environment of its own rather than beside napari.
+dashboard = [
+    "anndata>=0.9",
+    "streamlit>=1.28",
+    "squidpy>=1.3",
+    "scanpy>=1.9",
+    "matplotlib>=3.5",
+]
+
 [project.urls]
 Homepage = "https://github.com/daggermaster3000/ARGUS"
 Issues = "https://github.com/daggermaster3000/ARGUS/issues"

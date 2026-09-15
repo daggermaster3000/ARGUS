@@ -28,6 +28,10 @@ lists those folders and the tables in them. The file box still takes any path;
 the lists are there so that finding the run you just did is two clicks rather
 than a walk through a file dialog.
 
+**And out again.** *Export as AnnData* writes the table as ``.h5ad`` for squidpy
+and the rest of the single-cell stack, and *Spatial dashboard* opens one in a
+browser with the neighbourhood statistics already wired up.
+
 matplotlib and pandas are imported lazily, the way the intensity panel does it,
 so this module costs nothing at startup.
 """
@@ -220,6 +224,8 @@ class MeasurementAnalysisWidget(QWidget):
         #: Analysis folders beside the plate the File explorer last scanned.
         self._folders: list[Path] = []
         self._listed: list[Path] = []
+        #: The dashboard process, once one has been started from here.
+        self._dashboard_process = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -349,6 +355,16 @@ class MeasurementAnalysisWidget(QWidget):
         )
         self._export_folder_button.clicked.connect(self.export_folder_anndata)
         row.addWidget(self._export_folder_button)
+
+        self._dashboard_button = QPushButton("Spatial dashboard…")
+        self._dashboard_button.setToolTip(
+            "Open the squidpy dashboard on an .h5ad — neighbourhood enrichment, Ripley's L, "
+            "co-occurrence and Moran's I, in a browser tab.\n\n"
+            "It runs as its own process: the spatial statistics are minutes of CPU that have "
+            "no business blocking the window the images are in."
+        )
+        self._dashboard_button.clicked.connect(self.open_dashboard)
+        row.addWidget(self._dashboard_button)
         outer.addLayout(row)
         return page
 
@@ -1071,6 +1087,64 @@ class MeasurementAnalysisWidget(QWidget):
             logger.debug("could not step to the object's plane", exc_info=True)
 
     # -- out to the single-cell stack -----------------------------------------
+
+    # -- the dashboard --------------------------------------------------------
+
+    def _dashboard_candidate(self) -> Path | None:
+        """The ``.h5ad`` the dashboard should open, guessed from what is loaded.
+
+        The combined file for the plate if there is one, else the file beside the
+        table that is open. Only a default — the dialog is still shown, because
+        guessing which of several analyses someone means is not something to do
+        silently.
+        """
+        folder = self._folder_box.currentData()
+        if folder is not None:
+            combined = Path(folder).parent / f"{Path(folder).name}.h5ad"
+            if combined.exists():
+                return combined
+        if self._path is not None:
+            beside = analysis.anndata_path(self._path)
+            if beside.exists():
+                return beside
+            return beside.parent / beside.name
+        return None
+
+    def open_dashboard(self) -> None:
+        """Start the squidpy dashboard on an ``.h5ad``, in a browser."""
+        from .. import dashboard
+
+        missing = dashboard.missing_packages()
+        if missing:
+            self._status.setText(dashboard.install_hint(missing).replace("\n\n", " "))
+            QMessageBox.information(self, "Spatial dashboard", dashboard.install_hint(missing))
+            return
+
+        candidate = self._dashboard_candidate()
+        path, _selected = QFileDialog.getOpenFileName(
+            self,
+            "Open in the spatial dashboard",
+            str(candidate or Path.home()),
+            "AnnData (*.h5ad);;All files (*)",
+        )
+        if not path:
+            return
+
+        try:
+            process, url = dashboard.launch(path)
+        except Exception as exc:  # noqa: BLE001 - shown, not raised
+            logger.exception("could not start the dashboard")
+            self._status.setText(f"Could not start the dashboard: {exc}")
+            QMessageBox.critical(self, "Spatial dashboard", str(exc))
+            return
+
+        # Held so the process is not garbage-collected mid-start, and so a second
+        # press can see that one is already running.
+        self._dashboard_process = process
+        self._status.setText(
+            f"Dashboard starting at {url} on {Path(path).name} — it opens in your browser in "
+            "a few seconds. Closing the viewer leaves it running."
+        )
 
     def export_folder_anndata(self) -> None:
         """Combine every table in the chosen folder into one ``.h5ad``."""
