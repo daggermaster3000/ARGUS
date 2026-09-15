@@ -741,6 +741,7 @@ seven times as long.
 | **Label set** | Name written under `labels/`. Give a second run a different name to keep both. |
 | **Pyramid level** | Which level to segment. 0 is full resolution; each step up halves the image and quarters the time. The panel shows the resulting extent and µm/px. |
 | **and an .h5ad beside each one** | Also write each table as AnnData for squidpy. See [Out to squidpy](#out-to-squidpy-scanpy-and-the-rest). |
+| **as one file for the whole run** | One `.h5ad` for the run rather than one per image, with the well and cycle in `obs["image"]`. The CSVs are written either way. |
 | **Tables** | A per-image object table and a plate-level summary CSV — one row per image with counts, median size, median solidity, how many the shape filter dropped, and what went wrong. |
 
 **The intensity columns say which channel they came from.** `Mean intensity` is
@@ -898,10 +899,32 @@ sq.gr.spatial_neighbors(adata)            # coordinates already in micrometres
 sq.gr.nhood_enrichment(adata, cluster_key="...")
 ```
 
-The Batch segmentation panel can write one beside every CSV as it goes — tick
-**and an .h5ad beside each one** — built from the measured numbers rather than by
-reading the CSV back, because a float that has been through a text file is not
-the float that was measured.
+**Or one file for the whole plate.** A plate is one experiment, and a folder of
+forty-four files is forty-four files to concatenate before anything can be asked
+about the plate as a whole. Two ways to get one:
+
+- **…the whole folder as one** in this panel combines every table in the folder
+  chosen under **Beside the plate**;
+- **as one file for the whole run** in the Batch segmentation panel writes it as
+  the run finishes, instead of one per image.
+
+The well and cycle go in `obs["image"]` and are appended to the object names —
+`100-G/09/0` — because label 100 exists in every well and concatenating without
+that would give forty-four objects the same name. Tables are joined **outer**:
+a 4i plate names its stains differently in every cycle, so two images can measure
+different columns, and the inner join that is usual for single-cell data would
+silently drop every column they did not share. A blank means "this image did not
+measure that", which is the truth and is visible.
+
+```python
+a = ad.read_h5ad("…_analysis-1_objects.h5ad")    # 557 915 x 27, 44 images
+well = a[a.obs["image"] == "G/09/0"]              # 46 394 objects
+```
+
+The Batch segmentation panel can write these as it goes — tick **and an .h5ad
+beside each one** — built from the measured numbers rather than by reading the
+CSV back, because a float that has been through a text file is not the float that
+was measured.
 
 `pip install "microscopy-viewer[analysis]"` for the writer; squidpy is left to
 you, since what it pulls in depends on the analysis.

@@ -435,6 +435,92 @@ def test_anndata_export(directory: Path) -> None:
         check("no numeric measurement" in str(exc), f"a table with no features is refused: {exc}")
 
 
+def test_combining_tables(directory: Path) -> None:
+    print("a plate in one file")
+
+    try:
+        import anndata as ad
+    except ImportError:
+        print("  skip anndata is not installed")
+        return
+
+    import pandas as pd
+
+    folder = directory / "combine"
+    folder.mkdir()
+
+    def write(stem, labels, extra=None):
+        frame = pd.DataFrame(
+            {
+                "Label": labels,
+                "Voxels": [10 * n for n in labels],
+                "Centroid Y (µm)": [float(n) for n in labels],
+                "Centroid X (µm)": [2.0 * n for n in labels],
+            }
+        )
+        if extra:
+            frame[extra] = [1.5 * n for n in labels]
+        frame.to_csv(folder / f"{stem}.csv", index=False, encoding="utf-8")
+        return folder / f"{stem}.csv"
+
+    first = write("B_02_0", [1, 2, 3])
+    second = write("G_09_0", [1, 2])
+
+    combined = analysis.combine_anndata([first, second])
+    check(combined.n_obs == 5, f"every object of every table ({combined.n_obs})")
+    check(
+        list(combined.obs[analysis.IMAGE_KEY]) == ["B/02/0"] * 3 + ["G/09/0"] * 2,
+        f"each block knows the image it came from: {list(combined.obs[analysis.IMAGE_KEY])}",
+    )
+    check(
+        list(combined.obs_names) == ["1-B/02/0", "2-B/02/0", "3-B/02/0", "1-G/09/0", "2-G/09/0"],
+        f"the image is appended to the name, because label 1 exists in every well: "
+        f"{list(combined.obs_names)}",
+    )
+    check(
+        len(set(combined.obs_names)) == combined.n_obs,
+        "no two objects share a name",
+    )
+    check(
+        list(combined.obs["label"]) == [1, 2, 3, 1, 2],
+        "the original label is kept, so a result still joins back to its own mask",
+    )
+    check(
+        combined.obsm["spatial"].shape == (5, 2),
+        f"the coordinates come along ({combined.obsm['spatial'].shape})",
+    )
+    check(
+        combined.uns["microscopy_viewer"]["n_tables"] == 2,
+        "and the file says how many tables went into it",
+    )
+
+    # A 4i plate names its stains differently every cycle, so two images can
+    # measure different columns. An inner join would drop them silently.
+    third = write("C_05_0", [1], extra="Mean intensity (Ab7_DAPI)")
+    wide = analysis.combine_anndata([first, third])
+    check(
+        "Mean intensity (Ab7_DAPI)" in wide.var_names,
+        f"a column only one image measured survives: {list(wide.var_names)}",
+    )
+    import numpy as _np
+
+    column = wide[:, "Mean intensity (Ab7_DAPI)"].X.ravel()
+    check(
+        bool(_np.isnan(column[:3]).all()) and not _np.isnan(column[3]),
+        f"blank for the images that did not measure it, which is the truth ({column})",
+    )
+
+    path = analysis.write_combined_anndata([first, second], directory / "plate.h5ad")
+    check(path.exists(), f"it writes ({path.name})")
+    check(ad.read_h5ad(path).n_obs == 5, "and reads back whole")
+
+    try:
+        analysis.combine_anndata([])
+        check(False, "combining nothing is refused")
+    except ValueError as exc:
+        check("no tables" in str(exc), f"combining nothing is refused: {exc}")
+
+
 def test_plot_helpers() -> None:
     print("plot helpers")
 
@@ -470,6 +556,8 @@ def main() -> int:
         test_finding_an_object(directory)
         print()
         test_anndata_export(directory)
+        print()
+        test_combining_tables(directory)
         print()
         for test in (
             test_column_detection,

@@ -268,6 +268,18 @@ class BatchSegmentationWidget(QWidget):
         self._write_tables.toggled.connect(self._write_anndata.setEnabled)
         form.addRow("", self._write_anndata)
 
+        self._anndata_one_file = QCheckBox("as one file for the whole run")
+        self._anndata_one_file.setToolTip(
+            "Write a single .h5ad for the run instead of one per image, with the well and "
+            "cycle in obs[\"image\"] and the object names made unique by it.\n\n"
+            "A plate is one experiment: a folder of forty-four files is forty-four files to "
+            "concatenate before anything can be asked about the plate as a whole. The "
+            "per-image CSVs are still written either way."
+        )
+        self._anndata_one_file.setEnabled(False)
+        self._write_anndata.toggled.connect(self._anndata_one_file.setEnabled)
+        form.addRow("", self._anndata_one_file)
+
         row = QWidget()
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
@@ -517,6 +529,7 @@ class BatchSegmentationWidget(QWidget):
             overwrite=self._overwrite.isChecked(),
             write_tables=self._write_tables.isChecked(),
             write_anndata=self._write_anndata.isChecked(),
+            anndata_single_file=self._anndata_one_file.isChecked(),
             table_dir=Path(table_dir) if table_dir else None,
         )
 
@@ -680,6 +693,11 @@ class BatchSegmentationWidget(QWidget):
                 report.summary_path = batch.write_summary(report, settings, self._survey)
             except Exception:
                 logger.exception("could not write the batch summary")
+            if settings.write_anndata and settings.anndata_single_file:
+                # Also drops the frames the run has been holding for this.
+                report.anndata_path = batch.write_combined_anndata(
+                    report, settings, self._survey
+                )
 
         # The explorer lists the tables beside the plate off an index it built when
         # it scanned; a run that has just written more of them makes that stale.
@@ -694,6 +712,8 @@ class BatchSegmentationWidget(QWidget):
         text = report.describe()
         if report.summary_path is not None:
             text += f" Summary: {report.summary_path}"
+        if report.anndata_path is not None:
+            text += f" AnnData: {report.anndata_path.name}"
         self._status.setText(text)
         logger.info("batch panel: %s", text)
         self._refresh_wells()

@@ -600,6 +600,43 @@ def test_anndata_beside_the_tables(directory: Path) -> None:
         "a run that did not ask for one does not write it",
     )
 
+    # One file for the whole run, rather than one per image.
+    every = batch.select_jobs(survey, acquisitions=[1])
+    one = _stub_settings(
+        overwrite=True,
+        write_tables=True,
+        write_anndata=True,
+        anndata_single_file=True,
+        table_dir=directory / "one",
+    )
+    one_report = batch.run_batch(every, one, survey=survey)
+    check(one_report.anndata_path is not None, "a combined file is written")
+    combined = ad.read_h5ad(one_report.anndata_path)
+    check(
+        combined.n_obs == one_report.total_objects,
+        f"holding every object of the run ({combined.n_obs} of {one_report.total_objects})",
+    )
+    check(
+        combined.obs["image"].nunique() == len(every),
+        f"tagged with the image each came from ({combined.obs['image'].nunique()} images)",
+    )
+    check(
+        len(set(combined.obs_names)) == combined.n_obs,
+        "with unique names, which label 1 in four wells is not",
+    )
+    check(
+        not list((directory / "one").glob("*_0.h5ad")),
+        "and no per-image files, since one file is what was asked for",
+    )
+    check(
+        len(list((directory / "one").glob("*_0.csv"))) == len(every),
+        "the per-image CSVs are still written either way",
+    )
+    check(
+        all(outcome.frame is None for outcome in one_report.outcomes),
+        "the frames it held to build the file are let go afterwards",
+    )
+
 
 def main() -> int:
     if not _has_zarr():

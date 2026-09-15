@@ -577,6 +577,15 @@ class BatchSettings:
     #: the rest of the single-cell stack. Costs a second per image and means the
     #: spatial analysis does not start with a folder of CSVs to convert by hand.
     write_anndata: bool = False
+    #: Write one ``.h5ad`` for the whole run rather than one per image, with the
+    #: well and cycle in ``obs["image"]``. A plate is one experiment, and a folder
+    #: of forty-four files is forty-four files to concatenate before anything can
+    #: be asked about the plate as a whole.
+    anndata_single_file: bool = False
+
+    def anndata_path(self, survey: "PlateSurvey") -> Path:
+        """Where the combined ``.h5ad`` for a whole run goes."""
+        return self.tables_root(survey) / f"{self.label_name}_objects.h5ad"
     #: Where those tables go. ``None`` puts them beside the plate.
     table_dir: Path | None = None
 
@@ -622,6 +631,12 @@ class ImageOutcome:
     #: this number" cannot be answered from the settings alone.
     measured_channel: str = ""
     measured_extra: tuple[str, ...] = ()
+    #: The object table as a DataFrame, kept only while a run is building one
+    #: combined AnnData and dropped as soon as it has. Holding every image's
+    #: numbers for a whole plate is about sixty megabytes; holding the masks too
+    #: would be a hundred gigabytes, which is why this is the frame and not the
+    #: result.
+    frame: Any = None
 
     @property
     def ok(self) -> bool:
@@ -635,6 +650,8 @@ class BatchReport:
     outcomes: list[ImageOutcome] = field(default_factory=list)
     elapsed_s: float = 0.0
     summary_path: Path | None = None
+    #: Where the one combined ``.h5ad`` went, when the run was asked for one.
+    anndata_path: Path | None = None
     cancelled: bool = False
 
     def counted(self, status: str) -> int:
@@ -694,7 +711,9 @@ def _table_name(job: ImageJob) -> str:
     return job.component.replace("/", "_")
 
 
-def _write_table(stats, path: Path, anndata: bool = False) -> tuple[Path | None, str]:
+def _write_table(
+    stats, path: Path, anndata: bool = False, keep_frame: bool = False
+) -> tuple[Path | None, str, Any]:
     """Write one image's object table. Returns ``(path, note)``.
 
     The AnnData copy is written from the same frame rather than by reading the CSV
@@ -705,21 +724,22 @@ def _write_table(stats, path: Path, anndata: bool = False) -> tuple[Path | None,
         frame = sg.object_dataframe(stats)
     except ImportError:
         logger.warning("pandas is not installed; the object tables were not written")
-        return None, "pandas is not installed, so no object table was written"
+        return None, "pandas is not installed, so no object table was written", None
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(path, index=False, encoding="utf-8")
+    kept = frame if keep_frame else None
     if not anndata:
-        return path, ""
+        return path, "", kept
     try:
         from .analysis import anndata_path, write_anndata
 
         write_anndata(frame, anndata_path(path), label_column="Label", source=path)
     except ImportError:
-        return path, "anndata is not installed, so no .h5ad was written beside the table"
+        return path, "anndata is not installed, so no .h5ad was written beside the table", kept
     except Exception as exc:  # noqa: BLE001 - the CSV is already safely on disk
         logger.exception("could not write the AnnData for %s", path.name)
-        return path, f"the .h5ad could not be written ({type(exc).__name__}: {exc})"
-    return path, ""
+        return path, f"the .h5ad could not be written ({type(exc).__name__}: {exc})", kept
+    return path, "", kept
 
 
 def segment_job(
@@ -825,8 +845,14 @@ def segment_job(
             measured_extra=tuple(extra) if extra is not None else (),
         )
         if settings.write_tables and stats:
-            outcome.table_path, note = _write_table(
-                stats, settings.table_path(job), anndata=settings.write_anndata
+            # One combined file is built from the frames rather than per-image
+            # files, so per-image ones are only written when they were asked for.
+            combining = settings.write_anndata and settings.anndata_single_file
+            outcome.table_path, note, outcome.frame = _write_table(
+                stats,
+                settings.table_path(job),
+                anndata=settings.write_anndata and not combining,
+                keep_frame=combining,
             )
             if note:
                 outcome.message = "; ".join(part for part in (outcome.message, note) if part)
@@ -872,8 +898,55 @@ def run_batch(
     report.elapsed_s = time.perf_counter() - started
     if settings.write_tables and survey is not None:
         report.summary_path = write_summary(report, settings, survey)
+        if settings.write_anndata and settings.anndata_single_file:
+            report.anndata_path = write_combined_anndata(report, settings, survey)
     logger.info("batch finished: %s", report.describe())
     return report
+
+
+def write_combined_anndata(
+    report: BatchReport, settings: BatchSettings, survey: PlateSurvey
+) -> Path | None:
+    """Write the run's one combined ``.h5ad``, and let go of the frames.
+
+    Built from the frames the run measured rather than by reading the CSVs back:
+    a float that has been through a text file is not the float that was measured,
+    and the whole point of the combined file is that the spatial analysis starts
+    from the numbers rather than from a conversion.
+    """
+    blocks = [
+        (outcome.job.component, outcome.frame)
+        for outcome in report.outcomes
+        if outcome.ok and outcome.frame is not None and len(outcome.frame)
+    ]
+    try:
+        if not blocks:
+            logger.info("nothing to combine; no objects were measured")
+            return None
+        from .analysis import combine_frames
+
+        combined = combine_frames(blocks, label_column="Label")
+        path = settings.anndata_path(survey)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        combined.write_h5ad(path)
+        logger.info(
+            "combined AnnData written to %s (%d object(s), %.1f MB)",
+            path,
+            combined.n_obs,
+            path.stat().st_size / 1024 / 1024,
+        )
+        return path
+    except ImportError:
+        logger.warning("anndata is not installed; the combined .h5ad was not written")
+        return None
+    except Exception:  # noqa: BLE001 - the tables are already safely on disk
+        logger.exception("could not write the combined AnnData")
+        return None
+    finally:
+        # The tables are on disk; a plate of frames is not worth keeping alive
+        # for the rest of the session just because the report is.
+        for outcome in report.outcomes:
+            outcome.frame = None
 
 
 def summary_rows(report: BatchReport) -> list[dict[str, Any]]:

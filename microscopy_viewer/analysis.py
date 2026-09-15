@@ -13,7 +13,8 @@ from. This module is the way back. Give it the table a run wrote and it will
   batch run gave it;
 * find one object in the image, from its centroid;
 * hand the whole table to `AnnData <https://anndata.readthedocs.io>`_, which is
-  what squidpy, scanpy and the rest of the single-cell stack read.
+  what squidpy, scanpy and the rest of the single-cell stack read -- one file per
+  image, or one for a whole plate with the well and cycle kept in ``obs``.
 
 No Qt and no napari here: the widget is a thin layer over these functions, and
 everything below is testable headless.
@@ -479,6 +480,122 @@ def write_anndata(
     adata.write_h5ad(target)
     logger.info("wrote %s (%.1f kB)", target, target.stat().st_size / 1024)
     return target
+
+
+#: Column the image is recorded under when tables are combined. ``image`` rather
+#: than ``batch``: it is a well and a cycle, and calling it a batch invites it to
+#: be handed to a batch-correction routine that has no business running here.
+IMAGE_KEY = "image"
+
+
+def combine_anndata(
+    sources: Sequence[str | Path],
+    label_column: str | None = None,
+    keys: Sequence[str] | None = None,
+    join: str = "outer",
+):
+    """One ``AnnData`` from several object tables, with the image kept in ``obs``.
+
+    Each table becomes a block of observations tagged with the image it came from
+    in ``obs[IMAGE_KEY]``, and the observation names are made unique by appending
+    it — ``100-G/09/0`` — because label 100 exists in every well and concatenating
+    without that would give forty-four objects the same name.
+
+    *join* is ``outer`` on purpose. A 4i plate names its stains differently in
+    every cycle, so two images can measure different columns; the inner join that
+    is usual for single-cell data would silently drop every column they did not
+    share, which here is most of them. Blanks in the result mean "this image did
+    not measure that", which is the truth and is visible.
+    """
+    import anndata as ad
+
+    paths = [Path(str(source)) for source in sources]
+    if not paths:
+        raise ValueError("no tables to combine")
+    names = list(keys) if keys is not None else [component_from_name(p.stem) or p.stem for p in paths]
+    if len(names) != len(paths):
+        raise ValueError(f"{len(paths)} table(s) and {len(names)} name(s)")
+
+    blocks: dict[str, Any] = {}
+    columns: dict[str, set] = {}
+    for path, name in zip(paths, names):
+        frame = read_table(path)
+        block = to_anndata(frame, label_column=label_column, source=path)
+        blocks[name] = block
+        columns[name] = set(block.var_names)
+
+    shared = set.intersection(*columns.values()) if columns else set()
+    everything = set().union(*columns.values()) if columns else set()
+    if shared != everything:
+        logger.warning(
+            "the tables do not all measure the same columns: %d shared of %d in total; "
+            "the missing ones are blank in the result",
+            len(shared),
+            len(everything),
+        )
+
+    combined = ad.concat(blocks, label=IMAGE_KEY, index_unique="-", join=join, merge="unique")
+    combined.uns["microscopy_viewer"] = {
+        "sources": [str(path) for path in paths],
+        "images": names,
+        "n_tables": len(paths),
+        "spatial_units": "micrometer",
+        "join": str(join),
+    }
+    logger.info(
+        "combined %d table(s): %d object(s) x %d feature(s)",
+        len(paths),
+        combined.n_obs,
+        combined.n_vars,
+    )
+    return combined
+
+
+def write_combined_anndata(
+    sources: Sequence[str | Path],
+    path: str | Path,
+    label_column: str | None = None,
+    keys: Sequence[str] | None = None,
+) -> Path:
+    """Combine several object tables into one ``.h5ad`` and return where it went."""
+    combined = combine_anndata(sources, label_column=label_column, keys=keys)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    combined.write_h5ad(target)
+    logger.info("wrote %s (%.1f MB)", target, target.stat().st_size / 1024 / 1024)
+    return target
+
+
+def combine_frames(blocks: "Sequence[tuple[str, Any]]", label_column: str | None = None):
+    """:func:`combine_anndata` for tables already in memory.
+
+    ``blocks`` is ``[(image, frame), ...]``. Used by a batch run, which has the
+    measured numbers in hand and should not write them to a CSV and read them back
+    to build the combined file — a float that has been through a text file is not
+    the float that was measured.
+    """
+    import anndata as ad
+
+    if not blocks:
+        raise ValueError("no tables to combine")
+    parts = {
+        str(name): to_anndata(frame, label_column=label_column, source=f"{name}.csv")
+        for name, frame in blocks
+    }
+    combined = ad.concat(parts, label=IMAGE_KEY, index_unique="-", join="outer", merge="unique")
+    combined.uns["microscopy_viewer"] = {
+        "images": list(parts),
+        "n_tables": len(parts),
+        "spatial_units": "micrometer",
+        "join": "outer",
+    }
+    logger.info(
+        "combined %d table(s) in memory: %d object(s) x %d feature(s)",
+        len(parts),
+        combined.n_obs,
+        combined.n_vars,
+    )
+    return combined
 
 
 def scatter_sample(count: int, limit: int = MAX_SCATTER_POINTS, seed: int = 0) -> np.ndarray | None:

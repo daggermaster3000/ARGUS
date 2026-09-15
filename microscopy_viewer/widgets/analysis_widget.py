@@ -40,6 +40,7 @@ import numpy as np
 from qtpy.QtCore import QAbstractTableModel, QModelIndex, Qt
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -332,12 +333,22 @@ class MeasurementAnalysisWidget(QWidget):
         row.addStretch(1)
         self._export_button = QPushButton("Export as AnnData…")
         self._export_button.setToolTip(
-            "Write the table as .h5ad: measurements in X, the label and centroids in obs, "
-            "and the centroid in obsm[\"spatial\"] — which is what squidpy builds its "
+            "Write this one table as .h5ad: measurements in X, the label and centroids in "
+            "obs, and the centroid in obsm[\"spatial\"] — which is what squidpy builds its "
             "neighbourhood graph from."
         )
         self._export_button.clicked.connect(self.export_anndata)
         row.addWidget(self._export_button)
+
+        self._export_folder_button = QPushButton("…the whole folder as one")
+        self._export_folder_button.setToolTip(
+            "Combine every table in the folder chosen under “Beside the plate” into a "
+            "single .h5ad, with the well and cycle in obs[\"image\"].\n\n"
+            "A plate is one experiment, and a folder of forty-four files is forty-four "
+            "files to concatenate before anything can be asked about the plate as a whole."
+        )
+        self._export_folder_button.clicked.connect(self.export_folder_anndata)
+        row.addWidget(self._export_folder_button)
         outer.addLayout(row)
         return page
 
@@ -1060,6 +1071,64 @@ class MeasurementAnalysisWidget(QWidget):
             logger.debug("could not step to the object's plane", exc_info=True)
 
     # -- out to the single-cell stack -----------------------------------------
+
+    def export_folder_anndata(self) -> None:
+        """Combine every table in the chosen folder into one ``.h5ad``."""
+        from .. import explorer
+
+        folder = self._folder_box.currentData()
+        if folder is None:
+            self._status.setText(
+                "No folder of tables chosen — scan a plate in the File explorer first, "
+                "or use “Export as AnnData…” for the table that is open."
+            )
+            return
+        tables = [
+            table for table in explorer.analysis_tables(folder)
+            if not table.stem.endswith("_summary")
+        ]
+        if not tables:
+            self._status.setText(f"No object tables in {Path(folder).name}.")
+            return
+
+        default = Path(folder).parent / f"{Path(folder).name}.h5ad"
+        path, _selected = QFileDialog.getSaveFileName(
+            self,
+            f"Combine {len(tables)} table(s) into one AnnData",
+            str(default),
+            "AnnData (*.h5ad);;All files (*)",
+        )
+        if not path:
+            return
+
+        # A plate of half a million objects takes a minute; say so before the
+        # window stops repainting rather than afterwards.
+        self._status.setText(f"Combining {len(tables)} table(s)…")
+        self._export_folder_button.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            written = analysis.write_combined_anndata(tables, path)
+        except ImportError:
+            self._status.setText(
+                "anndata is not installed — pip install \"microscopy-viewer[analysis]\", "
+                "or pip install anndata."
+            )
+            return
+        except Exception as exc:
+            logger.exception("could not combine %s", folder)
+            self._status.setText(f"Could not combine those tables: {exc}")
+            QMessageBox.critical(self, "Microscopy Viewer", f"Could not combine:\n{exc}")
+            return
+        finally:
+            self._export_folder_button.setEnabled(True)
+
+        import anndata as ad
+
+        combined = ad.read_h5ad(written, backed="r")
+        self._status.setText(
+            f"Wrote {written.name}: {combined.n_obs} object(s) from {len(tables)} image(s) "
+            f"x {combined.n_vars} feature(s), the image in obs[\"image\"]."
+        )
 
     def export_anndata(self) -> None:
         """Write the loaded table as ``.h5ad`` for squidpy and the rest of that stack."""
