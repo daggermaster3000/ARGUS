@@ -447,6 +447,107 @@ def test_tables(directory: Path) -> None:
     )
 
 
+def test_which_channel_was_measured(directory: Path) -> None:
+    print("the table says what it measured")
+
+    seg.register_backend(_StubBackend())
+    plate = _make_plate(directory)
+    survey = batch.survey_plate(plate)
+    jobs = batch.select_jobs(survey, wells=["B/02"], acquisitions=[1])
+
+    plain = batch.run_batch(jobs, _stub_settings(), survey=survey)
+    check(
+        plain.outcomes[0].measured_channel == "Ab1_DAPI",
+        f"an unqualified run records the segmented channel ({plain.outcomes[0].measured_channel})",
+    )
+    check(plain.outcomes[0].measured_extra == (), "and no others")
+
+    elsewhere = batch.run_batch(
+        jobs,
+        _stub_settings(
+            overwrite=True, measure=batch.ChannelPick(batch.BY_WAVELENGTH, "A02_C02")
+        ),
+        survey=survey,
+    )
+    check(
+        elsewhere.outcomes[0].measured_channel == "Green488-x1",
+        f"measuring elsewhere is recorded as such ({elsewhere.outcomes[0].measured_channel})",
+    )
+
+    # A 4i plate names the same stain differently every cycle, so a pick that
+    # matched in cycle 1 can match nothing in cycle 7. Falling back in silence
+    # would put the segmented channel's numbers under the reporter's heading.
+    absent = batch.run_batch(
+        jobs,
+        _stub_settings(overwrite=True, measure=batch.ChannelPick(batch.BY_WAVELENGTH, "A09_C09")),
+        survey=survey,
+    )
+    outcome = absent.outcomes[0]
+    check(outcome.ok, "an unmatched measure channel does not fail the image")
+    check(
+        outcome.measured_channel == "Ab1_DAPI",
+        "it falls back to the segmented channel, as it always did",
+    )
+    check(
+        "no channel matching" in outcome.message.lower()
+        and "segmented channel" in outcome.message,
+        f"but says so, which is the whole difference: {outcome.message}",
+    )
+
+
+def test_measuring_every_channel(directory: Path) -> None:
+    print("every channel in one run")
+
+    try:
+        import pandas as pd
+    except ImportError:
+        print("  skip pandas is not installed")
+        return
+
+    seg.register_backend(_StubBackend())
+    plate = _make_plate(directory)
+    survey = batch.survey_plate(plate)
+    jobs = batch.select_jobs(survey, wells=["B/02"], acquisitions=[1])
+
+    settings = _stub_settings(measure_all_channels=True, write_tables=True, table_dir=directory / "tables")
+    report = batch.run_batch(jobs, settings, survey=survey)
+    outcome = report.outcomes[0]
+
+    check(outcome.ok, f"the run finishes ({outcome.message})")
+    check(
+        outcome.measured_extra == ("Green488-x1",),
+        f"the other channel of the image was measured too ({outcome.measured_extra})",
+    )
+
+    frame = pd.read_csv(outcome.table_path)
+    check(
+        "Mean intensity (Green488-x1)" in frame.columns,
+        f"and reaches the written table: {list(frame.columns)[-3:]}",
+    )
+    check(
+        "Mean intensity" in frame.columns,
+        "beside the segmented channel's own columns, which keep their old names",
+    )
+    check(
+        frame["Mean intensity (Green488-x1)"].notna().all(),
+        "with a number for every object",
+    )
+    check(
+        not frame["Mean intensity"].equals(frame["Mean intensity (Green488-x1)"]),
+        "and the two channels really are measured separately",
+    )
+
+    summary = pd.read_csv(report.summary_path)
+    check(
+        summary["measured_channel"].iloc[0] == "Ab1_DAPI",
+        f"the plate summary names the channel too ({summary['measured_channel'].iloc[0]})",
+    )
+    check(
+        summary["extra_channels"].iloc[0] == "Green488-x1",
+        "and the extra ones, so a folder of tables can be read months later",
+    )
+
+
 def main() -> int:
     if not _has_zarr():
         print("zarr is not installed; the batch checks need it")
@@ -463,6 +564,8 @@ def main() -> int:
             ("run", test_a_run),
             ("resilience", test_one_bad_image_does_not_end_the_run),
             ("tables", test_tables),
+            ("measured", test_which_channel_was_measured),
+            ("allchannels", test_measuring_every_channel),
         ):
             case = directory / name
             case.mkdir()

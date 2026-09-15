@@ -7,6 +7,10 @@ you tick, and writes the masks back into the plate as NGFF ``labels`` groups.
 
 Two things are worth knowing before running one.
 
+**The plate comes from the File explorer panel.** Scan it there and this panel
+fills itself in. One store box for the window rather than one per panel: two
+paths to keep in step is two lists that can disagree about what is in the plate.
+
 **The Cellpose settings come from the Segmentation panel.** Model, diameter,
 mode, thresholds, GPU — all of it is read from there when Run is pressed, and
 shown here as a single line so there is no second copy to keep in step. Get one
@@ -38,8 +42,6 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -54,6 +56,7 @@ from qtpy.QtWidgets import (
 from .. import batch
 from .. import segmentation as sg
 from ..utils import get_logger
+from .plate_picker import WellAcquisitionPicker
 
 logger = get_logger("batch_widget")
 
@@ -63,6 +66,11 @@ NO_CHANNEL = "— none —"
 SAME_CHANNEL = "— the segmented channel —"
 
 RESULT_COLUMNS = ("Image", "Objects", "Seconds", "Status", "Note")
+
+#: What the panel says before a plate has been scanned. The scanning lives in the
+#: File explorer panel now, and a panel that only says "nothing selected" gives
+#: nobody any idea where to go.
+NO_PLATE = "Scan a plate in the File explorer panel; this one fills itself in."
 
 
 class BatchSegmentationWidget(QWidget):
@@ -99,7 +107,6 @@ class BatchSegmentationWidget(QWidget):
         page = QWidget()
         inner = QVBoxLayout(page)
         inner.setContentsMargins(0, 0, 0, 0)
-        inner.addWidget(self._build_plate_box())
         inner.addWidget(self._build_images_box())
         inner.addWidget(self._build_channels_box())
         inner.addWidget(self._build_preprocessing_box())
@@ -115,7 +122,7 @@ class BatchSegmentationWidget(QWidget):
         layout.addWidget(self._progress)
         layout.addWidget(self._build_results_table(), stretch=1)
 
-        self._status = QLabel("Choose a plate and press Scan.")
+        self._status = QLabel(NO_PLATE)
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
 
@@ -125,82 +132,13 @@ class BatchSegmentationWidget(QWidget):
 
     # -- construction ---------------------------------------------------------
 
-    def _build_plate_box(self) -> QGroupBox:
-        box = QGroupBox("Plate")
-        form = QFormLayout(box)
-        form.setLabelAlignment(Qt.AlignRight)
-
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        self._plate_edit = QLineEdit()
-        self._plate_edit.setPlaceholderText("…/AssayPlate.zarr")
-        self._plate_edit.setToolTip(
-            "The .zarr folder of an OME-Zarr plate — the one holding the row folders."
-        )
-        row_layout.addWidget(self._plate_edit, stretch=1)
-        browse = QPushButton("…")
-        browse.setMaximumWidth(30)
-        browse.clicked.connect(self._browse_plate)
-        row_layout.addWidget(browse)
-        form.addRow("Store", row)
-
-        buttons = QWidget()
-        button_layout = QHBoxLayout(buttons)
-        button_layout.setContentsMargins(0, 0, 0, 0)
-        scan = QPushButton("Scan the plate")
-        scan.setToolTip("Reads metadata only — no pixels — so this is quick even on a big plate.")
-        scan.clicked.connect(self.scan)
-        button_layout.addWidget(scan)
-        loaded = QPushButton("Use the loaded plate")
-        loaded.setToolTip("Take the path from the layer that is open in the viewer.")
-        loaded.clicked.connect(self._use_loaded_plate)
-        button_layout.addWidget(loaded)
-        button_layout.addStretch(1)
-        form.addRow("", buttons)
-
-        self._plate_summary = QLabel("No plate scanned yet.")
-        self._plate_summary.setWordWrap(True)
-        form.addRow("Contents", self._plate_summary)
-        return box
-
     def _build_images_box(self) -> QGroupBox:
         box = QGroupBox("Images to run")
         outer = QVBoxLayout(box)
 
-        lists = QHBoxLayout()
-        wells_column = QVBoxLayout()
-        wells_column.addWidget(QLabel("Wells"))
-        self._wells_list = QListWidget()
-        self._wells_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._wells_list.setToolTip("Ctrl-click and shift-click to choose. Everything by default.")
-        self._wells_list.itemSelectionChanged.connect(self._update_selection_summary)
-        wells_column.addWidget(self._wells_list)
-        lists.addLayout(wells_column, stretch=2)
-
-        cycles_column = QVBoxLayout()
-        cycles_column.addWidget(QLabel("Acquisitions"))
-        self._cycles_list = QListWidget()
-        self._cycles_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._cycles_list.setToolTip(
-            "The 4i cycles of the plate. One cycle is usually enough: the same cells are "
-            "imaged in every one, so segmenting them all gives you the same objects seven times."
-        )
-        self._cycles_list.itemSelectionChanged.connect(self._update_selection_summary)
-        cycles_column.addWidget(self._cycles_list)
-        lists.addLayout(cycles_column, stretch=1)
-        outer.addLayout(lists)
-
-        buttons = QHBoxLayout()
-        for text, handler in (
-            ("All wells", lambda: self._wells_list.selectAll()),
-            ("No wells", lambda: self._wells_list.clearSelection()),
-        ):
-            button = QPushButton(text)
-            button.clicked.connect(handler)
-            buttons.addWidget(button)
-        buttons.addStretch(1)
-        outer.addLayout(buttons)
+        self._picker = WellAcquisitionPicker(all_cycles=False, note=self._well_note)
+        self._picker.selectionChanged.connect(self._update_selection_summary)
+        outer.addWidget(self._picker)
 
         self._selection_summary = QLabel("—")
         self._selection_summary.setWordWrap(True)
@@ -233,6 +171,17 @@ class BatchSegmentationWidget(QWidget):
             "on the reporter to get signal per nucleus."
         )
         form.addRow("Measure", self._measure_box)
+
+        self._measure_all = QCheckBox("every channel, in columns of its own")
+        self._measure_all.setToolTip(
+            "Measure all four stains of each image, not only the one above, adding a set of "
+            "intensity columns per channel named after it.\n\n"
+            "One segmentation, four answers: it is the only way to ask whether the nuclei "
+            "DAPI picked out are the ones carrying the reporter. Costs one extra read of "
+            "each channel — seconds per image, not minutes."
+        )
+        self._measure_all.toggled.connect(self.refresh_settings_summary)
+        form.addRow("", self._measure_all)
         return box
 
     def _build_preprocessing_box(self) -> QGroupBox:
@@ -373,100 +322,37 @@ class BatchSegmentationWidget(QWidget):
 
     # -- plate ----------------------------------------------------------------
 
-    def _browse_plate(self) -> None:
-        start = self._plate_edit.text() or str(getattr(self._app, "last_directory", Path.home()))
-        path = QFileDialog.getExistingDirectory(self, "Choose an OME-Zarr plate", start)
-        if path:
-            self._plate_edit.setText(path)
-            self.scan()
-
     def _browse_tables(self) -> None:
-        start = self._table_dir.text() or self._plate_edit.text() or str(Path.home())
+        plate = str(self._survey.path) if self._survey is not None else ""
+        start = self._table_dir.text() or plate or str(Path.home())
         path = QFileDialog.getExistingDirectory(self, "Where to write the tables", start)
         if path:
             self._table_dir.setText(path)
 
-    def _use_loaded_plate(self) -> None:
-        """Take the plate path off a layer that is already open.
+    def plate_changed(self, survey) -> None:
+        """Take the plate the File explorer scanned and fill every list from it.
 
-        The readers record the file the layer came from, so the plate the user is
-        looking at is usually the plate they want to run — and it saves finding a
-        deeply nested store in a file dialog for the second time.
+        Called by the explorer rather than reached for, so this panel has no plate
+        of its own to get out of step with the one on screen.
         """
-        for layer in reversed(list(self._app.viewer.layers)):
-            meta = (getattr(layer, "metadata", {}) or {}).get("mv_metadata")
-            candidate = getattr(meta, "file_path", None)
-            if not candidate:
-                continue
-            path = Path(candidate)
-            for parent in [path, *path.parents]:
-                if parent.suffix.lower() in (".zarr", ".ngff"):
-                    self._plate_edit.setText(str(parent))
-                    self.scan()
-                    return
-        self._status.setText("No open layer came from a Zarr store.")
-
-    def scan(self) -> None:
-        """Read the plate's metadata and fill the wells, cycles and channel lists."""
-        text = self._plate_edit.text().strip().strip('"')
-        if not text:
-            self._status.setText("Choose the .zarr folder of a plate first.")
-            return
-        try:
-            survey = batch.survey_plate(Path(text))
-        except Exception as exc:
-            logger.exception("plate scan failed")
-            self._survey = None
-            self._plate_summary.setText("—")
-            self._status.setText(f"That is not a plate this can run: {exc}")
-            self._update_enabled()
-            return
-
         self._survey = survey
-        n_wells = len(survey.wells)
-        self._plate_summary.setText(
-            f"{survey.name}: {len(survey.jobs)} image(s), {n_wells} well(s), "
-            f"{len(survey.acquisitions)} acquisition(s)."
-        )
-        self._refresh_wells()
-        self._refresh_cycles()
+        self._picker.set_survey(survey)
         self._refresh_channels()
         self._update_level_note()
-        self._status.setText("Choose wells, cycles and channels, then run.")
+        self._status.setText(
+            f"{survey.name}: {len(survey.jobs)} image(s). "
+            "Choose wells, cycles and channels, then run."
+        )
         self._update_enabled()
 
-    def _refresh_wells(self) -> None:
-        """Rebuild the well list, marking the ones that already have this label set."""
-        if self._survey is None:
-            return
-        previous = {item.data(Qt.UserRole) for item in self._wells_list.selectedItems()}
+    def _well_note(self, job: batch.ImageJob) -> str:
+        """Marker beside a well that already carries the label set about to be written."""
         name = self._label_name.text().strip() or batch.DEFAULT_LABEL_NAME
-        done = {job.well for job in self._survey.jobs if batch.has_labels(job, name)}
+        return f" — has {name}" if batch.has_labels(job, name) else ""
 
-        self._wells_list.clear()
-        for well in self._survey.wells:
-            text = f"{well} — has {name}" if well in done else well
-            item = QListWidgetItem(text)
-            item.setData(Qt.UserRole, well)
-            self._wells_list.addItem(item)
-            item.setSelected(well in previous if previous else True)
-        self._update_selection_summary()
-
-    def _refresh_cycles(self) -> None:
-        if self._survey is None:
-            return
-        self._cycles_list.clear()
-        acquisitions = self._survey.acquisitions
-        for acquisition in acquisitions:
-            text = "—" if acquisition is None else f"cycle {acquisition}"
-            item = QListWidgetItem(text)
-            item.setData(Qt.UserRole, acquisition)
-            self._cycles_list.addItem(item)
-            # One cycle by default: on a 4i plate every cycle images the same
-            # cells, so selecting them all would segment the same nuclei
-            # seven times over and take seven times as long.
-            item.setSelected(acquisition == acquisitions[0])
-        self._update_selection_summary()
+    def _refresh_wells(self) -> None:
+        """Redraw the well list after the label name changed."""
+        self._picker.set_note(self._well_note)
 
     def _refresh_channels(self) -> None:
         if self._survey is None:
@@ -501,20 +387,14 @@ class BatchSegmentationWidget(QWidget):
 
     def selected_jobs(self) -> tuple[batch.ImageJob, ...]:
         """The images the current selection names."""
-        if self._survey is None:
-            return ()
-        wells = [item.data(Qt.UserRole) for item in self._wells_list.selectedItems()]
-        cycles = [item.data(Qt.UserRole) for item in self._cycles_list.selectedItems()]
-        return batch.select_jobs(
-            self._survey,
-            wells=wells if wells else None,
-            acquisitions=cycles if cycles else None,
-        )
+        return self._picker.selected_jobs()
 
     def _update_selection_summary(self) -> None:
         jobs = self.selected_jobs()
         if not jobs:
-            self._selection_summary.setText("Nothing selected.")
+            self._selection_summary.setText(
+                "Nothing selected." if self._survey is not None else NO_PLATE
+            )
             self._update_enabled()
             return
         name = self._label_name.text().strip() or batch.DEFAULT_LABEL_NAME
@@ -594,6 +474,8 @@ class BatchSegmentationWidget(QWidget):
             text += f", solidity ≤ {settings.max_solidity:g}"
         if self.median_radius() > 0:
             text += f", median r={self.median_radius()} px"
+        if self._measure_all.isChecked():
+            text += ", every channel measured"
         self._settings_summary.setText(f"{text} — {device.describe()}")
 
     def segmentation_settings(self) -> sg.SegmentationSettings:
@@ -616,6 +498,7 @@ class BatchSegmentationWidget(QWidget):
             channel=self._segment_box.currentData() or batch.ChannelPick(),
             nuclei=self._nuclei_box.currentData() or batch.ChannelPick(),
             measure=self._measure_box.currentData() or batch.ChannelPick(),
+            measure_all_channels=self._measure_all.isChecked(),
             label_name=self._label_name.text().strip() or batch.DEFAULT_LABEL_NAME,
             level=int(self._level.value()),
             overwrite=self._overwrite.isChecked(),
@@ -711,7 +594,7 @@ class BatchSegmentationWidget(QWidget):
             f"Segment {len(jobs)} image(s) and write the masks into the plate as "
             f"“{settings.label_name}”.",
             "",
-            f"Store: {self._plate_edit.text().strip()}",
+            f"Store: {self._survey.path if self._survey is not None else '—'}",
             f"Channel: {settings.channel.describe()}",
             f"Cellpose: {self._settings_summary.text()}",
         ]

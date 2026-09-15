@@ -33,6 +33,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Callable, Iterator, Sequence
 
 import numpy as np
@@ -558,6 +559,11 @@ class BatchSettings:
     #: Channel the per-object intensities are read from; unset means the
     #: segmented channel.
     measure: ChannelPick = field(default_factory=ChannelPick)
+    #: Measure every channel of the image, not only the one above, adding a set of
+    #: intensity columns per channel named after it. On a 4i cycle that is four
+    #: stains per object for one segmentation, and it is the only way to ask
+    #: whether the nuclei picked out by DAPI are the ones carrying the reporter.
+    measure_all_channels: bool = False
     #: Name of the label set written into each image.
     label_name: str = DEFAULT_LABEL_NAME
     #: Pyramid level segmented. 0 is full resolution; 1 is half, four times
@@ -606,6 +612,12 @@ class ImageOutcome:
     message: str = ""
     table_path: Path | None = None
     summary: dict[str, float] = field(default_factory=dict)
+    #: The channel the unqualified intensity columns were read from, and the
+    #: channels that got columns of their own. Recorded per image because a 4i
+    #: plate names the same stain differently in every cycle, so "which channel is
+    #: this number" cannot be answered from the settings alone.
+    measured_channel: str = ""
+    measured_extra: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -642,6 +654,35 @@ class BatchReport:
         parts.append(f"{self.elapsed_s / 60:.1f} min")
         head = "Cancelled after " if self.cancelled else ""
         return head + ", ".join(parts) + "."
+
+
+class _LazyChannels(Mapping):
+    """The image's other channels, read one at a time as they are measured.
+
+    A 12000x12000 plate image is 288 MB a channel; handing four of them to the
+    measurement as a plain dict would hold a gigabyte at once for numbers that are
+    consumed one channel at a time. Iterating this reads a channel, measures it
+    and lets it go.
+    """
+
+    def __init__(self, job: ImageJob, channels: Sequence[ChannelInfo], level: int):
+        self._job = job
+        self._channels = {_channel_name(channel): channel for channel in channels}
+        self._level = level
+
+    def __getitem__(self, key: str) -> np.ndarray:
+        return read_channel(self._job, self._channels[key], self._level)
+
+    def __iter__(self):
+        return iter(self._channels)
+
+    def __len__(self) -> int:
+        return len(self._channels)
+
+
+def _channel_name(channel: ChannelInfo) -> str:
+    """Short, stable column name for a channel: its label, else its wavelength."""
+    return channel.label or channel.wavelength_id or f"channel {channel.index}"
 
 
 def _table_name(job: ImageJob) -> str:
@@ -710,17 +751,45 @@ def segment_job(
             overwrite=settings.overwrite,
         )
 
-        signal = image
-        measured = settings.measure.resolve(job.channels)
-        if measured is not None and measured.index != channel.index:
-            candidate = read_channel(job, measured, settings.level)
-            if candidate.shape == image.shape:
-                signal = candidate
+        notes = list(result.warnings)
+        signal, measured_channel = image, channel
+        wanted = settings.measure
+        if wanted.is_set:
+            measured = wanted.resolve(job.channels)
+            if measured is None:
+                # Silence here would put the segmented channel's numbers in a
+                # column the user believes holds the reporter's.
+                notes.append(
+                    f"No channel matching {wanted.describe()} in this image; intensities were "
+                    f"measured on {_channel_name(channel)}, the segmented channel."
+                )
+            elif measured.index != channel.index:
+                candidate = read_channel(job, measured, settings.level)
+                if candidate.shape != image.shape:
+                    notes.append(
+                        f"{_channel_name(measured)} is {tuple(candidate.shape)} and "
+                        f"{_channel_name(channel)} is {tuple(image.shape)}; intensities were "
+                        "measured on the segmented channel instead."
+                    )
+                else:
+                    signal, measured_channel = candidate, measured
+
+        extra = None
+        if settings.measure_all_channels:
+            others = [
+                other for other in job.channels if other.index != measured_channel.index
+            ]
+            if others:
+                if progress is not None:
+                    progress(f"{job.describe()}: measuring {len(others)} further channel(s)")
+                extra = _LazyChannels(job, others, settings.level)
+
         stats = sg.object_table(
             result.masks,
             signal,
             result.voxel_size_um[-result.masks.ndim :],
             shapes=result.shapes,
+            extra_signals=extra,
         )
 
         outcome = ImageOutcome(
@@ -729,8 +798,10 @@ def segment_job(
             n_objects=result.n_objects,
             n_dropped=result.n_dropped,
             elapsed_s=time.perf_counter() - started,
-            message="; ".join(result.warnings),
+            message="; ".join(notes),
             summary=sg.count_summary(stats),
+            measured_channel=_channel_name(measured_channel),
+            measured_extra=tuple(extra) if extra is not None else (),
         )
         if settings.write_tables and stats:
             outcome.table_path = _write_table(stats, settings.table_path(job))
@@ -796,6 +867,8 @@ def summary_rows(report: BatchReport) -> list[dict[str, Any]]:
                 "status": outcome.status,
                 "n_objects": outcome.n_objects,
                 "n_dropped": outcome.n_dropped,
+                "measured_channel": outcome.measured_channel,
+                "extra_channels": " | ".join(outcome.measured_extra),
                 "median_solidity": totals.get("median_solidity", ""),
                 "median_volume_um3": totals.get("median_volume_um3", ""),
                 "median_diameter_um": totals.get("median_diameter_um", ""),

@@ -20,6 +20,12 @@ either side of it are shown.
 of that size takes seconds to build; a model over the DataFrame reads the cell
 that is on screen and nothing else.
 
+**The tables find you.** A batch run writes its object tables into a folder
+beside the plate, so when a plate is scanned in the File explorer this panel
+lists those folders and the tables in them. The file box still takes any path;
+the lists are there so that finding the run you just did is two clicks rather
+than a walk through a file dialog.
+
 matplotlib and pandas are imported lazily, the way the intensity panel does it,
 so this module costs nothing at startup.
 """
@@ -146,6 +152,10 @@ class MeasurementAnalysisWidget(QWidget):
         self._selected_rows = np.empty(0, dtype=int)
         self._selector = None
 
+        #: Analysis folders beside the plate the File explorer last scanned.
+        self._folders: list[Path] = []
+        self._listed: list[Path] = []
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.addWidget(self._build_file_box())
@@ -194,6 +204,26 @@ class MeasurementAnalysisWidget(QWidget):
         reload_button.clicked.connect(self.load)
         row_layout.addWidget(reload_button)
         form.addRow("File", row)
+
+        beside = QWidget()
+        beside_layout = QHBoxLayout(beside)
+        beside_layout.setContentsMargins(0, 0, 0, 0)
+        self._folder_box = QComboBox()
+        self._folder_box.setToolTip(
+            "Folders of measurement tables sitting beside the plate scanned in the File "
+            "explorer. A batch run writes one per label set: “…_nuclei_objects”."
+        )
+        self._folder_box.currentIndexChanged.connect(self._folder_chosen)
+        beside_layout.addWidget(self._folder_box, stretch=2)
+        self._beside_table_box = QComboBox()
+        self._beside_table_box.setToolTip(
+            "The tables in that folder — one per image, and the run's summary last.\n\n"
+            "Choosing one opens it."
+        )
+        self._beside_table_box.currentIndexChanged.connect(self._listed_table_chosen)
+        beside_layout.addWidget(self._beside_table_box, stretch=3)
+        form.addRow("Beside the plate", beside)
+        self._beside_row = beside
 
         self._table_summary = QLabel("Nothing loaded.")
         self._table_summary.setWordWrap(True)
@@ -387,6 +417,74 @@ class MeasurementAnalysisWidget(QWidget):
             return None
 
     # -- loading --------------------------------------------------------------
+
+    # -- tables beside the plate ---------------------------------------------
+
+    def plate_changed(self, survey) -> None:
+        """List the analysis folders sitting beside the plate the explorer scanned.
+
+        Nothing is opened: which of five label sets someone wants is not something
+        to guess at, and reading an 18 000-row table they did not ask for would
+        blank the one they are working on.
+        """
+        from .. import explorer
+
+        try:
+            self._folders = explorer.analysis_folders(survey.path)
+        except Exception:
+            logger.exception("could not list the folders beside %s", survey.path)
+            self._folders = []
+
+        self._updating = True
+        try:
+            self._folder_box.clear()
+            for folder in self._folders:
+                # The plate's own stem is on the front of every one of these and is
+                # forty characters long; what tells them apart is what follows it.
+                shown = folder.name
+                if shown.lower().startswith(survey.path.stem.lower()):
+                    shown = shown[len(survey.path.stem) :].lstrip("_-") or folder.name
+                self._folder_box.addItem(shown, folder)
+                self._folder_box.setItemData(
+                    self._folder_box.count() - 1, str(folder), Qt.ToolTipRole
+                )
+        finally:
+            self._updating = False
+
+        if self._folders:
+            self._folder_chosen()
+            self._status.setText(
+                f"{len(self._folders)} folder(s) of tables beside {survey.path.name}."
+            )
+        else:
+            self._beside_table_box.clear()
+            self._status.setText(f"No table folders beside {survey.path.name}.")
+
+    def _folder_chosen(self) -> None:
+        """Fill the table list for the chosen folder."""
+        from .. import explorer
+
+        folder = self._folder_box.currentData()
+        self._updating = True
+        try:
+            self._beside_table_box.clear()
+            self._listed = explorer.analysis_tables(folder) if folder else []
+            for table in self._listed:
+                self._beside_table_box.addItem(table.name, table)
+            # Nothing is loaded until a table is picked, so start on no row rather
+            # than silently pointing at the first one.
+            self._beside_table_box.setCurrentIndex(-1)
+        finally:
+            self._updating = False
+
+    def _listed_table_chosen(self) -> None:
+        if self._updating:
+            return
+        table = self._beside_table_box.currentData()
+        if table is None:
+            return
+        self._path_edit.setText(str(table))
+        self.load()
 
     def browse(self) -> None:
         start = self._path_edit.text() or str(Path.home() / "Documents")

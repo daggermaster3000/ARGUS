@@ -33,7 +33,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import math
 import numpy as np
@@ -294,6 +294,12 @@ class ObjectStat:
     circularity: float = float("nan")
     eccentricity: float = float("nan")
     extent: float = float("nan")
+    #: Intensities from channels other than the one measured into :attr:`mean`,
+    #: keyed by the column they are written under - "Mean intensity
+    #: (Green488-bCAT)". Empty unless the run was asked for more than one channel.
+    #: Named rather than positional: a table that says "Mean intensity" and does
+    #: not say of what is a table nobody can check.
+    extra: dict[str, float] = field(default_factory=dict)
 
     def as_row(self) -> dict[str, Any]:
         z, y, x = self.centroid_um
@@ -314,6 +320,7 @@ class ObjectStat:
             "std": self.std,
             "max": self.maximum,
             "integrated": self.integrated,
+            **self.extra,
         }
 
 
@@ -1246,11 +1253,66 @@ def _equivalent_diameter(volume: float, ndim: int) -> float:
     return float(2.0 * np.sqrt(volume / np.pi))
 
 
+#: Intensity statistics written per extra channel, in column order.
+INTENSITY_STATS = (
+    "Mean intensity",
+    "Median intensity",
+    "Std",
+    "Max intensity",
+    "Integrated intensity",
+)
+
+_STAT_KEYS = ("mean", "median", "std", "max", "integrated")
+
+
+def intensity_column(statistic: str, channel: str) -> str:
+    """Column name for one intensity statistic of one named channel."""
+    return f"{statistic} ({channel})" if channel else statistic
+
+
+def _check_signal(masks: np.ndarray, signal: np.ndarray, what: str) -> np.ndarray:
+    """*signal* flattened, once it is certain it is on the same grid as *masks*.
+
+    Measuring is one flat index into both arrays, which is fast and which returns
+    numbers for the wrong voxels, without complaint, if the two shapes disagree.
+    A table of intensities that do not belong to the objects beside them is worse
+    than no table, so a mismatch stops the measurement rather than colouring it.
+    """
+    array = np.asarray(signal)
+    if array.shape != masks.shape:
+        raise ValueError(
+            f"{what} is {tuple(array.shape)} and the labels are {tuple(masks.shape)}; "
+            "intensities can only be measured on the grid the objects are on"
+        )
+    return array.reshape(-1)
+
+
+def _intensity_stats(
+    ids: np.ndarray, values: np.ndarray, counts: np.ndarray, highest: int
+) -> dict[str, np.ndarray]:
+    """Mean, median, std, max and sum per label, from one pass over the voxels."""
+    sums = np.bincount(ids, weights=values, minlength=highest + 1)
+    squares = np.bincount(ids, weights=values * values, minlength=highest + 1)
+    means = np.divide(sums, np.maximum(counts, 1))
+    stds = np.sqrt(np.maximum(np.divide(squares, np.maximum(counts, 1)) - means**2, 0.0))
+    maxima = np.full(highest + 1, -np.inf)
+    np.maximum.at(maxima, ids, values)
+    maxima[~np.isfinite(maxima)] = 0.0
+    return {
+        "mean": means,
+        "median": _medians(ids, values, highest),
+        "std": stds,
+        "max": maxima,
+        "integrated": sums,
+    }
+
+
 def object_table(
     masks: np.ndarray,
     signal: np.ndarray | None = None,
     voxel_size_um: Sequence[float] = (1.0, 1.0, 1.0),
     shapes: dict[int, dict[str, float]] | None = None,
+    extra_signals: Mapping[str, np.ndarray] | None = None,
 ) -> list[ObjectStat]:
     """Per-object size, position and intensity.
 
@@ -1258,6 +1320,11 @@ def object_table(
     labels: one pass, and the memory it needs is proportional to the segmented
     fraction of the volume rather than to the volume. On a stack where nuclei are
     2 % of the voxels that is the difference between a table and a swap storm.
+
+    *extra_signals* maps a channel name to another array on the same grid and adds
+    one set of intensity columns per entry, named after the channel. That is how
+    one segmentation answers a question about every stain of a 4i cycle without
+    being run once per stain.
     """
     labels = np.asarray(masks)
     flat = labels.reshape(-1)
@@ -1285,17 +1352,20 @@ def object_table(
         centroids.insert(0, np.zeros(highest + 1))
 
     if signal is not None:
-        values = np.asarray(signal).reshape(-1)[indices].astype(np.float64)
-        sums = np.bincount(ids, weights=values, minlength=highest + 1)
-        squares = np.bincount(ids, weights=values * values, minlength=highest + 1)
-        means = np.divide(sums, np.maximum(counts, 1))
-        stds = np.sqrt(np.maximum(np.divide(squares, np.maximum(counts, 1)) - means**2, 0.0))
-        maxima = np.full(highest + 1, -np.inf)
-        np.maximum.at(maxima, ids, values)
-        maxima[~np.isfinite(maxima)] = 0.0
-        medians = _medians(ids, values, highest)
+        values = _check_signal(labels, signal, "the measured channel")[indices].astype(np.float64)
+        primary = _intensity_stats(ids, values, counts, highest)
     else:
-        sums = means = stds = maxima = medians = np.zeros(highest + 1)
+        nothing = np.zeros(highest + 1)
+        primary = {key: nothing for key in _STAT_KEYS}
+    means, medians = primary["mean"], primary["median"]
+    stds, maxima, sums = primary["std"], primary["max"], primary["integrated"]
+
+    per_channel: dict[str, dict[str, np.ndarray]] = {}
+    for name, array in (extra_signals or {}).items():
+        channel_values = _check_signal(labels, array, f"channel {str(name)!r}")[indices]
+        per_channel[str(name)] = _intensity_stats(
+            ids, channel_values.astype(np.float64), counts, highest
+        )
 
     shape_by_label = shapes or {}
     blank = {name: float("nan") for name in SHAPE_COLUMNS}
@@ -1323,6 +1393,11 @@ def object_table(
                 std=float(stds[label]),
                 maximum=float(maxima[label]),
                 integrated=float(sums[label]),
+                extra={
+                    intensity_column(column, name): float(channel[key][label])
+                    for name, channel in per_channel.items()
+                    for column, key in zip(INTENSITY_STATS, _STAT_KEYS)
+                },
                 solidity=float(shape.get("solidity", float("nan"))),
                 circularity=float(shape.get("circularity", float("nan"))),
                 eccentricity=float(shape.get("eccentricity", float("nan"))),
@@ -1350,7 +1425,14 @@ def object_dataframe(stats: Sequence[ObjectStat]):
     """The per-object table as a DataFrame, ready for the workbook writer."""
     import pandas as pd
 
-    frame = pd.DataFrame([stat.as_row() for stat in stats], columns=list(OBJECT_COLUMNS))
+    # Extra channels are appended in the order the objects saw them, so the column
+    # order is the channel order of the run rather than alphabetical.
+    columns = list(OBJECT_COLUMNS)
+    for stat in stats:
+        for name in stat.extra:
+            if name not in columns:
+                columns.append(name)
+    frame = pd.DataFrame([stat.as_row() for stat in stats], columns=columns)
     return frame.rename(columns=OBJECT_HEADERS)
 
 

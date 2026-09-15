@@ -282,6 +282,92 @@ def test_the_filter_runs_through_segment_volume() -> None:
     seg.register_backend(_StubBackend())
 
 
+def test_intensities_belong_to_the_objects() -> None:
+    print("intensities are measured on the object's own voxels")
+
+    masks = np.zeros((8, 8), dtype=np.int32)
+    masks[1:3, 1:3] = 1
+    masks[5:7, 5:7] = 2
+    signal = np.zeros((8, 8), dtype=float)
+    signal[1:3, 1:3] = 10.0
+    signal[5:7, 5:7] = 100.0
+
+    stats = {stat.label: stat for stat in seg.object_table(masks, signal, (1.0, 1.0))}
+    check(
+        stats[1].mean == 10.0 and stats[2].mean == 100.0,
+        f"each object gets its own voxels and nobody else's ({stats[1].mean}, {stats[2].mean})",
+    )
+    check(
+        stats[2].integrated == 400.0,
+        f"the integral is the sum over those voxels ({stats[2].integrated})",
+    )
+
+    # The measurement is one flat index into both arrays, which on a mismatch
+    # returns numbers for the wrong voxels without complaining. It must not.
+    try:
+        seg.object_table(masks, np.zeros((4, 4)), (1.0, 1.0))
+        check(False, "a signal on a different grid is refused")
+    except ValueError as exc:
+        check(
+            "grid the objects are on" in str(exc),
+            f"a signal on a different grid is refused rather than mis-indexed: {exc}",
+        )
+    try:
+        seg.object_table(masks, signal, (1.0, 1.0), extra_signals={"GFP": np.zeros((9, 9))})
+        check(False, "and so is an extra channel on a different grid")
+    except ValueError as exc:
+        check("'GFP'" in str(exc), f"and the refusal names the channel: {exc}")
+
+
+def test_every_channel_can_be_measured() -> None:
+    print("one segmentation, every channel")
+
+    masks = np.zeros((6, 6), dtype=np.int32)
+    masks[1:3, 1:3] = 1
+    masks[4:6, 4:6] = 2
+    dapi = np.full((6, 6), 5.0)
+    green = np.zeros((6, 6))
+    green[1:3, 1:3] = 20.0
+    green[4:6, 4:6] = 40.0
+
+    stats = seg.object_table(masks, dapi, (1.0, 1.0), extra_signals={"Green488": green})
+    first = stats[0]
+    check(first.mean == 5.0, "the unqualified columns are still the measured channel")
+    check(
+        first.extra["Mean intensity (Green488)"] == 20.0,
+        f"and the extra channel gets columns of its own ({first.extra})",
+    )
+    check(
+        stats[1].extra["Mean intensity (Green488)"] == 40.0,
+        "measured per object, not per image",
+    )
+    check(
+        stats[1].extra["Integrated intensity (Green488)"] == 160.0,
+        f"with the whole set of statistics ({stats[1].extra})",
+    )
+
+    frame = seg.object_dataframe(stats)
+    check(
+        "Mean intensity (Green488)" in frame.columns,
+        f"the column reaches the table: {list(frame.columns)[-5:]}",
+    )
+    check(
+        list(frame.columns).index("Mean intensity")
+        < list(frame.columns).index("Mean intensity (Green488)"),
+        "the segmented channel's columns stay where they were, so old readers still work",
+    )
+    check(
+        len(frame.columns) == len(seg.OBJECT_COLUMNS) + 5,
+        f"five columns per extra channel and no more ({len(frame.columns)})",
+    )
+
+    plain = seg.object_dataframe(seg.object_table(masks, dapi, (1.0, 1.0)))
+    check(
+        list(plain.columns) == [seg.OBJECT_HEADERS.get(c, c) for c in seg.OBJECT_COLUMNS],
+        "a run that did not ask for them writes exactly the table it used to",
+    )
+
+
 def test_median_prefilter() -> None:
     print("median filter before segmenting")
 
@@ -815,6 +901,8 @@ def test_cellpose_call_shape() -> None:
 def main() -> int:
     for test in (
         test_physical_units,
+        test_intensities_belong_to_the_objects,
+        test_every_channel_can_be_measured,
         test_median_prefilter,
         test_the_median_setting_reaches_the_run,
         test_shape_descriptors,

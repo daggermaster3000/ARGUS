@@ -101,6 +101,13 @@ def _register_builtin_panels() -> None:
 
         return MeasurementAnalysisWidget(app.viewer)
 
+    def _explorer(app):
+        from .explorer_widget import FileExplorerWidget
+
+        # Takes the app: it adds layers through it, and tells its other panels
+        # which plate was scanned.
+        return FileExplorerWidget(app)
+
     def _batch(app):
         from .batch_widget import BatchSegmentationWidget
 
@@ -173,6 +180,18 @@ def _register_builtin_panels() -> None:
             attribute="segmentation_widget",
             tabify_with="intensity_comparison",
             order=50,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="file_explorer",
+            title="File explorer",
+            factory=_explorer,
+            attribute="explorer_widget",
+            tabify_with="segmentation",
+            # Before the panels it feeds: scanning a plate fills the batch picker
+            # and the analysis panel's folder list, and both have to exist by then.
+            order=55,
         )
     )
     register_panel(

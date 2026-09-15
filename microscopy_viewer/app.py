@@ -189,25 +189,11 @@ class MicroscopyViewer:
         self.toolbar.set_status(f"Loading {len(candidates)} file(s)…")
         _process_events()
 
-        was_empty = len(self.viewer.layers) == 0
         specs, errors = load_paths(candidates)
-
-        added = 0
-        for spec in specs:
-            try:
-                add = (
-                    self.viewer.add_labels
-                    if spec.layer_type == "labels"
-                    else self.viewer.add_image
-                )
-                add(spec.data, **spec.to_kwargs())
-                added += 1
-            except Exception as exc:
-                logger.exception("could not add layer %s", spec.name)
-                errors.append(_FakeError(spec.name, str(exc)))
+        added, failures = self.add_specs(specs)
+        errors.extend(failures)
 
         if added:
-            self._after_open(specs, reset_view=was_empty)
             self.last_directory = Path(candidates[0]).parent
 
         if errors:
@@ -221,6 +207,33 @@ class MicroscopyViewer:
         self.toolbar.set_status(status)
         logger.info("%s (from %d input path(s))", status, len(candidates))
         return added
+
+    def add_specs(self, specs) -> tuple[int, list]:
+        """Add already-built layers to the viewer. Returns ``(added, failures)``.
+
+        Split out of :meth:`open_paths` so that a panel which builds its own specs
+        — the File explorer opens chosen images of a plate rather than whole files
+        — lands them the same way a dropped file does, and gets the same axis
+        labels, scale bar, depth handling and auto-contrast afterwards.
+        """
+        was_empty = len(self.viewer.layers) == 0
+        added = 0
+        failures: list = []
+        for spec in specs:
+            try:
+                add = (
+                    self.viewer.add_labels
+                    if spec.layer_type == "labels"
+                    else self.viewer.add_image
+                )
+                add(spec.data, **spec.to_kwargs())
+                added += 1
+            except Exception as exc:  # noqa: BLE001 - one bad layer is not the batch
+                logger.exception("could not add layer %s", spec.name)
+                failures.append(_FakeError(spec.name, str(exc)))
+        if added:
+            self._after_open(specs, reset_view=was_empty)
+        return added, failures
 
     def _after_open(self, specs, reset_view: bool) -> None:
         """Label the dimension sliders, set the scale bar unit, and frame the data."""

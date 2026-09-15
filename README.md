@@ -620,6 +620,45 @@ Without it the panel still appears and says exactly that, the way the atlas pane
 reports a missing `antspyx`. `Backend` is a three-method interface here too, so
 StarDist or micro-SAM can be added beside Cellpose.
 
+### File explorer
+
+A converted 4i plate is a few hundred images in one folder. Dropping it on the
+window assembles a mosaic of every cycle — correct, and far more than anyone asked
+for when the question is *what does well G/07 look like, and did the run pick up
+its nuclei?* **File explorer** is how you ask that question.
+
+Point it at the `.zarr` store — or press **Use the loaded plate** to take the path
+off a layer already open — and press **Scan the plate**. Reading is metadata only,
+so a store of a few hundred gigabytes lists in under a second.
+
+```
+Scan  →  46 wells × 7 acquisitions = 320 images
+Well G/07, cycle 1 │ 4 channels │ 4 × 1 × 12000 × 12000 │ nuclei, DAPITEST, dapi-test-2
+```
+
+Tick wells and cycles, and every image they name appears in the table with **the
+segmentations already sitting inside it**. That last column is the point: it is
+how you see which wells a run reached without opening any of them.
+
+**The miniature is free.** Each image carries its own pyramid, so the preview is
+read from the bottom of it — a 12 000 × 12 000 channel previews from its 750 × 750
+level, a few hundred kilobytes rather than 288 MB. A Z stack is projected at
+maximum, which is what makes an organoid visible in one plane. Switch channels to
+check the stain you care about before opening anything.
+
+**Open in the viewer** loads the selected rows, with **with segmentations** adding
+every NGFF label set stored inside each image, on the same grid and already
+aligned. Seven layers come back for one 4-channel well that has been segmented
+three times. The layers are named `G/07 :: cycle 1 :: Ab1_DAPI` — the same names
+opening the well folder gives them, so a table written by a batch run still finds
+its layer in the Measurement analysis panel.
+
+**This is the only place a plate is chosen.** Scanning here fills in the Batch
+segmentation panel's well and channel lists, and lists the table folders beside the
+store in the Measurement analysis panel. One store box for the window rather than
+one per panel: two paths to keep in step is two lists that can disagree about
+what is in the plate.
+
 ### Batch segmentation
 
 **Batch segmentation** takes the settings you just got right on one image and runs
@@ -627,10 +666,8 @@ them over a whole plate. A Fractal-converted 4i plate here is 46 wells × 7
 acquisitions = 320 images of 12 000 × 12 000 px; nobody is going to click through
 that one at a time.
 
-Point it at the `.zarr` store — or press **Use the loaded plate** to take the path
-off a layer already open — and press **Scan**. Reading the plate is metadata only,
-so it is instant even on a store of a few hundred gigabytes. What comes back is the
-well list, the acquisition list and the channels.
+**The plate comes from the File explorer.** Scan it there and this panel fills
+itself in — the well list, the acquisition list and the channels.
 
 **Channels are matched, not indexed.** In a 4i plate the channel label changes
 every cycle — `Ab1_DAPI`, `Ab2_DAPI`, … `Ab7_DAPI` — while `wavelength_id` does
@@ -677,10 +714,27 @@ seven times as long.
 |---|---|
 | **Wells** / **Acquisitions** | What to run. Everything, one row, one cycle — ctrl-click and shift-click. Wells that already carry the label set are marked. |
 | **Segment** / **Nuclei** / **Measure** | As in the Segmentation panel, but resolved per image by wavelength or label. **Nuclei** gives whole cells instead of nuclei. |
+| **every channel, in columns of its own** | Measure all the stains of each image rather than one, adding `Mean intensity (Green488-bCAT)` and its four companions per channel. One segmentation, four answers. |
 | **Median filter** | The same setting as the Segmentation panel's, shown here because a plate run is where it costs real time; the two are kept in step. The line under it estimates what it adds to the selected images. |
 | **Label set** | Name written under `labels/`. Give a second run a different name to keep both. |
 | **Pyramid level** | Which level to segment. 0 is full resolution; each step up halves the image and quarters the time. The panel shows the resulting extent and µm/px. |
 | **Tables** | A per-image object table and a plate-level summary CSV — one row per image with counts, median size, median solidity, how many the shape filter dropped, and what went wrong. |
+
+**The intensity columns say which channel they came from.** `Mean intensity` is
+the segmented channel unless **Measure** names another; every further channel gets
+its own five columns named after it, and the run summary records both. On a 4i
+plate, where the same stain is called `Ab1_DAPI` in cycle 1 and `Ab7_DAPI` in cycle
+7, a column called nothing but "Mean intensity" is a column nobody can check
+afterwards.
+
+If **Measure** names a channel an image does not have, the intensities fall back to
+the segmented channel — as they always did — but the image's note now says so
+rather than putting one channel's numbers silently under another's heading. A
+channel on a different grid from the labels stops the measurement instead of being
+read through the wrong voxels.
+
+Measuring every channel costs one extra read per channel: on a 12 000 × 12 000 well
+with 18 000 objects, four channels measure in about 9 s.
 
 Cellpose settings — model, diameter, mode, thresholds, the solidity filter, GPU —
 are read from the **Segmentation** panel when the run starts, and shown here as one
@@ -716,6 +770,17 @@ Segmentation panel exports, or a table from elsewhere — and the panel
 - **finds the layer itself.** A batch table is named after the image it came
   from, so `G_07_0.csv` picks out `G/07 :: cycle 1 :: nuclei` in the layer list.
   Change it in the combo when the guess is wrong.
+- **finds the tables themselves.** Scan a plate in the **File explorer** and the
+  folders of tables sitting beside the store are listed under **Beside the
+  plate** — one per label set a run has written — with their contents in the combo
+  next to it. Nothing is opened until you pick one; which of five segmentations
+  you meant is not something to guess at.
+
+```
+AssayPlate_….zarr                       ← scanned in the File explorer
+AssayPlate_…_nuclei_objects/            ← listed as "nuclei_objects"
+AssayPlate_…_DAPITEST_objects/          ← listed as "DAPITEST_objects"
+```
 
 **The colour scale is clipped to 1–99 % by default**, and the values at both ends
 are shown. This matters more than it sounds: an object table always has a handful
@@ -946,6 +1011,7 @@ microscopy_viewer/
   segmentation.py           Cellpose segmentation, the GPU device, per-object stats; no Qt
   analysis.py               object tables read back in: label colouring, plot helpers; no Qt
   batch.py                  plate-wide segmentation: survey, run, NGFF label writing; no Qt
+  explorer.py               browsing a plate: rows, miniatures, layer building, table folders; no Qt
   exports.py                snapshots and the Excel workbook
   slides.py                 channel/merge rendering and the PowerPoint slide; no Qt
   contrast.py               auto / reset contrast
@@ -964,7 +1030,9 @@ microscopy_viewer/
     timeseries_widget.py    transport controls, the cache status, playback
     registration_widget.py  channel roles, the atlas, the region table
     segmentation_widget.py  channel, model and diameter; the object table
-    batch_widget.py         plate, wells, cycles and channels; the run and its results
+    plate_picker.py         the store box and the wells/cycles lists, shared by two panels
+    explorer_widget.py      scan a plate, preview it, open the images you want
+    batch_widget.py         wells, cycles and channels; the run and its results
     analysis_widget.py      the object table, the label colouring and the scatter plot
     slide_dialog.py         pick samples, name the stainings, write the .pptx
     movie_dialog.py         pick a range and a rate, render the frames
@@ -1018,6 +1086,7 @@ python tests/test_registration.py   # atlas registration engine — no Qt; ANTs 
 python tests/test_segmentation.py   # segmentation engine, units, object table — no Qt; cellpose is never run
 python tests/test_batch.py          # plate survey, channel matching, NGFF label writing — no Qt; cellpose is never run
 python tests/test_analysis.py       # object tables, colour scales, label colouring — no Qt needed
+python tests/test_explorer.py       # plate rows, miniatures, layer building, table folders — no Qt needed
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 

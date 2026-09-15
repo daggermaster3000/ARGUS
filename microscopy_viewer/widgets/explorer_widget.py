@@ -1,0 +1,354 @@
+"""Dock panel: browse a plate and open the part of it you actually want.
+
+A converted 4i plate is a few hundred images in one folder. Dropping it on the
+window builds a mosaic of every cycle — correct, and far more than anyone asked
+for when the question is "what does well G/07 look like, and did the run pick up
+its nuclei?". This panel answers that question: scan the plate, see every image
+in it with the segmentations it already carries, look at a miniature to check the
+well is not empty, then open the handful you want with their labels on top.
+
+It is also the only place a plate is chosen. The Batch segmentation panel used to
+carry its own copy of the store box, which meant two paths to keep in step and
+two lists that could disagree; now this panel scans and every other panel is told
+— the batch picker fills itself in, and the measurement analysis panel lists the
+table folders sitting beside the store.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QImage, QPixmap
+from qtpy.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .. import batch, explorer
+from ..utils import get_logger
+from .plate_picker import PlateSourceBox, WellAcquisitionPicker
+
+logger = get_logger("explorer_widget")
+
+#: Columns of the image list.
+IMAGE_COLUMNS = ("Well", "Cycle", "Field", "Channels", "Size", "Segmentations")
+
+#: Images above which opening is refused without a second look. Each one is a
+#: layer per channel plus a layer per label set, so a whole plate at four
+#: channels is over a thousand layers and a window that will not redraw.
+MANY_IMAGES = 24
+
+
+class FileExplorerWidget(QWidget):
+    """Scan a plate, pick images out of it, open them with their segmentations."""
+
+    def __init__(self, app, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._app = app
+        self._survey: batch.PlateSurvey | None = None
+        self._rows: list[batch.ImageJob] = []
+        self._thumbnail: np.ndarray | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        self._source = PlateSourceBox(app)
+        self._source.surveyed.connect(self._on_surveyed)
+        self._source.failed.connect(self._on_failed)
+        layout.addWidget(self._source)
+
+        layout.addWidget(self._build_images_box(), stretch=1)
+        layout.addWidget(self._build_preview_box())
+        layout.addLayout(self._build_open_row())
+
+        self._status = QLabel("Choose a plate and press Scan.")
+        self._status.setWordWrap(True)
+        layout.addWidget(self._status)
+
+        self._update_enabled()
+
+    # -- construction ---------------------------------------------------------
+
+    def _build_images_box(self) -> QGroupBox:
+        box = QGroupBox("Images")
+        outer = QVBoxLayout(box)
+
+        self._picker = WellAcquisitionPicker(all_cycles=False)
+        self._picker.selectionChanged.connect(self._refresh_table)
+        outer.addWidget(self._picker)
+
+        self._table = QTableWidget(0, len(IMAGE_COLUMNS))
+        self._table.setHorizontalHeaderLabels(list(IMAGE_COLUMNS))
+        self._table.verticalHeader().setVisible(False)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setToolTip(
+            "Every image the wells and cycles above name. Select the rows to open; "
+            "the miniature follows whichever row you touched last."
+        )
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self._table.itemSelectionChanged.connect(self._on_row_selected)
+        outer.addWidget(self._table, stretch=1)
+
+        self._table_note = QLabel("—")
+        self._table_note.setWordWrap(True)
+        outer.addWidget(self._table_note)
+        return box
+
+    def _build_preview_box(self) -> QGroupBox:
+        box = QGroupBox("Miniature")
+        outer = QHBoxLayout(box)
+
+        self._preview = QLabel("—")
+        self._preview.setAlignment(Qt.AlignCenter)
+        self._preview.setMinimumSize(explorer.THUMBNAIL_PX, explorer.THUMBNAIL_PX)
+        self._preview.setToolTip(
+            "Read from the smallest level of the image's own pyramid, so it costs a few "
+            "hundred kilobytes rather than the 288 MB the full-resolution channel would.\n\n"
+            "A Z stack is projected at maximum, which is what makes an organoid visible in "
+            "one plane."
+        )
+        outer.addWidget(self._preview)
+
+        side = QVBoxLayout()
+        side.addWidget(QLabel("Channel"))
+        self._channel_box = QComboBox()
+        self._channel_box.setToolTip("Which channel the miniature shows.")
+        self._channel_box.currentIndexChanged.connect(self._refresh_preview)
+        side.addWidget(self._channel_box)
+        self._preview_note = QLabel("—")
+        self._preview_note.setWordWrap(True)
+        side.addWidget(self._preview_note)
+        side.addStretch(1)
+        outer.addLayout(side, stretch=1)
+        return box
+
+    def _build_open_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        self._with_labels = QCheckBox("with segmentations")
+        self._with_labels.setChecked(True)
+        self._with_labels.setToolTip(
+            "Load the NGFF label sets stored inside each image alongside its channels, "
+            "on the same grid and already aligned."
+        )
+        row.addWidget(self._with_labels)
+
+        self._open_button = QPushButton("Open in the viewer")
+        self._open_button.clicked.connect(self.open_selected)
+        row.addWidget(self._open_button)
+        row.addStretch(1)
+        return row
+
+    # -- the plate ------------------------------------------------------------
+
+    def _on_failed(self, message: str) -> None:
+        self._status.setText(message)
+        self._update_enabled()
+
+    def _on_surveyed(self, survey: batch.PlateSurvey) -> None:
+        self._survey = survey
+        self._picker.set_survey(survey)
+        self._status.setText(
+            f"{len(survey.jobs)} image(s). Choose wells and cycles, then open what you want."
+        )
+        self._announce(survey)
+        self._update_enabled()
+
+    def _announce(self, survey: batch.PlateSurvey) -> None:
+        """Tell the other panels which plate is open.
+
+        Broadcast rather than wired one panel to another: a panel opts in by
+        having a ``plate_changed`` method, and one that does not care needs no
+        change here when it is added.
+        """
+        try:
+            self._app.plate_survey = survey
+        except Exception:  # pragma: no cover - an app stub that refuses attributes
+            logger.debug("could not record the survey on the app", exc_info=True)
+        for identifier, panel in (getattr(self._app, "panels", {}) or {}).items():
+            if panel is self:
+                continue
+            handler = getattr(panel, "plate_changed", None)
+            if handler is None:
+                continue
+            try:
+                handler(survey)
+            except Exception:
+                logger.exception("panel %s could not take the new plate", identifier)
+
+    # -- the image list -------------------------------------------------------
+
+    def _refresh_table(self) -> None:
+        jobs = self._picker.selected_jobs()
+        self._rows = list(jobs)
+        self._table.setRowCount(len(jobs))
+        for row, job in enumerate(jobs):
+            described = explorer.describe_job(job)
+            values = (
+                described["well"],
+                "" if described["acquisition"] == "" else f"cycle {described['acquisition']}",
+                described["field"],
+                f"{described['channels']}",
+                described["shape"],
+                described["segmentations"] or "—",
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column == 0:
+                    item.setData(Qt.UserRole, row)
+                self._table.setItem(row, column, item)
+            self._table.item(row, len(IMAGE_COLUMNS) - 1).setToolTip(
+                described["channel_names"] or "—"
+            )
+
+        segmented = sum(1 for job in jobs if explorer.label_sets(job))
+        note = f"{len(jobs)} image(s)"
+        if jobs:
+            note += f", {segmented} with a segmentation already in the store"
+        self._table_note.setText(note + ".")
+        if jobs and not self._table.selectedItems():
+            self._table.selectRow(0)
+        self._refresh_channels()
+        self._update_enabled()
+
+    def _current_job(self) -> batch.ImageJob | None:
+        rows = {index.row() for index in self._table.selectedIndexes()}
+        if not rows:
+            return None
+        row = self._table.currentRow()
+        chosen = row if row in rows else min(rows)
+        return self._rows[chosen] if 0 <= chosen < len(self._rows) else None
+
+    def selected_jobs(self) -> tuple[batch.ImageJob, ...]:
+        """The images whose rows are selected; the whole list when none are."""
+        rows = sorted({index.row() for index in self._table.selectedIndexes()})
+        if not rows:
+            return tuple(self._rows)
+        return tuple(self._rows[row] for row in rows if 0 <= row < len(self._rows))
+
+    def _refresh_channels(self) -> None:
+        job = self._current_job()
+        previous = self._channel_box.currentIndex()
+        self._channel_box.blockSignals(True)
+        self._channel_box.clear()
+        if job is not None:
+            for channel in job.channels:
+                self._channel_box.addItem(channel.describe(), channel.index)
+        self._channel_box.setCurrentIndex(
+            previous if 0 <= previous < self._channel_box.count() else 0
+        )
+        self._channel_box.blockSignals(False)
+        self._refresh_preview()
+
+    def _on_row_selected(self) -> None:
+        self._refresh_channels()
+        self._update_enabled()
+
+    # -- the miniature --------------------------------------------------------
+
+    def _refresh_preview(self) -> None:
+        job = self._current_job()
+        if job is None:
+            self._preview.setText("—")
+            self._preview.setPixmap(QPixmap())
+            self._preview_note.setText("—")
+            return
+        index = self._channel_box.currentData()
+        try:
+            plane = explorer.thumbnail(job, None if index is None else int(index))
+        except Exception as exc:  # noqa: BLE001 - a preview is never worth an error box
+            logger.exception("%s: no miniature", job.component)
+            self._preview.setText("—")
+            self._preview.setPixmap(QPixmap())
+            self._preview_note.setText(f"No miniature: {exc}")
+            return
+
+        grey = np.ascontiguousarray(explorer.stretch(plane))
+        # Held on the widget: QImage wraps the buffer rather than copying it, and a
+        # temporary would be freed while Qt was still drawing from it.
+        self._thumbnail = grey
+        height, width = grey.shape
+        image = QImage(grey.data, width, height, width, QImage.Format_Grayscale8)
+        self._preview.setPixmap(QPixmap.fromImage(image))
+
+        level = job.level(max(0, len(job.levels) - 1))
+        names = explorer.label_sets(job)
+        self._preview_note.setText(
+            f"{job.describe()}\n{width}x{height} px, from level "
+            f"{len(job.levels) - 1} of {len(job.levels)} ({' x '.join(str(int(n)) for n in level.shape)})"
+            + (f"\nSegmentations: {', '.join(names)}" if names else "\nNo segmentation yet")
+        )
+
+    # -- opening --------------------------------------------------------------
+
+    def _update_enabled(self) -> None:
+        self._open_button.setEnabled(bool(self._rows))
+
+    def open_selected(self) -> None:
+        """Build the layers for the selected images and add them to the viewer."""
+        jobs = self.selected_jobs()
+        if not jobs:
+            self._status.setText("Nothing selected.")
+            return
+        if len(jobs) > MANY_IMAGES and not self._confirm(jobs):
+            return
+
+        self._status.setText(f"Opening {len(jobs)} image(s)…")
+        self._app.toolbar.set_status(f"Opening {len(jobs)} image(s) from the plate…")
+        try:
+            specs, problems = explorer.specs_for(
+                jobs,
+                plate_path=Path(self._source.path()) if self._source.path() else None,
+                with_labels=self._with_labels.isChecked(),
+            )
+        except Exception as exc:  # noqa: BLE001 - shown, not raised
+            logger.exception("could not build the layers")
+            self._status.setText(f"Could not open those images: {exc}")
+            return
+
+        added, failures = self._app.add_specs(specs)
+        images = sum(1 for spec in specs if spec.layer_type != "labels")
+        message = f"Opened {added} layer(s) from {len(jobs)} image(s) — {images} channel(s)"
+        message += f", {added - images} label set(s)." if added > images else "."
+        for problem in problems + [f"{error.name}: {error.message}" for error in failures]:
+            logger.warning("explorer: %s", problem)
+        if problems or failures:
+            count = len(problems) + len(failures)
+            message += f" {count} failed: {(problems or ['see the log'])[0]}"
+        self._status.setText(message)
+
+    def _confirm(self, jobs) -> bool:
+        from qtpy.QtWidgets import QMessageBox
+
+        channels = sum(len(job.channels) for job in jobs)
+        answer = QMessageBox.question(
+            self,
+            "Open all of those?",
+            f"{len(jobs)} images is about {channels} channel layers, plus a layer for every "
+            "segmentation they carry.\n\nThe layer list will be long and the window slow to "
+            "redraw. Open them anyway?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
+    # -- what other panels call ----------------------------------------------
+
+    def plate_changed(self, survey: batch.PlateSurvey) -> None:
+        """Follow a plate another panel scanned. Present for symmetry; nothing does yet."""
+        if survey is not self._survey:
+            self._source.set_path(survey.path)
+            self._on_surveyed(survey)
