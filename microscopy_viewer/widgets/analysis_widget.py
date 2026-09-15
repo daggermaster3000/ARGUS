@@ -486,6 +486,16 @@ class MeasurementAnalysisWidget(QWidget):
         self._path_edit.setText(str(table))
         self.load()
 
+    def open_table(self, path) -> None:
+        """Open *path*, whoever asked for it.
+
+        The File explorer hands over the table it matched to the image on screen;
+        this is the same route the file box takes, so a table opened that way
+        behaves exactly like one typed in — including finding its layer.
+        """
+        self._path_edit.setText(str(path))
+        self.load()
+
     def browse(self) -> None:
         start = self._path_edit.text() or str(Path.home() / "Documents")
         path, _selected = QFileDialog.getOpenFileName(

@@ -7,6 +7,11 @@ its nuclei?". This panel answers that question: scan the plate, see every image
 in it with the segmentations it already carries, look at a miniature to check the
 well is not empty, then open the handful you want with their labels on top.
 
+The tables find their images here too. A batch run names each object table after
+the image it measured, so the list says which images have been measured as well as
+which have been segmented, and the tables for the image in front of you are one
+click from the Measurement analysis panel.
+
 It is also the only place a plate is chosen. The Batch segmentation panel used to
 carry its own copy of the store box, which meant two paths to keep in step and
 two lists that could disagree; now this panel scans and every other panel is told
@@ -29,6 +34,8 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -43,7 +50,12 @@ from .plate_picker import PlateSourceBox, WellAcquisitionPicker
 logger = get_logger("explorer_widget")
 
 #: Columns of the image list.
-IMAGE_COLUMNS = ("Well", "Cycle", "Field", "Channels", "Size", "Segmentations")
+IMAGE_COLUMNS = ("Well", "Cycle", "Field", "Channels", "Size", "Segmentations", "Tables")
+
+#: Marker on a table written for another acquisition of the same well. A 4i plate
+#: images the same cells every cycle, so such a table does describe these objects
+#: — but it was measured somewhere else and should not look like this image's own.
+OTHER_CYCLE = "  (from {component})"
 
 #: Images above which opening is refused without a second look. Each one is a
 #: layer per channel plus a layer per label set, so a whole plate at four
@@ -60,6 +72,9 @@ class FileExplorerWidget(QWidget):
         self._survey: batch.PlateSurvey | None = None
         self._rows: list[batch.ImageJob] = []
         self._thumbnail: np.ndarray | None = None
+        #: ``{stem: [table, ...]}`` for the folders beside the plate, built once a
+        #: scan, because filling a column cannot cost a directory walk per row.
+        self._table_index: dict[str, list[Path]] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -71,6 +86,7 @@ class FileExplorerWidget(QWidget):
 
         layout.addWidget(self._build_images_box(), stretch=1)
         layout.addWidget(self._build_preview_box())
+        layout.addWidget(self._build_tables_box())
         layout.addLayout(self._build_open_row())
 
         self._status = QLabel("Choose a plate and press Scan.")
@@ -136,6 +152,37 @@ class FileExplorerWidget(QWidget):
         outer.addLayout(side, stretch=1)
         return box
 
+    def _build_tables_box(self) -> QGroupBox:
+        box = QGroupBox("Object tables for this image")
+        outer = QVBoxLayout(box)
+
+        self._tables_list = QListWidget()
+        self._tables_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._tables_list.setMaximumHeight(90)
+        self._tables_list.setToolTip(
+            "Tables found beside the plate that were written for the image selected above.\n\n"
+            "A run names each table after the image it measured, so this is a match on the "
+            "well and cycle rather than a guess."
+        )
+        self._tables_list.itemDoubleClicked.connect(lambda _item: self.open_table())
+        self._tables_list.itemSelectionChanged.connect(self._update_enabled)
+        outer.addWidget(self._tables_list)
+
+        row = QHBoxLayout()
+        self._open_table_button = QPushButton("Open in Measurement analysis")
+        self._open_table_button.setToolTip(
+            "Load the selected table in the Measurement analysis panel, where it colours "
+            "the labels of this image by any column."
+        )
+        self._open_table_button.clicked.connect(self.open_table)
+        row.addWidget(self._open_table_button)
+        row.addStretch(1)
+        self._tables_note = QLabel("—")
+        self._tables_note.setWordWrap(True)
+        row.addWidget(self._tables_note)
+        outer.addLayout(row)
+        return box
+
     def _build_open_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
         self._with_labels = QCheckBox("with segmentations")
@@ -160,12 +207,32 @@ class FileExplorerWidget(QWidget):
 
     def _on_surveyed(self, survey: batch.PlateSurvey) -> None:
         self._survey = survey
+        self._refresh_table_index()
         self._picker.set_survey(survey)
         self._status.setText(
             f"{len(survey.jobs)} image(s). Choose wells and cycles, then open what you want."
         )
         self._announce(survey)
         self._update_enabled()
+
+    def _refresh_table_index(self) -> None:
+        """Index the object tables beside the plate, once per scan."""
+        if self._survey is None:
+            self._table_index = {}
+            return
+        try:
+            folders = explorer.analysis_folders(self._survey.path)
+            self._table_index = explorer.table_index(folders)
+        except Exception:
+            logger.exception("could not index the tables beside %s", self._survey.path)
+            self._table_index = {}
+        else:
+            logger.info(
+                "%d table(s) in %d folder(s) beside %s",
+                sum(len(v) for v in self._table_index.values()),
+                len(folders),
+                self._survey.path.name,
+            )
 
     def _announce(self, survey: batch.PlateSurvey) -> None:
         """Tell the other panels which plate is open.
@@ -196,7 +263,7 @@ class FileExplorerWidget(QWidget):
         self._rows = list(jobs)
         self._table.setRowCount(len(jobs))
         for row, job in enumerate(jobs):
-            described = explorer.describe_job(job)
+            described = explorer.describe_job(job, index=self._table_index)
             values = (
                 described["well"],
                 "" if described["acquisition"] == "" else f"cycle {described['acquisition']}",
@@ -204,24 +271,30 @@ class FileExplorerWidget(QWidget):
                 f"{described['channels']}",
                 described["shape"],
                 described["segmentations"] or "—",
+                described["tables"] or "—",
             )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 if column == 0:
                     item.setData(Qt.UserRole, row)
                 self._table.setItem(row, column, item)
-            self._table.item(row, len(IMAGE_COLUMNS) - 1).setToolTip(
+            self._table.item(row, IMAGE_COLUMNS.index("Channels")).setToolTip(
                 described["channel_names"] or "—"
+            )
+            self._table.item(row, IMAGE_COLUMNS.index("Tables")).setToolTip(
+                "\n".join(str(path) for path in described["table_paths"]) or "No table for this image"
             )
 
         segmented = sum(1 for job in jobs if explorer.label_sets(job))
+        measured = sum(1 for job in jobs if explorer.tables_for(job, self._table_index))
         note = f"{len(jobs)} image(s)"
         if jobs:
-            note += f", {segmented} with a segmentation already in the store"
+            note += f", {segmented} already segmented, {measured} with an object table"
         self._table_note.setText(note + ".")
         if jobs and not self._table.selectedItems():
             self._table.selectRow(0)
         self._refresh_channels()
+        self._refresh_tables()
         self._update_enabled()
 
     def _current_job(self) -> batch.ImageJob | None:
@@ -255,7 +328,74 @@ class FileExplorerWidget(QWidget):
 
     def _on_row_selected(self) -> None:
         self._refresh_channels()
+        self._refresh_tables()
         self._update_enabled()
+
+    def _refresh_tables(self) -> None:
+        """List the tables written for the image the miniature is showing."""
+        self._tables_list.clear()
+        job = self._current_job()
+        if job is None:
+            self._tables_note.setText("—")
+            return
+
+        own = explorer.tables_for(job, self._table_index)
+        for path in own:
+            item = QListWidgetItem(f"{path.parent.name} / {path.name}")
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(str(path))
+            self._tables_list.addItem(item)
+
+        related = explorer.related_tables(job, self._table_index)
+        for path in related:
+            component = explorer.component_of(path)
+            item = QListWidgetItem(
+                f"{path.parent.name} / {path.name}" + OTHER_CYCLE.format(component=component)
+            )
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(
+                f"{path}\n\nMeasured on {component}, not on this image. The same cells are "
+                "imaged every 4i cycle, so the objects are the same ones — but the "
+                "segmentation it refers to lives in the image it was run on."
+            )
+            self._tables_list.addItem(item)
+
+        if own:
+            self._tables_list.setCurrentRow(0)
+            self._tables_note.setText(f"{len(own)} for this image.")
+        elif related:
+            self._tables_note.setText(
+                f"None for this image; {len(related)} for another cycle of {job.well}."
+            )
+        else:
+            self._tables_note.setText("None found beside the plate.")
+
+    def open_table(self) -> None:
+        """Hand the selected table to the Measurement analysis panel."""
+        item = self._tables_list.currentItem()
+        if item is None:
+            self._status.setText("Choose a table first.")
+            return
+        path = item.data(Qt.UserRole)
+        panel = (getattr(self._app, "panels", {}) or {}).get("measurement_analysis")
+        opener = getattr(panel, "open_table", None)
+        if opener is None:
+            self._status.setText("The Measurement analysis panel is not available.")
+            return
+        try:
+            opener(path)
+        except Exception as exc:  # noqa: BLE001 - shown, not raised
+            logger.exception("could not open %s", path)
+            self._status.setText(f"Could not open that table: {exc}")
+            return
+        dock = (getattr(self._app, "docks", {}) or {}).get("measurement_analysis")
+        if dock is not None:
+            try:
+                dock.setVisible(True)
+                dock.raise_()
+            except Exception:  # pragma: no cover - a dock that has never been shown
+                logger.debug("could not raise the analysis dock", exc_info=True)
+        self._status.setText(f"Opened {path.name} in Measurement analysis.")
 
     # -- the miniature --------------------------------------------------------
 
@@ -296,6 +436,7 @@ class FileExplorerWidget(QWidget):
 
     def _update_enabled(self) -> None:
         self._open_button.setEnabled(bool(self._rows))
+        self._open_table_button.setEnabled(self._tables_list.currentItem() is not None)
 
     def open_selected(self) -> None:
         """Build the layers for the selected images and add them to the viewer."""
@@ -346,6 +487,16 @@ class FileExplorerWidget(QWidget):
         return answer == QMessageBox.Yes
 
     # -- what other panels call ----------------------------------------------
+
+    def tables_changed(self) -> None:
+        """Re-index the tables beside the plate and redraw what shows them.
+
+        Called by the Batch segmentation panel when a run finishes: the index is
+        built once per scan, so a run that has just written twenty tables would
+        otherwise leave the Tables column claiming there are none.
+        """
+        self._refresh_table_index()
+        self._refresh_table()
 
     def plate_changed(self, survey: batch.PlateSurvey) -> None:
         """Follow a plate another panel scanned. Present for symmetry; nothing does yet."""

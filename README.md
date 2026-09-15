@@ -646,6 +646,28 @@ level, a few hundred kilobytes rather than 288 MB. A Z stack is projected at
 maximum, which is what makes an organoid visible in one plane. Switch channels to
 check the stain you care about before opening anything.
 
+**The tables find their images.** A run names each object table after the image it
+measured — `B_02_0.csv` is well `B/02`, image `0`, which is cycle 1 — so the
+**Tables** column says which images have been *measured* as well as which have
+been segmented, and the tables for the selected image are listed underneath ready
+to open:
+
+```
+B/02 │ cycle 1 │ nuclei, dapi-test-2, analysis-1 │ …_analysis-1_objects
+B/02 │ cycle 2 │ —                               │ —
+B/02 │ cycle 3 │ nuclei                          │ —
+7 image(s), 2 already segmented, 1 with an object table.
+```
+
+**Open in Measurement analysis** hands the selected table to that panel, which
+colours this image's labels by any column in it. A table written for *another*
+cycle of the same well is offered too, marked `(from B/02/0)` — a 4i plate images
+the same cells every cycle, so it does describe these objects, but it was measured
+somewhere else and the segmentation it refers to lives in the image it was run on.
+It is never pre-selected for that reason.
+
+The list is indexed once per scan, and refreshed when a batch run finishes.
+
 **Open in the viewer** loads the selected rows, with **with segmentations** adding
 every NGFF label set stored inside each image, on the same grid and already
 aligned. Seven layers come back for one 4-channel well that has been segmented
@@ -772,7 +794,7 @@ Segmentation panel exports, or a table from elsewhere — and the panel
   Change it in the combo when the guess is wrong.
 - **finds the tables themselves.** Scan a plate in the **File explorer** and the
   folders of tables sitting beside the store are listed under **Beside the
-  plate** — one per label set a run has written — with their contents in the combo
+  plate**, while the explorer's own list offers the tables for one image — one per label set a run has written — with their contents in the combo
   next to it. Nothing is opened until you pick one; which of five segmentations
   you meant is not something to guess at.
 

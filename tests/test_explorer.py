@@ -232,6 +232,92 @@ def test_finding_the_tables(directory: Path) -> None:
     check(explorer.analysis_folders(directory / "nowhere") == [], "a missing plate lists nothing")
 
 
+def test_tables_find_their_image(directory: Path) -> None:
+    print("matching a table to the image it measured")
+
+    plate = _plate(directory)
+    survey = explorer.survey_plate(plate)
+    folder = directory / "plate_nuclei_objects"
+    folder.mkdir()
+    for stem in ("B_02_0", "B_03_1", "C_02_0"):
+        (folder / f"{stem}.csv").write_text("Label,Area\n1,5\n", encoding="utf-8")
+    (folder / "nuclei_summary.csv").write_text("well,n\nB/02,1\n", encoding="utf-8")
+
+    check(explorer.table_key("B/02/0") == "B_02_0", "a component flattens to a table stem")
+    check(explorer.component_of("B_02_0.csv") == "B/02/0", "and reads back out of the file name")
+
+    index = explorer.table_index([folder])
+    check(len(index) == 4, f"every table is indexed once ({sorted(index)})")
+
+    def job_for(component):
+        return next(job for job in survey.jobs if job.component == component)
+
+    own = explorer.tables_for(job_for("B/02/0"), index)
+    check([path.name for path in own] == ["B_02_0.csv"], f"the image gets its own table ({own})")
+    check(
+        explorer.tables_for(job_for("C/02/0"), index)[0].name == "C_02_0.csv",
+        "and a different well gets a different one, not the first in the folder",
+    )
+    check(
+        explorer.tables_for(job_for("B/02/1"), index) == [],
+        "a cycle nothing measured claims nothing",
+    )
+    check(
+        explorer.tables_for(job_for("C/03/0"), index) == [],
+        "and neither does a well nothing measured — a near miss is still a miss",
+    )
+
+    # The cycle-1 table does describe the cells in cycle 2: a 4i plate images the
+    # same cells every cycle. It is still not this image's table, so it is offered
+    # separately rather than mixed in.
+    related = explorer.related_tables(job_for("B/02/1"), index)
+    check(
+        [path.name for path in related] == ["B_02_0.csv"],
+        f"another cycle of the same well is offered separately ({related})",
+    )
+    check(
+        explorer.related_tables(job_for("B/02/0"), index) == [],
+        "and the image's own table is not offered to it twice",
+    )
+    check(
+        explorer.related_tables(job_for("C/02/0"), index) == [],
+        "a well whose only table is its own has nothing related",
+    )
+
+    # A pipeline that assumes one image per well writes the well name alone.
+    (folder / "C_03.csv").write_text("Label,Area\n1,5\n", encoding="utf-8")
+    well_index = explorer.table_index([folder])
+    check(
+        explorer.tables_for(job_for("C/03/0"), well_index)[0].name == "C_03.csv",
+        "a table named after the well alone still finds the well's image",
+    )
+
+    rows = explorer.describe_plate(explorer.survey_plate(plate))
+    measured = {row["component"] for row in rows if row["n_tables"]}
+    check(
+        measured == {"B/02/0", "B/03/1", "C/02/0", "C/03/0", "C/03/1"},
+        f"describe_plate finds the folder beside the plate by itself ({sorted(measured)})",
+    )
+    check(
+        "B/02/1" not in measured,
+        "and marks only the images a table was actually written for",
+    )
+    check(
+        {"C/03/0", "C/03/1"} <= measured,
+        "a well-level table marks every cycle of that well — it names no one of them",
+    )
+    row = explorer.describe_job(job_for("B/02/0"), index=index)
+    check(row["n_tables"] == 1, "given an index, the row counts the tables")
+    check(
+        row["tables"] == folder.name,
+        f"and names the folder they came from, which is what tells two runs apart: {row['tables']}",
+    )
+    check(
+        row["table_paths"] == own,
+        "with the paths kept, so the panel can open one without searching again",
+    )
+
+
 def main() -> int:
     if not _has_zarr():
         print("zarr is not installed; the explorer checks need it")
@@ -245,6 +331,7 @@ def main() -> int:
             ("miniature", test_the_miniature),
             ("opening", test_opening),
             ("tables", test_finding_the_tables),
+            ("matching", test_tables_find_their_image),
         ):
             case = directory / name
             case.mkdir()

@@ -9,8 +9,9 @@ already segmented it, renders a miniature small enough to draw in a list, and
 builds the layers for the images actually chosen.
 
 It also finds the tables. A batch run writes its object tables into a folder
-beside the plate — ``<plate>_nuclei_objects`` next to ``<plate>.zarr`` — and
-those folders are what the measurement analysis panel wants to be pointed at.
+beside the plate, naming each one after the image it measured, so the tables can
+be matched back to the images they belong to and offered on the row for that well
+and cycle.
 
 The survey itself is :func:`microscopy_viewer.batch.survey_plate`: the panel that
 runs a plate and the panel that browses it disagreeing about what is in it would
@@ -83,9 +84,19 @@ def label_sets(job: ImageJob) -> tuple[str, ...]:
         return ()
 
 
-def describe_job(job: ImageJob, labels: Sequence[str] | None = None) -> dict:
-    """One row of the image list: where it is, how big, and what has been done to it."""
+def describe_job(
+    job: ImageJob,
+    labels: Sequence[str] | None = None,
+    index: dict[str, list[Path]] | None = None,
+) -> dict:
+    """One row of the image list: where it is, how big, and what has been done to it.
+
+    Given a *index* from :func:`table_index`, the row also says which object
+    tables were written for this image — which is how the list shows at a glance
+    both what has been segmented and what has been measured.
+    """
     names = tuple(labels) if labels is not None else label_sets(job)
+    tables = [] if index is None else tables_for(job, index)
     level = job.levels[0] if job.levels else None
     shape = "" if level is None else " x ".join(str(int(n)) for n in level.shape)
     return {
@@ -102,12 +113,16 @@ def describe_job(job: ImageJob, labels: Sequence[str] | None = None) -> dict:
         "levels": len(job.levels),
         "segmentations": ", ".join(names),
         "n_segmentations": len(names),
+        "tables": ", ".join(path.parent.name for path in tables),
+        "n_tables": len(tables),
+        "table_paths": tables,
     }
 
 
 def describe_plate(survey: PlateSurvey) -> list[dict]:
     """A row per image of the plate, in the order the plate lists them."""
-    return [describe_job(job) for job in survey.jobs]
+    index = table_index(analysis_folders(survey.path))
+    return [describe_job(job, index=index) for job in survey.jobs]
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +304,78 @@ def analysis_folders(plate_path: str | Path) -> list[Path]:
     folders = [entry for _rank, _name, entry in sorted(scored, key=lambda item: item[:2])]
     logger.info("found %d analysis folder(s) beside %s", len(folders), plate.name)
     return folders
+
+
+def table_key(component: str) -> str:
+    """The stem a run writes a component's table under: ``B/02/0`` -> ``B_02_0``.
+
+    :func:`microscopy_viewer.batch.run_batch` flattens the path of the image
+    inside the store, so the image a table belongs to can be read back out of its
+    file name. This is the other half of that.
+    """
+    return str(component).strip("/").replace("/", "_")
+
+
+def component_of(table: str | Path) -> str:
+    """The image a table was written for: ``B_02_0.csv`` -> ``B/02/0``.
+
+    The inverse of :func:`table_key`, and the same reading
+    :func:`microscopy_viewer.analysis.component_from_name` does when it matches a
+    table to a layer — one implementation, so the two cannot drift apart.
+    """
+    from .analysis import component_from_name
+
+    return component_from_name(Path(str(table)).stem)
+
+
+def table_index(folders: Sequence[Path]) -> dict[str, list[Path]]:
+    """``{stem: [table, ...]}`` across every analysis folder, built in one pass.
+
+    An index rather than a search per image: a plate is a few hundred images and
+    half a dozen folders, and asking the filesystem that many times to fill one
+    column is a panel that takes a second to draw every time the selection moves.
+    """
+    index: dict[str, list[Path]] = {}
+    for folder in folders:
+        for table in analysis_tables(folder):
+            index.setdefault(table.stem, []).append(table)
+    return index
+
+
+def tables_for(job: ImageJob, index: dict[str, list[Path]]) -> list[Path]:
+    """Tables written for *this* image, exact matches first.
+
+    Two names are accepted: the image's own component (``B_02_0``, what a batch
+    run writes) and the well without the field (``B_02``, what a pipeline that
+    assumes one image per well writes). Nothing else — guessing wider would offer
+    a neighbouring well's numbers for this well's objects.
+    """
+    found: list[Path] = []
+    for key in (table_key(job.component), table_key(job.well)):
+        for table in index.get(key, ()):
+            if table not in found:
+                found.append(table)
+    return found
+
+
+def related_tables(job: ImageJob, index: dict[str, list[Path]]) -> list[Path]:
+    """Tables written for another acquisition of the same well.
+
+    Worth offering, and worth keeping separate. A 4i plate images the same cells
+    every cycle, so a table measured on cycle 1 describes the objects in cycle 3
+    as well — but it is not *this* image's table, and the segmentation it refers
+    to lives in the image it was run on.
+    """
+    mine = set(tables_for(job, index))
+    prefix = f"{table_key(job.well)}_"
+    found: list[Path] = []
+    for key, tables in index.items():
+        if not key.startswith(prefix):
+            continue
+        for table in tables:
+            if table not in mine and table not in found:
+                found.append(table)
+    return sorted(found, key=lambda path: path.name.lower())
 
 
 def analysis_tables(folder: str | Path) -> list[Path]:

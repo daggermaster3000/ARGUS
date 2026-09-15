@@ -667,6 +667,16 @@ class BatchSegmentationWidget(QWidget):
             except Exception:
                 logger.exception("could not write the batch summary")
 
+        # The explorer lists the tables beside the plate off an index it built when
+        # it scanned; a run that has just written more of them makes that stale.
+        explorer_panel = (getattr(self._app, "panels", {}) or {}).get("file_explorer")
+        rescan = getattr(explorer_panel, "tables_changed", None)
+        if rescan is not None:
+            try:
+                rescan()
+            except Exception:
+                logger.exception("could not refresh the explorer's table list")
+
         text = report.describe()
         if report.summary_path is not None:
             text += f" Summary: {report.summary_path}"
