@@ -35,6 +35,12 @@ scales the matrix in place, which is what the clustering needs and is not what
 someone colouring by "Mean intensity" expects to see. :func:`colour_scale` is the
 choice between the two, and between this image's range and the plate's.
 
+**Every well can be drawn at once.** :func:`well_views` reduces a clustered plate
+to a few hundred points per well and :func:`store_well_views` keeps them in the
+file, so the plate display is a grid of live panels rather than a wall of
+pictures — the objects are still there to be pointed at. The clustering is what
+costs minutes and is what the caching saves.
+
 **A clustering can go back into the plate.** :func:`assignment_frame` and
 :func:`cluster_run` prepare what :mod:`microscopy_viewer.clusters` needs to paint
 each object's phenotype onto the nucleus it was measured from, as another label
@@ -63,7 +69,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -689,6 +695,187 @@ def plate_grid(shares, group: str):
     frame = pd.DataFrame(rows).T
     frame = frame.reindex(sorted(frame.index))
     return frame.reindex(columns=sorted(frame.columns, key=lambda c: (len(c), c)))
+
+
+#: Where the per-well views are kept inside the file.
+WELL_VIEWS_KEY = "well_views"
+
+#: Objects kept per well for the plate display. Forty-four panels of this many
+#: points is a page that draws and hovers instantly; the whole plate would be half
+#: a million points held in the browser.
+DEFAULT_VIEW_POINTS = 500
+
+
+def well_views(
+    adata,
+    per_well: int = DEFAULT_VIEW_POINTS,
+    key: str = CLUSTER_KEY,
+    seed: int = 0,
+    source=None,
+):
+    """One spatial view per well, as points rather than as a picture.
+
+    Takes a plate that has already been clustered — so the clusters mean the same
+    thing in every panel, which is the only reason the wells can be laid out side
+    by side and compared at all — and reduces it to what a small panel can draw:
+    a few hundred objects per well with their position and their phenotype.
+
+    Points and not a rendering, because a picture cannot be pointed at. The
+    expensive part of this is the clustering, and that is what the caching saves;
+    redrawing a few hundred points is free.
+
+    *source* is the file the plate was sampled out of, used only to count how many
+    objects each well really holds. Counting them in *adata* instead would report
+    the size of the sample, and a tooltip saying a well holds 400 objects when it
+    holds 46 394 is worse than one saying nothing.
+    """
+    import pandas as pd
+
+    if "spatial" not in adata.obsm:
+        raise ValueError("this file has no obsm['spatial']; there is nothing to lay out")
+    if key not in adata.obs:
+        raise ValueError(f"nothing has been clustered into obs[{key!r}] yet")
+
+    xy = np.asarray(adata.obsm["spatial"], dtype=float)
+    images = (
+        adata.obs[IMAGE_KEY].astype(str).to_numpy()
+        if IMAGE_KEY in adata.obs
+        else np.array([""] * adata.n_obs)
+    )
+    clusters = adata.obs[key].astype(str).to_numpy()
+    labels = (
+        adata.obs["label"].to_numpy()
+        if "label" in adata.obs
+        else np.arange(adata.n_obs)
+    )
+
+    # How big each well really is, from the whole file when it was given.
+    totals: dict[str, int] = {}
+    if source is not None and IMAGE_KEY in source.obs:
+        counts = source.obs[IMAGE_KEY].astype(str).value_counts()
+        totals = {str(name): int(value) for name, value in counts.items()}
+
+    rng = np.random.default_rng(seed)
+    chosen: list[np.ndarray] = []
+    for image in sorted(set(images)):
+        where = np.flatnonzero(images == image)
+        totals.setdefault(str(image), int(where.size))
+        if where.size > int(per_well):
+            where = np.sort(rng.choice(where, size=int(per_well), replace=False))
+        chosen.append(where)
+    picked = np.concatenate(chosen) if chosen else np.empty(0, dtype=int)
+
+    names = [str(name) for name in _categories(adata.obs[key])]
+    frame = pd.DataFrame(
+        {
+            "image": images[picked],
+            "well": [well_of(name) for name in images[picked]],
+            "x": xy[picked, 0],
+            "y": xy[picked, 1],
+            "cluster": clusters[picked],
+            "label": np.asarray(labels)[picked],
+        }
+    )
+    logger.info(
+        "well views: %d point(s) over %d well(s), at most %d each",
+        len(frame),
+        len(totals),
+        per_well,
+    )
+    return frame, {
+        "method": str(adata.uns.get(f"{key}_method", "clustering")),
+        "clusters": names,
+        "colors": [colour_map(names)[name] for name in names],
+        "per_well": per_well,
+        "totals": totals,
+    }
+
+
+def _categories(column) -> list:
+    categories = getattr(getattr(column, "cat", None), "categories", None)
+    if categories is not None:
+        return list(categories)
+    return sorted({str(value) for value in column})
+
+
+def store_well_views(adata, frame, meta: dict) -> None:
+    """Put the views into ``uns`` as flat arrays, which is what h5ad round-trips.
+
+    Flat columns rather than a dict per well: a nested structure of forty-four
+    small dicts survives a write and a read only if every reader agrees on the
+    nesting, and a table does not need them to.
+    """
+    adata.uns[WELL_VIEWS_KEY] = {
+        "image": np.asarray(frame["image"], dtype=object).astype(str),
+        "x": np.asarray(frame["x"], dtype=float),
+        "y": np.asarray(frame["y"], dtype=float),
+        "cluster": np.asarray(frame["cluster"], dtype=object).astype(str),
+        "label": np.asarray(frame["label"]).astype(np.int64),
+        "clusters": [str(name) for name in meta.get("clusters", [])],
+        "colors": [str(colour) for colour in meta.get("colors", [])],
+        "method": str(meta.get("method", "")),
+        "per_well": int(meta.get("per_well", 0)),
+        "totals_image": [str(name) for name in (meta.get("totals") or {})],
+        "totals_count": [int(value) for value in (meta.get("totals") or {}).values()],
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def load_well_views(adata):
+    """``(frame, meta)`` from a file that has them, or ``(None, {})``."""
+    import pandas as pd
+
+    block = adata.uns.get(WELL_VIEWS_KEY)
+    if not isinstance(block, (dict, Mapping)) or "x" not in block:
+        return None, {}
+    try:
+        frame = pd.DataFrame(
+            {
+                "image": [str(value) for value in block["image"]],
+                "x": np.asarray(block["x"], dtype=float),
+                "y": np.asarray(block["y"], dtype=float),
+                "cluster": [str(value) for value in block["cluster"]],
+                "label": np.asarray(block["label"]).astype(int),
+            }
+        )
+    except Exception:
+        logger.exception("the stored well views could not be read")
+        return None, {}
+    frame["well"] = [well_of(name) for name in frame["image"]]
+    totals = dict(
+        zip(
+            [str(name) for name in block.get("totals_image", [])],
+            [int(value) for value in block.get("totals_count", [])],
+        )
+    )
+    meta = {
+        "method": str(block.get("method", "")),
+        "clusters": [str(name) for name in block.get("clusters", [])],
+        "colors": [str(colour) for colour in block.get("colors", [])],
+        "per_well": int(block.get("per_well", 0) or 0),
+        "created": str(block.get("created", "")),
+        "totals": totals,
+    }
+    return frame, meta
+
+
+def save_well_views(path: str | Path, adata) -> Path:
+    """Write the file back with its views in it. Returns where it went.
+
+    The whole ``.h5ad`` is rewritten, which for a plate is a hundred megabytes and
+    a few seconds; anndata has no way to add one ``uns`` entry in place, and a
+    sidecar file would be one more thing to keep beside the data and lose.
+    """
+    target = Path(str(path))
+    started = time.perf_counter()
+    adata.write_h5ad(target)
+    logger.info(
+        "well views saved into %s (%.0f MB, %.1f s)",
+        target.name,
+        target.stat().st_size / 1024 / 1024,
+        time.perf_counter() - started,
+    )
+    return target
 
 
 def assignment_frame(adata, key: str = CLUSTER_KEY):

@@ -568,6 +568,82 @@ def test_the_embedding(directory: Path) -> None:
     check(apart > spread, f"the two populations land apart ({apart:.1f} against a spread of {spread:.1f})")
 
 
+def test_well_views(directory: Path) -> None:
+    print("every well, cached in the file")
+
+    if not (_has("anndata") and _has("scanpy")):
+        print("  skip anndata/scanpy are not installed")
+        return
+    import pandas as pd
+
+    path = _plate_file(directory, images=4, per_image=150)
+    source = db.read(path)
+    whole = db.stratified_subsample(source, 100)
+    db.prepare(whole)
+    db.cluster(whole, resolution=1.0)
+
+    frame, meta = db.well_views(whole, per_well=40, source=source)
+    check(
+        set(frame.columns) >= {"image", "well", "x", "y", "cluster", "label"},
+        f"the view is points, not a picture: {sorted(frame.columns)}",
+    )
+    check(frame["image"].nunique() == 4, f"one panel per image ({frame['image'].nunique()})")
+    check(
+        int(frame.groupby("image").size().max()) <= 40,
+        "each capped at the quota so the grid stays quick",
+    )
+    check(
+        meta["totals"]["B/02/0"] == 150,
+        f"the totals are the well's real size, not the sample's — a tooltip saying a "
+        f"well holds forty objects when it holds thousands is worse than none "
+        f"({meta['totals']['B/02/0']})",
+    )
+    check(
+        len(meta["colors"]) == len(meta["clusters"]),
+        "with a colour per cluster, so the panels match the rest of the page",
+    )
+    check(
+        frame["well"].iloc[0] == db.well_of(frame["image"].iloc[0]),
+        "and the well is derived, for the tooltip",
+    )
+
+    # One clustering for the plate, or the panels could not be compared.
+    check(
+        set(frame["cluster"]) <= set(meta["clusters"]),
+        "every point's cluster is one of the plate's, not a per-well grouping",
+    )
+
+    # Round trip through the file.
+    db.store_well_views(source, frame, meta)
+    check(db.WELL_VIEWS_KEY in source.uns, "stored in uns")
+    target = db.save_well_views(directory / "with_views.h5ad", source)
+    check(target.exists(), f"written ({target.name})")
+
+    reopened = db.read(target)
+    back, back_meta = db.load_well_views(reopened)
+    check(back is not None and len(back) == len(frame), f"read back whole ({len(back)})")
+    check(
+        bool(np.allclose(np.sort(back["x"].to_numpy()), np.sort(frame["x"].to_numpy()))),
+        "with the same coordinates",
+    )
+    check(
+        back_meta["clusters"] == meta["clusters"] and back_meta["colors"] == meta["colors"],
+        "and the same clusters and colours, so the grid looks the same next time",
+    )
+    check(back_meta["method"] == meta["method"], f"and the method ({back_meta['method']})")
+    check(back_meta["totals"] == meta["totals"], "and the per-well totals")
+    check(reopened.n_obs == source.n_obs, "the objects themselves are untouched by the write")
+
+    empty, nothing = db.load_well_views(db.read(path))
+    check(empty is None and nothing == {}, "a file without them says so rather than raising")
+
+    try:
+        db.well_views(source, per_well=10)
+        check(False, "a file that has not been clustered is refused")
+    except ValueError as exc:
+        check("clustered" in str(exc), f"a file that has not been clustered is refused: {exc}")
+
+
 def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-dashboard-"))
     try:
@@ -588,6 +664,7 @@ def main() -> int:
             ("composition", test_composition_and_the_plate_grid),
             ("umap", test_the_embedding),
             ("colours", test_colours_follow_the_categories),
+            ("wellviews", test_well_views),
             ("blanks", test_blanks_do_not_poison_the_pca),
         ):
             case = directory / name

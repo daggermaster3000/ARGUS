@@ -16,6 +16,11 @@ Colour is decided in one place, :func:`microscopy_viewer.dashboard.colour_map`,
 and every plot takes it from there: a cluster is the same colour in the UMAP, in
 the well, in the composition bar and in the box plot.
 
+**Well display** is the plate laid out: every well's spatial view side by side,
+from one clustering so the colours mean the same thing in each. Computed once and
+kept in the file, as points rather than as pictures — a picture cannot be pointed
+at, and hovering is how a panel says which well it is.
+
 There are two questions here, and they do not mix. **Across the plate** asks
 which wells hold which phenotypes, in feature space, using every well at once.
 The other three tabs ask where those phenotypes sit inside one well, which is
@@ -347,6 +352,146 @@ def _guess_source(path: str) -> str:
     return "nuclei"
 
 
+#: Panels per row in the plate display, and how big each one is.
+WELL_COLUMNS = 6
+WELL_PANEL = 190
+
+
+def _well_display_tab(path: str, mtime: float) -> None:
+    """Every well's spatial view, laid out as a plate, drawn from the cached points.
+
+    Computed once and kept in the file, because what costs minutes is clustering
+    the plate — and the clusters have to come from *one* clustering or the panels
+    would each be coloured by their own groups and could not be compared, which is
+    the only reason to put them side by side.
+    """
+    source = _read(path, mtime)
+    frame, meta = db.load_well_views(source)
+
+    with st.expander("Compute the views", expanded=frame is None):
+        st.markdown(
+            "Clusters the whole plate once, reduces each well to a few hundred "
+            "objects, and keeps them in the `.h5ad` — points rather than pictures, "
+            "so every panel below can still be pointed at.\n\n"
+            "The file is rewritten, which for a plate is a hundred megabytes and a "
+            "few seconds."
+        )
+        controls = st.columns(4)
+        per_well = controls[0].number_input(
+            "Objects per well", 100, 2000, db.DEFAULT_VIEW_POINTS, step=50, key="wv_points"
+        )
+        sample = controls[1].number_input(
+            "Sampled for clustering", 100, 3000, 750, step=50, key="wv_sample",
+            help="Objects per well used to find the clusters. Separate from the number "
+                 "drawn: the clustering wants enough to find phenotypes, the panels want "
+                 "few enough to stay quick.",
+        )
+        resolution = controls[2].slider("Resolution", 0.2, 2.0, 0.6, step=0.1, key="wv_res")
+        save = controls[3].checkbox(
+            "Save into the file", value=True, key="wv_save",
+            help="Untick to look at them without rewriting the .h5ad.",
+        )
+        if st.button("Compute the well views", key="wv_go"):
+            try:
+                with st.spinner("Clustering the plate…"):
+                    whole = db.stratified_subsample(source.copy(), int(sample))
+                    db.prepare(whole)
+                    db.cluster(whole, resolution=float(resolution))
+                    frame, meta = db.well_views(
+                        whole, per_well=int(per_well), source=source
+                    )
+                    db.store_well_views(source, frame, meta)
+                if save:
+                    with st.spinner("Writing the file…"):
+                        db.save_well_views(path, source)
+                    st.success(f"Computed and saved into {Path(path).name}.")
+                else:
+                    st.success("Computed. Not saved — tick the box to keep them.")
+            except Exception as exc:  # noqa: BLE001 - shown on the page
+                st.exception(exc)
+                return
+
+    if frame is None or frame.empty:
+        st.info("No well views in this file yet. Compute them above.")
+        return
+
+    st.caption(
+        f"**{frame['image'].nunique()} wells**, {len(frame):,} points · "
+        f"{meta.get('method', 'clustering')} into {len(meta.get('clusters', []))} clusters"
+        + (f" · computed {meta['created']}" if meta.get("created") else "")
+    )
+
+    options = st.columns(3)
+    columns = options[0].slider("Panels per row", 2, 10, WELL_COLUMNS, key="wv_cols")
+    size = options[1].slider("Panel size", 110, 320, WELL_PANEL, step=10, key="wv_size")
+    shared = options[2].checkbox(
+        "One scale for every well", value=True, key="wv_shared",
+        help="On, the panels are on the same micrometre scale, so a small well looks "
+             "small. Off, each fills its own panel, which shows its structure better "
+             "and makes the wells look the same size.",
+    )
+
+    names = [str(name) for name in meta.get("clusters", [])] or sorted(
+        frame["cluster"].astype(str).unique()
+    )
+    stored = [str(colour) for colour in meta.get("colors", [])]
+    mapping = (
+        dict(zip(names, stored)) if len(stored) == len(names) else db.colour_map(names)
+    )
+    chosen = st.multiselect(
+        "Show clusters", names, default=names, key="wv_clusters",
+        help="Narrow to one phenotype to see where it sits in every well at once — "
+             "which is the question this layout exists for.",
+    )
+    shown = frame[frame["cluster"].astype(str).isin(chosen)] if chosen else frame
+
+    totals = meta.get("totals") or {}
+    shown = shown.assign(
+        objects_in_well=[int(totals.get(str(image), 0)) for image in shown["image"]]
+    )
+
+    domain = [name for name in names if name in set(chosen or names)]
+    chart = (
+        alt.Chart(shown)
+        .mark_circle(size=9, opacity=0.8)
+        .encode(
+            x=alt.X("x:Q", title=None, axis=None, scale=alt.Scale(zero=False, nice=False)),
+            y=alt.Y(
+                "y:Q", title=None, axis=None,
+                scale=alt.Scale(zero=False, nice=False, reverse=True),
+            ),
+            color=alt.Color(
+                "cluster:N",
+                scale=alt.Scale(domain=domain, range=[mapping[n] for n in domain]),
+                legend=alt.Legend(title="cluster", symbolSize=80),
+            ),
+            tooltip=[
+                alt.Tooltip("well:N"),
+                alt.Tooltip("image:N", title="image"),
+                alt.Tooltip("cluster:N"),
+                alt.Tooltip("label:Q", title="object"),
+                alt.Tooltip("objects_in_well:Q", title="objects in well"),
+                alt.Tooltip("x:Q", format=".0f"),
+                alt.Tooltip("y:Q", format=".0f"),
+            ],
+        )
+        .properties(width=int(size), height=int(size))
+        .facet(facet=alt.Facet("image:N", title=None, sort=sorted(frame["image"].unique())),
+               columns=int(columns))
+    )
+    if not shared:
+        chart = chart.resolve_scale(x="independent", y="independent")
+    st.altair_chart(chart)
+    st.caption(
+        "Point at any object in any panel: it says its well, its cluster and how many "
+        "objects that well holds in total. The panels share one clustering, which is "
+        "what makes them comparable — a per-well clustering would colour each by its "
+        "own groups."
+        + ("" if shared else " Each panel is on its own scale, so the wells are not "
+           "comparable in size.")
+    )
+
+
 def _plate_tab(path: str, mtime: float, colour_scale: str = "scaled") -> None:
     """Every well at once: a UMAP in feature space, and what each well is made of.
 
@@ -671,9 +816,13 @@ def main() -> None:
         + f" · grouped by {method} into {len(groups)} · joined by {graph}"
     )
 
-    plate, look, phenotype, space = st.tabs(
-        ["Across the plate", "Where they are", "What they are", "Does it mean anything"]
+    plate, wells, look, phenotype, space = st.tabs(
+        ["Across the plate", "Well display", "Where they are", "What they are",
+         "Does it mean anything"]
     )
+
+    with wells:
+        _well_display_tab(path, mtime)
 
     # -- every well at once ---------------------------------------------------
     with plate:

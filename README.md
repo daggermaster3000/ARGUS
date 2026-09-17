@@ -923,6 +923,33 @@ colours back.
 | **select** | `rectangle` or `lasso` to pick objects out of the plot; `off` leaves the drag to pan the axes. |
 | **x** / **y** | The scatter axes. Above 100 000 points the plot draws a random sample, and says so — random rather than the first N, because a table is written in label order and the first N would be one corner of the well. |
 
+#### Well display
+
+Every well's spatial view, side by side as a plate. **Computed once and kept in
+the `.h5ad`**, so opening the tab again is instant:
+
+```
+44 wells, 12,094 points · leiden into 14 clusters · computed 2026-09-17 10:03
+```
+
+**Points, not pictures.** A rendered image cannot be pointed at, so what is cached
+is each well's subsampled coordinates, cluster and object id — about 2 MB for a
+44-well plate. Every panel is live: hovering any object names its well, its
+cluster, its object id and how many objects that well really holds. The expensive
+part is clustering the plate, and that is what the caching saves; redrawing a few
+hundred points is free.
+
+**One clustering for the whole plate**, which is the only reason the panels can be
+compared at all — cluster 3 means the same thing in every one. A per-well
+clustering would colour each panel by its own groups and the grid would be
+meaningless.
+
+**Show clusters** narrows to one phenotype and shows where it sits in every well
+at once, which is the question the layout exists for. **One scale for every well**
+keeps the panels on the same micrometre scale, so a small well looks small; turn
+it off and each fills its own panel, which shows structure better and makes the
+wells look the same size.
+
 #### Writing a clustering back into the plate
 
 A phenotype is a row in a table until it is in the image. **Write these clusters
@@ -1029,11 +1056,12 @@ process: the spatial work is minutes of CPU that has no business blocking the
 window the images are in, and Streamlit's event loop would fight Qt's. Closing
 the viewer leaves it running.
 
-Four tabs. The first asks a different kind of question from the other three:
+Five tabs. The first two ask a different kind of question from the other three:
 
 | Tab | What it answers |
 |---|---|
 | **Across the plate** | which wells hold which phenotypes — every well at once, in feature space, as a UMAP |
+| **Well display** | the plate laid out — every well's spatial view side by side, from one clustering |
 | **Where they are** | the well as a scatter, coloured by phenotype or by any measurement, with how many objects fall in each group |
 | **What they are** | which measurements separate the groups — a box per group, and any two features against each other |
 | **Does it mean anything** | neighbourhood enrichment, Ripley's L, co-occurrence, Moran's I, centrality |
