@@ -13,10 +13,15 @@ Nothing is overwritten: the nuclei stay exactly as they were, and the clustering
 is a second label set that can be deleted without touching them.
 
 **The cluster ids are not the object ids.** A cluster map has a handful of values
-where the nuclei mask has tens of thousands, and an object that the clustering
-never saw — one subsampled out of the run — is left at zero rather than guessed
-at. :func:`paint_clusters` is where that happens and it is the only arithmetic
-here worth checking.
+where the nuclei mask has tens of thousands. :func:`paint_clusters` is where that
+mapping happens and it is the only arithmetic here worth checking.
+
+**An object with no entry is painted zero**, the same as background. Whether that
+happens to many objects or none is the caller's decision, not this module's: a
+clustering runs on a sample, and
+:func:`microscopy_viewer.dashboard.assign_all` is what gives the rest of the plate
+a cluster before it gets here. Passing only the sampled objects leaves a label
+layer that is almost entirely empty, which is why that is not the default.
 
 **What produced it travels with it.** The method, the resolution, the features it
 was computed from, the label set it was painted onto and how many objects were
@@ -64,6 +69,12 @@ class ClusterRun:
     features: tuple[str, ...] = ()
     resolution: float | None = None
     n_objects: int = 0
+    #: How many of :attr:`n_objects` had their cluster computed, and how many were
+    #: predicted from their neighbours because the clustering never sampled them.
+    #: Kept apart because they are not the same claim: one is a measurement of this
+    #: object, the other is what the objects nearest it in feature space are.
+    n_clustered: int = 0
+    n_assigned: int = 0
     colors: tuple[str, ...] = ()
     created: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
@@ -76,6 +87,8 @@ class ClusterRun:
             "features": [str(name) for name in self.features],
             "resolution": None if self.resolution is None else float(self.resolution),
             "n_objects": int(self.n_objects),
+            "n_clustered": int(self.n_clustered),
+            "n_assigned": int(self.n_assigned),
             "colors": [str(colour) for colour in self.colors],
             "created": self.created or time.strftime("%Y-%m-%d %H:%M:%S"),
             **self.extra,
@@ -87,6 +100,10 @@ class ClusterRun:
             parts.append(f"on {self.source}")
         if self.n_objects:
             parts.append(f"{self.n_objects:,} objects")
+        if self.n_assigned:
+            parts.append(
+                f"{self.n_clustered:,} clustered, {self.n_assigned:,} assigned by neighbours"
+            )
         return ", ".join(parts)
 
 
@@ -330,6 +347,8 @@ def read_run(group) -> ClusterRun | None:
         features=tuple(str(name) for name in (block.get("features") or [])),
         resolution=block.get("resolution"),
         n_objects=int(block.get("n_objects") or 0),
+        n_clustered=int(block.get("n_clustered") or 0),
+        n_assigned=int(block.get("n_assigned") or 0),
         colors=tuple(str(colour) for colour in (block.get("colors") or [])),
         created=str(block.get("created", "")),
     )

@@ -41,6 +41,12 @@ file, so the plate display is a grid of live panels rather than a wall of
 pictures — the objects are still there to be pointed at. The clustering is what
 costs minutes and is what the caching saves.
 
+**Most objects were never clustered.** A plate is sampled a few hundred objects a
+well, which on this data is two per cent of them; the other ninety-eight have no
+phenotype at all. :func:`assign_all` gives them one from their neighbours in the
+same feature space, and marks it as the prediction it is, so that a label layer
+written into the plate is not ninety-eight per cent empty.
+
 **A clustering can go back into the plate.** :func:`assignment_frame` and
 :func:`cluster_run` prepare what :mod:`microscopy_viewer.clusters` needs to paint
 each object's phenotype onto the nucleus it was measured from, as another label
@@ -878,6 +884,133 @@ def save_well_views(path: str | Path, adata) -> Path:
     return target
 
 
+#: Neighbours voting when an unsampled object is given a cluster.
+DEFAULT_ASSIGN_NEIGHBOURS = 15
+
+#: How an object came by its cluster, written into the assignment table and into
+#: the plate's metadata. The difference matters: one was computed, the other is a
+#: prediction from the objects around it in feature space.
+ORIGIN_CLUSTERED = "clustered"
+ORIGIN_ASSIGNED = "assigned"
+
+
+def project(reference, source) -> np.ndarray:
+    """*source*'s objects in *reference*'s own principal components.
+
+    :func:`prepare` z-scores and then rotates; both steps have to be repeated
+    exactly, not refitted, or the projected objects land in a different space from
+    the ones the clusters were found in. scanpy keeps the column means and
+    deviations in ``var`` and the rotation in ``varm['PCs']``, which is everything
+    needed.
+
+    *source* must hold the **unscaled** measurements — the file as it was read.
+    Handing it one that has already been through :func:`prepare` scales it twice
+    and puts every object in the wrong place, silently, so that is refused.
+    """
+    if "std" in getattr(source, "var", {}) and "PCs" in source.varm:
+        raise ValueError(
+            "this source has already been scaled; project() needs the raw measurements, "
+            "which is the file as it was read"
+        )
+    if "PCs" not in reference.varm:
+        raise ValueError("the reference has no PCA to project into; run prepare() first")
+
+    columns = [str(name) for name in reference.var_names]
+    missing = [name for name in columns if name not in set(source.var_names)]
+    if missing:
+        raise ValueError(f"the file is missing {len(missing)} of the clustered features")
+
+    matrix = source[:, columns].X
+    matrix = np.asarray(matrix.todense() if hasattr(matrix, "todense") else matrix, dtype=np.float64)
+
+    mean = np.asarray(reference.var.get("mean", np.zeros(len(columns))), dtype=float)
+    deviation = np.asarray(reference.var.get("std", np.ones(len(columns))), dtype=float)
+    deviation = np.where(np.isfinite(deviation) & (deviation > 0), deviation, 1.0)
+
+    scaled = (np.nan_to_num(matrix, nan=0.0) - mean) / deviation
+    # scanpy's scale() clips at ten deviations; an object outside the sample can
+    # be further out than anything inside it, and without the same clip one
+    # outlier would dominate the distance to every neighbour.
+    np.clip(scaled, -10.0, 10.0, out=scaled)
+    return scaled @ np.asarray(reference.varm["PCs"], dtype=float)
+
+
+def assign_all(
+    reference,
+    source,
+    key: str = CLUSTER_KEY,
+    n_neighbors: int = DEFAULT_ASSIGN_NEIGHBOURS,
+    progress=None,
+):
+    """A cluster for every object in *source*, and how each one got it.
+
+    The clustering runs on a sample — a few hundred objects a well out of tens of
+    thousands — so most objects have no cluster at all. Painting only those into
+    the plate leaves a label layer that is mostly empty and badly misrepresents
+    how common a phenotype is. This gives the rest one by asking their nearest
+    neighbours in the same feature space.
+
+    That is a **prediction**, not a measurement, and the ``origin`` column says
+    which is which for every object so a count can be taken over one or the other.
+    """
+    import pandas as pd
+
+    if key not in reference.obs:
+        raise ValueError(f"nothing has been clustered into obs[{key!r}] yet")
+
+    names = [str(name) for name in _categories(reference.obs[key])]
+    known = {str(name): str(value) for name, value in zip(reference.obs_names, reference.obs[key])}
+
+    index = source.obs_names.astype(str)
+    clusters = np.array([known.get(name, "") for name in index], dtype=object)
+    unknown = clusters == ""
+    if progress is not None:
+        progress(f"{int(unknown.sum()):,} of {source.n_obs:,} objects to assign")
+
+    if unknown.any():
+        from sklearn.neighbors import KNeighborsClassifier
+
+        classifier = KNeighborsClassifier(
+            n_neighbors=int(min(n_neighbors, max(1, reference.n_obs))), n_jobs=-1
+        )
+        classifier.fit(
+            np.asarray(reference.obsm["X_pca"], dtype=float),
+            reference.obs[key].astype(str).to_numpy(),
+        )
+        started = time.perf_counter()
+        predicted = classifier.predict(project(reference, source[unknown]))
+        clusters[unknown] = predicted
+        logger.info(
+            "assigned %d object(s) by %d-neighbour vote in %.1f s",
+            int(unknown.sum()),
+            classifier.n_neighbors,
+            time.perf_counter() - started,
+        )
+
+    frame = pd.DataFrame(
+        {
+            "label": (
+                source.obs["label"].to_numpy()
+                if "label" in source.obs
+                else np.arange(source.n_obs)
+            ),
+            "cluster": pd.Categorical([str(value) for value in clusters], categories=names),
+            "image": (
+                source.obs[IMAGE_KEY].astype(str).to_numpy()
+                if IMAGE_KEY in source.obs
+                else ""
+            ),
+            "origin": np.where(unknown, ORIGIN_ASSIGNED, ORIGIN_CLUSTERED),
+        }
+    )
+    logger.info(
+        "every object has a cluster: %d computed, %d assigned",
+        int((~unknown).sum()),
+        int(unknown.sum()),
+    )
+    return frame
+
+
 def assignment_frame(adata, key: str = CLUSTER_KEY):
     """``label``, ``cluster`` and ``image`` per object, ready to be painted back.
 
@@ -909,17 +1042,36 @@ def assignment_frame(adata, key: str = CLUSTER_KEY):
     return frame
 
 
-def cluster_run(adata, key: str = CLUSTER_KEY, source_labels: str = "", **extra):
-    """The provenance record for a clustering about to be written into a plate."""
+def cluster_run(
+    adata,
+    key: str = CLUSTER_KEY,
+    source_labels: str = "",
+    frame=None,
+    **extra,
+):
+    """The provenance record for a clustering about to be written into a plate.
+
+    *frame* is the assignment table when there is one, so the record can say how
+    many objects had their cluster computed and how many were predicted.
+    """
     from .clusters import ClusterRun, cluster_names
 
     names = cluster_names(adata.obs[key])
+    n_objects = int(adata.n_obs)
+    n_clustered, n_assigned = n_objects, 0
+    if frame is not None and "origin" in getattr(frame, "columns", ()):
+        counts = frame["origin"].value_counts()
+        n_objects = int(len(frame))
+        n_clustered = int(counts.get(ORIGIN_CLUSTERED, 0))
+        n_assigned = int(counts.get(ORIGIN_ASSIGNED, 0))
     return ClusterRun(
         method=str(adata.uns.get(f"{key}_method", "clustering")),
         names=tuple(names),
         source=str(source_labels),
         features=tuple(str(name) for name in adata.var_names),
-        n_objects=int(adata.n_obs),
+        n_objects=n_objects,
+        n_clustered=n_clustered,
+        n_assigned=n_assigned,
         colors=tuple(colour_map(names)[name] for name in names),
         extra=dict(extra),
     )

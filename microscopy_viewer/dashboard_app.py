@@ -251,6 +251,20 @@ def _write_back(adata, path: str, groups: list) -> None:
             "the colours on this page, with the method recorded on it."
         )
 
+        every = st.radio(
+            "Which objects",
+            ["Every object", "Only the ones that were clustered"],
+            help=(
+                "The clustering runs on a sample — a few hundred objects a well — so "
+                "most objects have no cluster of their own. Writing only those leaves a "
+                "label layer that is almost entirely empty and makes a phenotype look "
+                "far rarer than it is.\n\n"
+                "“Every object” gives the rest a cluster from their nearest neighbours in "
+                "the same feature space. That is a prediction rather than a measurement, "
+                "and how many of each is recorded on the layer."
+            ),
+        ).startswith("Every")
+
         plate = st.text_input(
             "Plate (.zarr)",
             value=str(_guess_plate(path) or ""),
@@ -284,16 +298,24 @@ def _write_back(adata, path: str, groups: list) -> None:
         from microscopy_viewer import batch as mvbatch
         from microscopy_viewer import clusters as mvclusters
 
+        progress = st.empty()
         try:
             survey = mvbatch.survey_plate(plate)
-            frame = db.assignment_frame(adata)
+            if every:
+                with st.spinner("Giving every object a cluster…"):
+                    frame = db.assign_all(
+                        adata,
+                        _read(path, _Path(path).stat().st_mtime),
+                        progress=lambda text: progress.write(text),
+                    )
+            else:
+                frame = db.assignment_frame(adata)
             assignments = mvclusters.assignments_from_frame(frame)
-            run = db.cluster_run(adata, source_labels=source, plate=str(plate))
+            run = db.cluster_run(adata, source_labels=source, frame=frame, plate=str(plate))
         except Exception as exc:  # noqa: BLE001 - shown on the page
             st.exception(exc)
             return
 
-        progress = st.empty()
         rows = mvclusters.write_plate_clusters(
             survey,
             assignments,

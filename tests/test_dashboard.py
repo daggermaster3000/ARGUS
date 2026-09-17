@@ -644,6 +644,121 @@ def test_well_views(directory: Path) -> None:
         check("clustered" in str(exc), f"a file that has not been clustered is refused: {exc}")
 
 
+def test_every_object_gets_a_cluster(directory: Path) -> None:
+    print("the objects the clustering never sampled")
+
+    if not (_has("anndata") and _has("scanpy") and _has("sklearn")):
+        print("  skip anndata/scanpy/scikit-learn are not installed")
+        return
+
+    path = _plate_file(directory, images=3, per_image=400)
+    source = db.read(path)
+    reference = db.stratified_subsample(source, 60)
+    db.prepare(reference)
+    db.cluster(reference, resolution=1.0)
+    check(
+        reference.n_obs < source.n_obs / 4,
+        f"the clustering saw a small fraction of the objects ({reference.n_obs} of "
+        f"{source.n_obs}) — which is the whole problem",
+    )
+
+    # Projection: the rest have to land in the space the clusters were found in,
+    # not in a space refitted to themselves. Checked by pushing the *raw* rows of
+    # the objects that were clustered back through, and asking for the components
+    # they already have.
+    everything = db.project(reference, source)
+    check(
+        everything.shape == (source.n_obs, reference.obsm["X_pca"].shape[1]),
+        f"every object can be put into that space {everything.shape}",
+    )
+    where = source.obs_names.get_indexer(reference.obs_names)
+    check(
+        bool(np.allclose(everything[where], reference.obsm["X_pca"], atol=1e-3)),
+        "and an object that was clustered lands exactly where the clustering put it, "
+        "which is what says the scaling and the rotation were reused rather than refitted",
+    )
+    try:
+        db.project(reference, reference)
+        check(False, "projecting an already-scaled source is refused")
+    except ValueError as exc:
+        check(
+            "already been scaled" in str(exc),
+            "projecting an already-scaled source is refused rather than silently "
+            "scaling it twice",
+        )
+
+    frame = db.assign_all(reference, source)
+    check(len(frame) == source.n_obs, f"one row per object in the file ({len(frame)})")
+    check(
+        (frame["cluster"].astype(str) != "").all(),
+        "every one of them has a cluster — the point of the exercise",
+    )
+    check(
+        set(frame["cluster"].astype(str)) <= set(str(c) for c in reference.obs[db.CLUSTER_KEY].cat.categories),
+        "and it is one of the clusters that were actually found",
+    )
+
+    counts = frame["origin"].value_counts()
+    check(
+        int(counts.get(db.ORIGIN_CLUSTERED, 0)) == reference.n_obs,
+        f"the sampled objects keep the cluster they were given ({counts.get(db.ORIGIN_CLUSTERED, 0)})",
+    )
+    check(
+        int(counts.get(db.ORIGIN_ASSIGNED, 0)) == source.n_obs - reference.n_obs,
+        "and the rest are marked as predicted rather than passed off as computed",
+    )
+
+    # The objects that were clustered must come back with the cluster they had,
+    # not with whatever their neighbours vote for.
+    by_name = dict(zip(source.obs_names.astype(str), frame["cluster"].astype(str)))
+    kept = [
+        by_name[str(name)] == str(value)
+        for name, value in zip(reference.obs_names, reference.obs[db.CLUSTER_KEY])
+    ]
+    check(all(kept), f"{sum(kept)} of {len(kept)} sampled objects keep their own cluster")
+
+    # The fixture is two well-separated blobs. A sound prediction puts the large
+    # objects into the clusters the large objects it *did* see went into; the test
+    # is that the two distributions agree, not that either is concentrated.
+    import pandas as pd
+
+    big = db.values_of(source, "Voxels") > 650
+    shares = pd.crosstab(
+        frame["cluster"].astype(str)[big], frame["origin"][big], normalize="columns"
+    )
+    if db.ORIGIN_ASSIGNED in shares and db.ORIGIN_CLUSTERED in shares:
+        drift = float((shares[db.ORIGIN_ASSIGNED] - shares[db.ORIGIN_CLUSTERED]).abs().sum() / 2)
+        check(
+            drift < 0.35,
+            f"predicted objects go into the same clusters as the measured ones of the "
+            f"same kind ({drift:.0%} of the distribution moved)",
+        )
+    labelled = frame["cluster"].astype(str).to_numpy()
+    top_big = pd.Series(labelled[big]).value_counts().index[0]
+    top_small = pd.Series(labelled[~big]).value_counts().index[0]
+    check(
+        top_big != top_small,
+        f"and the two populations are not swept into one cluster (large -> {top_big}, "
+        f"small -> {top_small})",
+    )
+
+    run = db.cluster_run(reference, source_labels="nuclei", frame=frame)
+    check(
+        run.n_clustered == reference.n_obs and run.n_assigned == source.n_obs - reference.n_obs,
+        f"and the record keeps the two apart ({run.n_clustered} clustered, "
+        f"{run.n_assigned} assigned)",
+    )
+    check(
+        "assigned by neighbours" in run.describe(),
+        f"saying so out loud on the layer: {run.describe()}",
+    )
+    plain = db.cluster_run(reference, source_labels="nuclei")
+    check(
+        plain.n_assigned == 0 and "assigned" not in plain.describe(),
+        "while a run that wrote only what it clustered claims nothing of the sort",
+    )
+
+
 def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-dashboard-"))
     try:
@@ -665,6 +780,7 @@ def main() -> int:
             ("umap", test_the_embedding),
             ("colours", test_colours_follow_the_categories),
             ("wellviews", test_well_views),
+            ("assignall", test_every_object_gets_a_cluster),
             ("blanks", test_blanks_do_not_poison_the_pca),
         ):
             case = directory / name

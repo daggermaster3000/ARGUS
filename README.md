@@ -966,9 +966,29 @@ AssayPlate_….zarr/G/07/0/labels/
 The nuclei are never edited — this is a second label set beside them, and deleting
 it leaves the segmentation exactly as it was.
 
-**An object the clustering did not see stays background.** The plate tab samples
-a few hundred objects per well, so most objects in a big well were never assigned;
-painting them into some "other" cluster would invent a phenotype they do not have.
+**Every object, by default.** The clustering runs on a sample — a few hundred
+objects per well, which on the example plate is 2 % of them — so writing only the
+objects it saw leaves a label layer that is almost entirely empty and makes every
+phenotype look far rarer than it is:
+
+```
+sample only    300 of 18,428 painted in G/07    1.7 % of the nuclei covered
+every object  18,428 of 18,428                  100 %
+```
+
+The rest are given a cluster by a fifteen-neighbour vote in the same feature
+space — the scaling and the rotation the clustering used, reapplied rather than
+refitted, so an object that *was* clustered lands exactly where the clustering
+put it. That is a **prediction, not a measurement**, and the layer says which is
+which:
+
+```
+leiden, 13 cluster(s), on analysis-1, 557,915 objects,
+12,094 clustered, 545,821 assigned by neighbours
+```
+
+**Only the ones that were clustered** is still there for when only the measured
+objects will do.
 
 **What produced it travels with it.** The method, the resolution, the features, the
 label set it was painted onto, the cluster names and the colours are written into
