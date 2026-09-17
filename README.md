@@ -925,24 +925,24 @@ colours back.
 
 #### Well display
 
-Every well's spatial view, side by side as a plate. **Computed once and kept in
-the `.h5ad`**, so opening the tab again is instant:
+Every well's spatial view, side by side as a plate, drawn from the one clustering
+stored in the `.h5ad`:
 
 ```
-44 wells, 12,094 points · leiden into 14 clusters · computed 2026-09-17 10:03
+44 wells, 12,094 points drawn of 557,915 · leiden into 15 clusters
 ```
 
-**Points, not pictures.** A rendered image cannot be pointed at, so what is cached
-is each well's subsampled coordinates, cluster and object id — about 2 MB for a
-44-well plate. Every panel is live: hovering any object names its well, its
-cluster, its object id and how many objects that well really holds. The expensive
-part is clustering the plate, and that is what the caching saves; redrawing a few
-hundred points is free.
+**Points, not pictures.** A rendered image cannot be pointed at. Every panel is
+live: hovering any object names its well, its cluster, its object id and how many
+objects that well really holds. The expensive part is clustering the plate, which
+happens once in the sidebar; redrawing a few hundred points per panel is free, so
+the panels are derived rather than cached — a stored copy would be one more thing
+that could drift out of step with the clustering it came from.
 
-**One clustering for the whole plate**, which is the only reason the panels can be
-compared at all — cluster 3 means the same thing in every one. A per-well
-clustering would colour each panel by its own groups and the grid would be
-meaningless.
+**One clustering for the whole plate** — the sidebar's, like every other tab. It
+is the only reason the panels can be compared at all: cluster 3 means the same
+thing in every one, and a per-well clustering would colour each panel by its own
+groups and make the grid meaningless.
 
 **Show clusters** narrows to one phenotype and shows where it sits in every well
 at once, which is the question the layout exists for. **One scale for every well**
@@ -1075,6 +1075,22 @@ browser tab with the squidpy statistics already wired up. It runs as its own
 process: the spatial work is minutes of CPU that has no business blocking the
 window the images are in, and Streamlit's event loop would fight Qt's. Closing
 the viewer leaves it running.
+
+**There is one clustering.** It is set in the sidebar, computed once, stored in
+the `.h5ad`, and read by every tab: the UMAP, the well display, one well's
+neighbourhood statistics, and the label set written back into the plate. A colour
+means the same thing everywhere, and cluster 3 is one thing rather than three.
+
+It is recomputed only when you press **Re-cluster**. Change a parameter and the
+sidebar says the settings have moved on; nothing is recomputed until you ask,
+because it is the one slow step on the page.
+
+```
+Objects per image             sampled from each image and clustered
+Resolution                    how finely
+UMAP neighbours / min_dist
+Give every object a cluster   the rest take their neighbours' — on by default
+```
 
 Five tabs. The first two ask a different kind of question from the other three:
 
@@ -1234,10 +1250,10 @@ four colliding pairs, in every plot, with nothing to say they were different.
 Past forty groups the extras go grey rather than repeating a colour that already
 means something else; hovering still names them.
 
-Colours are shared *within* a tab, not across. The plate tab clusters every well
-together and the spatial tabs cluster one well on its own, so cluster 3 in one is
-not cluster 3 in the other — colouring them alike would claim a sameness that is
-not there, and the page says so.
+Colours are shared across the whole page, because there is one clustering behind
+all of it. This was not always true: the plate tab, each spatial tab and the well
+display used to cluster independently, so cluster 3 was three different things and
+a colour could not be carried from one tab to the next.
 
 #### Why it used to be slow, and is less so
 
