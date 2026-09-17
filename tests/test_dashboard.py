@@ -777,6 +777,44 @@ def test_every_object_gets_a_cluster(directory: Path) -> None:
     )
 
 
+def test_a_fresh_file_opens_clustered(directory: Path) -> None:
+    """The page a file is opened on draws something, without being pressed first.
+
+    A file the viewer has just exported has no clustering, and every tab reads
+    one. Requiring the button first meant the page opened on nothing at all,
+    which is the state this test exists to keep out.
+    """
+    print("opening a file that has never been clustered")
+
+    if not (_has("streamlit") and _has("altair") and _has("squidpy") and _has("leidenalg")):
+        print("  skip  the page needs streamlit, altair, squidpy and leidenalg")
+        return
+
+    from streamlit.testing.v1 import AppTest
+
+    path = _plate_file(directory, images=3, per_image=120)
+    check(not db.load_clustering(db.read(str(path))), "the file starts with no clustering")
+
+    page = AppTest.from_file(str(db.app_path()), default_timeout=600)
+    page.run()
+    page.text_input[0].set_value(str(path)).run()
+
+    check(not page.exception, f"the page runs without raising: {[str(e.value)[:120] for e in page.exception]}")
+    charts = page.get("arrow_vega_lite_chart") + page.get("vega_lite_chart")
+    check(bool(charts), f"and draws its plots on the first view, unpressed ({len(charts)} chart(s))")
+    check(
+        any(b.label == "Re-cluster" for b in page.button),
+        f"the button now offers to redo it, not to start it: {[b.label for b in page.button]}",
+    )
+
+    record = db.load_clustering(db.read(str(path)))
+    check(bool(record), "the clustering was stored on the file, so opening it again is instant")
+    check(
+        record.get("n_objects") == 360,
+        f"and covers every object rather than the sample: {record.get('n_objects')}",
+    )
+
+
 def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-dashboard-"))
     try:
@@ -800,6 +838,7 @@ def main() -> int:
             ("oneclustering", test_one_clustering),
             ("assignall", test_every_object_gets_a_cluster),
             ("blanks", test_blanks_do_not_poison_the_pca),
+            ("freshfile", test_a_fresh_file_opens_clustered),
         ):
             case = directory / name
             case.mkdir()

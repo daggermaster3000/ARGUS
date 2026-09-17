@@ -651,6 +651,32 @@ def _plate_tab(path: str, mtime: float, colour_scale: str = "scaled") -> None:
         st.dataframe(shares.style.format("{:.1%}"))
 
 
+#: Set to the file whose first clustering raised, so a failure shows the error
+#: once instead of being retried on every re-run of the page.
+_FAILED_KEY = "_clustering_failed"
+
+
+def _cluster_now(adata, path: str, params, keep: bool, progress) -> bool:
+    """Run the one clustering and store it. ``True`` when it worked.
+
+    The caller reruns the page afterwards rather than drawing from the object in
+    hand: everything below reads the clustering back off the file, and a page
+    half-drawn from memory and half from disk is how the two drift apart.
+    """
+    try:
+        db.run_clustering(adata, params, progress=lambda text: progress.write(text))
+        if keep:
+            progress.write("writing the file…")
+            db.save_clustering(path, adata)
+        progress.empty()
+        _read.clear()
+        return True
+    except Exception as exc:  # noqa: BLE001 - shown on the page, not in a terminal
+        progress.empty()
+        st.exception(exc)
+        return False
+
+
 def main() -> None:
     st.title("Spatial dashboard")
 
@@ -776,18 +802,9 @@ def main() -> None:
         )
 
         if recluster:
-            progress = st.empty()
-            try:
-                db.run_clustering(adata, wanted, progress=lambda text: progress.write(text))
-                if keep:
-                    progress.write("writing the file…")
-                    db.save_clustering(path, adata)
-                progress.empty()
-                _read.clear()
+            st.session_state.pop(_FAILED_KEY, None)
+            if _cluster_now(adata, path, wanted, keep, st.empty()):
                 st.rerun()
-            except Exception as exc:  # noqa: BLE001 - shown in the sidebar
-                progress.empty()
-                st.exception(exc)
 
         st.header("Grouping")
         grouping_choice = st.radio(
@@ -831,11 +848,27 @@ def main() -> None:
         n_neighs = st.slider("Neighbours (knn)", 3, 20, 6) if mode == "knn" else 6
         radius = st.slider("Radius (um)", 5.0, 200.0, 30.0) if mode == "radius" else 30.0
 
-    if grouping == "cluster" and not stored:
+    if not stored:
+        # A file the viewer has just exported has no clustering, and every tab on
+        # this page reads one — so without it there is nothing here at all. It is
+        # computed on the first view rather than waiting for the button: the page
+        # is opened to look at the clusters, and an empty page with a button on it
+        # is a worse answer than a minute of work that is then stored on the file
+        # and never repeated. The button is for changing it.
+        if st.session_state.get(_FAILED_KEY) == str(path):
+            st.error(
+                "The first clustering failed — the error is above. Change the settings "
+                "in the sidebar and press **Cluster** to try again."
+            )
+            st.stop()
         st.info(
-            "Nothing is clustered yet. Set the clustering in the sidebar and press "
-            "**Cluster** — every tab on this page reads it."
+            f"Clustering this file for the first time — {wanted.describe()}. "
+            "It is then stored on the file and every tab reads it; change it in the "
+            "sidebar and press **Re-cluster**."
         )
+        if _cluster_now(adata, path, wanted, keep, st.empty()):
+            st.rerun()
+        st.session_state[_FAILED_KEY] = str(path)
         st.stop()
 
     try:
