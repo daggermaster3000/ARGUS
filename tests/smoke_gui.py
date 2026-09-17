@@ -828,6 +828,58 @@ def main() -> int:
             not analysis_panel.go_to_row(99),
             "a row that is not there moves nothing rather than raising",
         )
+        # What the colour scale covers, and that the panel says so.
+        import pandas as _pd2
+
+        folder = Path(tempfile.gettempdir()) / "mv_smoke_scope"
+        folder.mkdir(exist_ok=True)
+        for stem, top in (("B_02_0", 4000.0), ("C_05_0", 800.0), ("D_09_0", 900.0)):
+            _pd2.DataFrame(
+                {
+                    "Label": range(1, 51),
+                    "Volume (µm³)": _np.linspace(10.0, 20.0, 50),
+                    "Mean intensity": _np.linspace(100.0, top, 50),
+                    "Centroid Z (µm)": _np.zeros(50),
+                    "Centroid Y (µm)": _np.linspace(1.0, 50.0, 50),
+                    "Centroid X (µm)": _np.linspace(1.0, 50.0, 50),
+                }
+            ).to_csv(folder / f"{stem}.csv", index=False, encoding="utf-8")
+
+        analysis_panel.open_table(folder / "C_05_0.csv")
+        analysis_panel._column_box.setCurrentText("Mean intensity")
+        check(analysis_panel._component() == "C/05/0", "the panel reads its image off the file name")
+        check(len(analysis_panel._scope_tables()) == 3, "and finds the folder's other tables")
+
+        import microscopy_viewer.analysis as _an
+
+        scopes = {}
+        for scope in (_an.SCOPE_IMAGE, _an.SCOPE_CYCLE):
+            analysis_panel._scope_box.setCurrentIndex(analysis_panel._scope_box.findData(scope))
+            scopes[scope] = analysis_panel.scale_range()
+        check(
+            scopes[_an.SCOPE_IMAGE].high < scopes[_an.SCOPE_CYCLE].high,
+            f"a dim well is drawn against a higher top when the plate sets the scale "
+            f"({scopes[_an.SCOPE_IMAGE].high:.0f} vs {scopes[_an.SCOPE_CYCLE].high:.0f})",
+        )
+        check(
+            scopes[_an.SCOPE_CYCLE].n_images == 3,
+            f"covering the whole cycle ({scopes[_an.SCOPE_CYCLE].n_images} images)",
+        )
+        check(
+            "every well" in analysis_panel._range_label.text()
+            and "this image alone would be" in analysis_panel._range_label.text(),
+            f"and the scale line says both: {analysis_panel._range_label.text()[:80]}",
+        )
+        analysis_panel._scope_box.setCurrentIndex(
+            analysis_panel._scope_box.findData(_an.SCOPE_IMAGE)
+        )
+        check(
+            "this image" in analysis_panel._range_label.text()
+            and "alone would be" not in analysis_panel._range_label.text(),
+            "while the per-image scale has nothing to compare itself to",
+        )
+        for stem in ("B_02_0", "C_05_0", "D_09_0"):
+            (folder / f"{stem}.csv").unlink(missing_ok=True)
         table_path.unlink(missing_ok=True)
     print(flush=True)
 

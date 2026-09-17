@@ -16,6 +16,14 @@ from. This module is the way back. Give it the table a run wrote and it will
   what squidpy, scanpy and the rest of the single-cell stack read -- one file per
   image, or one for a whole plate with the well and cycle kept in ``obs``.
 
+**Nothing here is normalised, and that is on purpose.** The numbers in an object
+table are raw grey levels: a segmentation run measures the pixels as they were
+acquired and writes them down. The only scaling anywhere is the colour scale --
+where a measurement sits between a low and a high -- and *what that low and high
+are computed over* is the whole question, because a well painted against its own
+range and a well painted against the plate's are two different pictures with the
+same colours. See :data:`SCOPES`.
+
 No Qt and no napari here: the widget is a thin layer over these functions, and
 everything below is testable headless.
 """
@@ -23,6 +31,7 @@ everything below is testable headless.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -120,6 +129,128 @@ def value_range(
     if high <= low:  # every object has the same value
         high = low + 1.0
     return low, high
+
+
+#: What a colour scale is computed over.
+#:
+#: ``image``  this image alone -- one well, one cycle. Every well then uses its
+#:            own range, which shows the structure inside a well best and makes
+#:            wells incomparable: 40 % of the scale in one is not 40 % in another.
+#: ``well``   every cycle of this well, so the cycles of one well can be compared.
+#: ``cycle``  every well of this cycle. The scale a plate is usually read on: one
+#:            staining round shares a scale across the plate, and a well that is
+#:            genuinely brighter than its neighbours looks brighter.
+#: ``plate``  every image beside the plate, cycles pooled. Only meaningful when
+#:            the cycles are of the same stain; on a 4i plate they are not, and
+#:            pooling them puts a bright cycle's range on a dim cycle's objects.
+SCOPE_IMAGE = "image"
+SCOPE_WELL = "well"
+SCOPE_CYCLE = "cycle"
+SCOPE_PLATE = "plate"
+
+SCOPES = (SCOPE_IMAGE, SCOPE_WELL, SCOPE_CYCLE, SCOPE_PLATE)
+
+SCOPE_LABELS = {
+    SCOPE_IMAGE: "this image",
+    SCOPE_WELL: "this well, every cycle",
+    SCOPE_CYCLE: "this cycle, every well",
+    SCOPE_PLATE: "the whole plate",
+}
+
+
+def scope_components(component: str, components: Sequence[str], scope: str) -> list[str]:
+    """Which images a scale of *scope* is computed over, given the one on screen.
+
+    Matched on the path inside the store -- ``B/02/0`` is well ``B/02``, image
+    ``0``, which on a 4i plate is cycle 1 -- so the well and the cycle are read
+    off the name rather than needing the plate open.
+    """
+    names = [str(name) for name in components]
+    mine = str(component)
+    if scope == SCOPE_PLATE:
+        return names
+    parts = mine.strip("/").split("/")
+    if len(parts) < 2:
+        return [mine] if mine in names else names
+    well = "/".join(parts[:2])
+    field = parts[2] if len(parts) > 2 else ""
+    if scope == SCOPE_WELL:
+        return [name for name in names if name.startswith(f"{well}/")] or [mine]
+    if scope == SCOPE_CYCLE:
+        return [name for name in names if name.rsplit("/", 1)[-1] == field] or [mine]
+    return [mine] if mine in names else [mine]
+
+
+def column_by_component(tables: Sequence[str | Path], column: str) -> dict[str, np.ndarray]:
+    """``{component: values}`` for one column across several tables.
+
+    Reads that column and nothing else. A plate of forty-four tables is half a
+    million objects and twenty-seven columns; pulling one of them is a couple of
+    seconds, pulling all of them is a minute nobody asked for.
+    """
+    import pandas as pd
+
+    found: dict[str, np.ndarray] = {}
+    for table in tables:
+        path = Path(str(table))
+        component = component_from_name(path.stem) or path.stem
+        try:
+            if path.suffix.lower() in (".xlsx", ".xls"):
+                frame = pd.read_excel(path, usecols=[column])
+            else:
+                frame = pd.read_csv(path, usecols=[column])
+        except (ValueError, KeyError):
+            continue  # a table that does not carry this column has nothing to add
+        except Exception:
+            logger.exception("could not read %s from %s", column, path.name)
+            continue
+        found[component] = frame[column].to_numpy(dtype=float)
+    logger.info("read %r from %d table(s)", column, len(found))
+    return found
+
+
+@dataclass(frozen=True)
+class ScaleRange:
+    """A colour scale, and what it was computed over."""
+
+    low: float
+    high: float
+    scope: str
+    n_images: int
+    n_objects: int
+
+    def describe(self) -> str:
+        where = SCOPE_LABELS.get(self.scope, self.scope)
+        if self.n_images <= 1:
+            return f"{where} — {self.n_objects:,} objects"
+        return f"{where} — {self.n_images} images, {self.n_objects:,} objects"
+
+
+def scope_range(
+    values_by_component: dict[str, np.ndarray],
+    component: str,
+    scope: str = SCOPE_IMAGE,
+    low_percentile: float = DEFAULT_LOW_PERCENTILE,
+    high_percentile: float = DEFAULT_HIGH_PERCENTILE,
+) -> ScaleRange:
+    """The low and high a colour scale of *scope* should use.
+
+    Percentiles over the pooled objects of every image in scope, not an average of
+    per-image percentiles: a well with sixteen objects and a well with forty-six
+    thousand would otherwise count equally towards where the top of the scale sits.
+    """
+    wanted = scope_components(component, list(values_by_component), scope)
+    pooled = [
+        values_by_component[name] for name in wanted if name in values_by_component
+    ]
+    if not pooled:
+        pooled = [values_by_component[component]] if component in values_by_component else []
+    if not pooled:
+        return ScaleRange(0.0, 1.0, scope, 0, 0)
+    stacked = np.concatenate([np.asarray(part, dtype=float).ravel() for part in pooled])
+    low, high = value_range(stacked, low_percentile, high_percentile)
+    finite = int(np.isfinite(stacked).sum())
+    return ScaleRange(low, high, scope, len(pooled), finite)
 
 
 def normalise(values: Sequence[float], low: float, high: float) -> np.ndarray:

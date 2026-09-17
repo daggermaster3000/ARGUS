@@ -303,6 +303,103 @@ def test_dimming_outside_the_selection() -> None:
     )
 
 
+def test_what_the_scale_covers(directory: Path) -> None:
+    print("what the colour scale is computed over")
+
+    import pandas as pd
+
+    folder = directory / "scopes"
+    folder.mkdir()
+    # Three wells, one cycle each, plus a second cycle of the first well. The
+    # first well is brighter than the rest, which is the case the choice exists
+    # for: against its own range it looks like everyone else.
+    plan = {
+        "B_02_0": 4000.0,
+        "B_02_1": 500.0,
+        "C_05_0": 800.0,
+        "D_09_0": 900.0,
+    }
+    for stem, top in plan.items():
+        pd.DataFrame(
+            {
+                "Label": range(1, 101),
+                "Mean intensity": np.linspace(100.0, top, 100),
+                "Area": np.linspace(10.0, 20.0, 100),
+            }
+        ).to_csv(folder / f"{stem}.csv", index=False, encoding="utf-8")
+
+    tables = sorted(folder.glob("*.csv"))
+    values = analysis.column_by_component(tables, "Mean intensity")
+    check(
+        sorted(values) == ["B/02/0", "B/02/1", "C/05/0", "D/09/0"],
+        f"a column is read out of every table, keyed by image: {sorted(values)}",
+    )
+    check(len(values["B/02/0"]) == 100, "with every object of each")
+
+    check(
+        analysis.column_by_component(tables, "Nothing") == {},
+        "a column no table carries comes back empty rather than raising",
+    )
+
+    # Which images each scope covers.
+    everything = list(values)
+    check(
+        analysis.scope_components("B/02/0", everything, analysis.SCOPE_IMAGE) == ["B/02/0"],
+        "image scope is one image",
+    )
+    check(
+        sorted(analysis.scope_components("B/02/0", everything, analysis.SCOPE_WELL))
+        == ["B/02/0", "B/02/1"],
+        "well scope takes every cycle of that well",
+    )
+    check(
+        sorted(analysis.scope_components("B/02/0", everything, analysis.SCOPE_CYCLE))
+        == ["B/02/0", "C/05/0", "D/09/0"],
+        "cycle scope takes every well of that cycle — and not the well's other cycle, "
+        "which on a 4i plate is a different stain",
+    )
+    check(
+        len(analysis.scope_components("B/02/0", everything, analysis.SCOPE_PLATE)) == 4,
+        "plate scope takes everything",
+    )
+
+    # And what those cover the scale with.
+    per_image = analysis.scope_range(values, "B/02/0", analysis.SCOPE_IMAGE, 0.0, 100.0)
+    per_cycle = analysis.scope_range(values, "B/02/0", analysis.SCOPE_CYCLE, 0.0, 100.0)
+    check(
+        abs(per_image.high - 4000.0) < 1e-6,
+        f"its own range tops out at its own brightest object ({per_image.high:.0f})",
+    )
+    check(
+        abs(per_cycle.high - 4000.0) < 1e-6,
+        "the cycle's range tops out at the brightest object in the cycle, which here "
+        "is in this same well",
+    )
+    dim = analysis.scope_range(values, "C/05/0", analysis.SCOPE_IMAGE, 0.0, 100.0)
+    dim_cycle = analysis.scope_range(values, "C/05/0", analysis.SCOPE_CYCLE, 0.0, 100.0)
+    check(
+        dim.high < dim_cycle.high,
+        f"a dim well's own top ({dim.high:.0f}) is below the cycle's ({dim_cycle.high:.0f}), "
+        "so against the plate it is drawn dim — which is what it is",
+    )
+    check(
+        dim_cycle.n_images == 3 and dim.n_images == 1,
+        f"and the scale says how many images it covered ({dim_cycle.n_images} vs {dim.n_images})",
+    )
+    check(
+        dim_cycle.n_objects == 300,
+        f"pooling the objects, not averaging per-image percentiles — a well with sixteen "
+        f"objects must not count as much as one with forty thousand ({dim_cycle.n_objects})",
+    )
+    check(
+        "3 images" in dim_cycle.describe() and "every well" in dim_cycle.describe(),
+        f"and describes itself for the scale line: {dim_cycle.describe()}",
+    )
+
+    missing = analysis.scope_range(values, "Z/99/0", analysis.SCOPE_CYCLE, 0.0, 100.0)
+    check(missing.n_images >= 0, "an image that is not in the folder does not raise")
+
+
 def test_finding_an_object(directory: Path) -> None:
     print("going to one object")
 
@@ -552,6 +649,8 @@ def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-analysis-"))
     try:
         test_reading(directory)
+        print()
+        test_what_the_scale_covers(directory)
         print()
         test_finding_an_object(directory)
         print()

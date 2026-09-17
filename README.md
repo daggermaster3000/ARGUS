@@ -835,6 +835,51 @@ Sorting and going are the pair that make the table usable: sort by solidity
 descending, click the top row, and you are looking at the roundest object in the
 well — the one most likely to be a bubble rather than a nucleus.
 
+#### What the numbers are normalised against
+
+**Nothing in an object table is normalised.** A run measures the pixels as they
+were acquired and writes down raw grey levels. Cellpose does normalise its input
+per channel, but that affects only where it draws the outlines — never a reported
+number.
+
+The one place scaling happens is the colour scale: where a value sits between a
+low and a high. **What that low and high are computed over is a choice**, and it
+changes the picture completely:
+
+| Normalise over | What it is good for |
+|---|---|
+| **this image** | the structure *inside* one well. Every well uses its own range, so wells are not comparable — 40 % of the scale in one is not 40 % in another. |
+| **this well, every cycle** | comparing the staining rounds of one well. |
+| **this cycle, every well** | how a plate is normally read. One staining round shares a scale, so a well that is genuinely brighter looks brighter. |
+| **the whole plate** | cycles pooled. Only when the cycles are the same stain — on a 4i plate they are not, and pooling puts a bright cycle's range on a dim cycle's objects. |
+
+The scale line under the control says which was taken, how many images it covered,
+and — when the scope is wider than one image — what this image alone would have
+given, because the gap between those two numbers is the whole point:
+
+```
+343.4 … 3483 over this cycle, every well — 44 images, 557,915 objects
+                          ·  this image alone would be 375.7 … 6176
+```
+
+That is well B/02 of the sample plate. Its own top is nearly double the plate's,
+so painted against itself it looks like an ordinary well; painted against the
+plate it is plainly one of the bright ones. The choice was per-image before this
+and there was no way to ask the other question.
+
+A wider scope reads one column from every table in the folder chosen under
+**Beside the plate** — about a second for a 44-well plate, cached afterwards — and
+pools the objects rather than averaging per-image percentiles, so a well with
+sixteen objects does not count as much as one with forty-six thousand. The scope
+is recorded on the layer alongside the range, so a figure made from it can say
+what its colours mean.
+
+**The dashboard scales separately**, and differently per tab: the spatial tabs
+z-score within the one image they are showing, and the plate tab z-scores across
+the whole sampled plate. That is the right thing for clustering — it is what stops
+a PCA becoming a PCA of whichever column has the largest units — but it is not the
+same question as the colour scale above.
+
 **The colour scale is clipped to 1–99 % by default**, and the values at both ends
 are shown. This matters more than it sounds: an object table always has a handful
 of enormous outliers — two nuclei segmented as one — and stretching the scale to

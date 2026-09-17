@@ -13,6 +13,13 @@ Excel is only useful if the object can then be found. Sort by any column and the
 first row is the largest, the roundest or the brightest object in the well, one
 click from being on screen.
 
+**The colour scale says what it is computed over.** A measurement is raw grey
+levels; the only scaling anywhere is where a value sits between a low and a high,
+and *what that low and high cover* changes the picture entirely. Against its own
+range every well looks much like every other; against the plate's, a well that is
+genuinely brighter looks brighter. **Normalise over** is that choice and the
+scale line underneath says which was taken.
+
 **The colour scale is clipped by default.** Object tables have a handful of huge
 outliers, usually two nuclei merged into one, and scaling to the true maximum
 leaves everything else the same dark blue. 1-99 % is the default and the numbers
@@ -226,6 +233,10 @@ class MeasurementAnalysisWidget(QWidget):
         self._listed: list[Path] = []
         #: The dashboard process, once one has been started from here.
         self._dashboard_process = None
+        #: One column of every table in the folder, cached by (folder, column) —
+        #: a plate-wide scale needs the other wells' numbers, and reading them
+        #: again on every percentile nudge would make the spin boxes unusable.
+        self._scope_cache: dict[tuple, dict] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -386,6 +397,22 @@ class MeasurementAnalysisWidget(QWidget):
         self._column_box.setToolTip("The measurement the colours come from.")
         self._column_box.currentTextChanged.connect(self._on_column_changed)
         form.addRow("Colour by", self._column_box)
+
+        self._scope_box = QComboBox()
+        for scope in analysis.SCOPES:
+            self._scope_box.addItem(analysis.SCOPE_LABELS[scope], scope)
+        self._scope_box.setToolTip(
+            "What the low and high of the colour scale are computed over.\n\n"
+            "“This image” shows the structure inside one well best, and makes wells "
+            "incomparable: 40 % of the scale in one well is not 40 % in another.\n\n"
+            "“This cycle, every well” is how a plate is usually read — one staining round "
+            "shares a scale, so a well that is genuinely brighter looks brighter. It needs "
+            "the other wells' tables, which come from the folder chosen above.\n\n"
+            "“The whole plate” pools the cycles too, which on a 4i plate means pooling "
+            "different stains; only use it when the cycles really are the same stain."
+        )
+        self._scope_box.currentIndexChanged.connect(self._on_scope_changed)
+        form.addRow("Normalise over", self._scope_box)
 
         self._colormap_box = QComboBox()
         self._colormap_box.addItems(list(analysis.COLORMAPS))
@@ -681,17 +708,100 @@ class MeasurementAnalysisWidget(QWidget):
             return None, None
         return self._frame[self._label_column].to_numpy(), self._frame[column].to_numpy()
 
+    def scope(self) -> str:
+        return str(self._scope_box.currentData() or analysis.SCOPE_IMAGE)
+
+    def _component(self) -> str:
+        """The image the loaded table describes, read out of its name."""
+        if self._path is None:
+            return ""
+        return analysis.component_from_name(self._path.stem) or self._path.stem
+
+    def _scope_tables(self) -> list[Path]:
+        """The tables a wider-than-image scale would be computed over."""
+        from .. import explorer
+
+        folder = self._folder_box.currentData()
+        if folder is None and self._path is not None:
+            folder = self._path.parent
+        if folder is None:
+            return []
+        return [
+            table
+            for table in explorer.analysis_tables(folder)
+            if table.suffix.lower() != ".h5ad" and not table.stem.endswith("_summary")
+        ]
+
+    def _scope_values(self, column: str) -> dict:
+        """Every table's values for *column*, cached; empty when the scope is one image."""
+        tables = self._scope_tables()
+        if not tables:
+            return {}
+        key = (str(tables[0].parent), column, len(tables))
+        if key not in self._scope_cache:
+            self._scope_cache[key] = analysis.column_by_component(tables, column)
+        return self._scope_cache[key]
+
+    def scale_range(self) -> analysis.ScaleRange | None:
+        """The low and high the colouring will use, and what they were taken over."""
+        column = self._column_box.currentText()
+        _labels, values = self._current_values()
+        if values is None or not column:
+            return None
+
+        scope = self.scope()
+        low_pct, high_pct = self._low_percentile.value(), self._high_percentile.value()
+        component = self._component()
+        if scope != analysis.SCOPE_IMAGE and component:
+            pooled = self._scope_values(column)
+            if pooled:
+                # The loaded table is the authority for its own image: the folder's
+                # copy could be from an older run.
+                pooled = dict(pooled)
+                pooled[component] = np.asarray(values, dtype=float)
+                return analysis.scope_range(pooled, component, scope, low_pct, high_pct)
+        return analysis.scope_range(
+            {component or "this": np.asarray(values, dtype=float)},
+            component or "this",
+            analysis.SCOPE_IMAGE,
+            low_pct,
+            high_pct,
+        )
+
     def _update_range_label(self) -> None:
-        labels, values = self._current_values()
+        _labels, values = self._current_values()
         if values is None:
             self._range_label.setText("—")
             return
-        low, high = analysis.value_range(
-            values, self._low_percentile.value(), self._high_percentile.value()
-        )
-        self._range_label.setText(
-            f"{format_number(low)} … {format_number(high)} — {analysis.describe_column(values)}"
-        )
+        scale = self.scale_range()
+        if scale is None:
+            self._range_label.setText("—")
+            return
+        text = f"{format_number(scale.low)} … {format_number(scale.high)} over {scale.describe()}"
+        if scale.scope != analysis.SCOPE_IMAGE:
+            here = analysis.value_range(
+                values, self._low_percentile.value(), self._high_percentile.value()
+            )
+            # Both numbers, because the difference between them is the thing the
+            # choice is about: a well far above the plate's top is a bright well,
+            # and painted against itself it would look like all the others.
+            text += (
+                f"  ·  this image alone would be {format_number(here[0])} … "
+                f"{format_number(here[1])}"
+            )
+        self._range_label.setText(text)
+
+    def _on_scope_changed(self) -> None:
+        if self._updating:
+            return
+        self._update_range_label()
+        scale = self.scale_range()
+        if scale is not None and scale.scope != analysis.SCOPE_IMAGE and scale.n_images <= 1:
+            self._status.setText(
+                "Only this image's table was found, so a wider scale is the same as this "
+                "one. Scan the plate in the File explorer, or choose the folder of tables "
+                "above, to compare against the other wells."
+            )
 
     def _on_column_changed(self, _text: str) -> None:
         if not self._updating:
@@ -712,10 +822,13 @@ class MeasurementAnalysisWidget(QWidget):
 
         column = self._column_box.currentText()
         try:
+            scale = self.scale_range()
             mapping, (low, high) = analysis.label_colors(
                 labels,
                 values,
                 colormap=self._colormap_box.currentText(),
+                low=None if scale is None else scale.low,
+                high=None if scale is None else scale.high,
                 low_percentile=self._low_percentile.value(),
                 high_percentile=self._high_percentile.value(),
             )
@@ -735,6 +848,11 @@ class MeasurementAnalysisWidget(QWidget):
                 "low": low,
                 "high": high,
                 "colormap": self._colormap_box.currentText(),
+                # Recorded so a figure made from this layer can say what its
+                # colours mean, and so the selection redraw keeps the same scale
+                # rather than quietly falling back to this image's own.
+                "scope": self.scope(),
+                "scope_images": 0 if scale is None else scale.n_images,
             }
         except Exception:  # pragma: no cover - a layer with an odd metadata dict
             logger.debug("could not record the colouring on the layer", exc_info=True)
@@ -743,9 +861,11 @@ class MeasurementAnalysisWidget(QWidget):
         # are the same rows, so re-apply the fade rather than dropping it.
         self._apply_selection_to_layer()
         painted = sum(1 for key in mapping if isinstance(key, int) and key > 0)
+        where = analysis.SCOPE_LABELS.get(self.scope(), self.scope())
+        spread = "" if scale is None or scale.n_images <= 1 else f" ({scale.n_images} images)"
         self._status.setText(
             f"“{layer.name}” coloured by {column}: {painted} object(s), "
-            f"{format_number(low)} … {format_number(high)}. "
+            f"{format_number(low)} … {format_number(high)} over {where}{spread}. "
             "Objects with no row in the table are left transparent."
         )
         self.draw_plot()
@@ -779,6 +899,17 @@ class MeasurementAnalysisWidget(QWidget):
         x_name, y_name = self._x_box.currentText(), self._y_box.currentText()
         self._scatter = None
         self._selector = None
+        # Guarded twice over. The axis combos are rebuilt column by column when a
+        # new table is loaded, and each change fires this; midway through, the x
+        # combo holds the new table's column and the y combo still holds the old
+        # one, which the new table may not have. Opening a run with different
+        # columns from the last one used to raise here.
+        if self._updating:
+            return
+        if self._frame is not None:
+            known = set(self._frame.columns)
+            if x_name not in known or y_name not in known:
+                return
         if self._frame is None or not x_name or not y_name:
             axes.set_axis_off()
             axes.text(0.5, 0.5, "Open a table", ha="center", va="center", fontsize=9)
