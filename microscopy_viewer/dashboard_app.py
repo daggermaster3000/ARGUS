@@ -106,6 +106,7 @@ def _scatter(
     height: int = 460,
     equal: bool = False,
     flip_y: bool = False,
+    limits: tuple[float, float] | None = None,
 ):
     """An Altair scatter that says what a point is when you point at it.
 
@@ -129,11 +130,13 @@ def _scatter(
             legend=alt.Legend(title=colour, symbolSize=80),
         )
     else:
-        values = shown[colour].astype(float)
-        low, high = (float(v) for v in np.nanpercentile(values, [1, 99]))
+        if limits is None:
+            values = shown[colour].astype(float)
+            limits = tuple(float(v) for v in np.nanpercentile(values, [1, 99]))
+        low, high = limits
         encoding = alt.Color(
             f"{colour}:Q",
-            scale=alt.Scale(scheme="viridis", domain=[low, high], clamp=True),
+            scale=alt.Scale(scheme="viridis", domain=[float(low), float(high)], clamp=True),
             legend=alt.Legend(title=colour),
         )
 
@@ -223,7 +226,128 @@ def _figure(width: float = 6.0, height: float = PLOT_HEIGHT):
     return figure
 
 
-def _plate_tab(path: str, mtime: float) -> None:
+def _write_back(adata, path: str, groups: list) -> None:
+    """Offer to paint this clustering into the plate it came from.
+
+    Only offered when the file says which plate that was: an ``.h5ad`` carries the
+    source table's path, and the plate is the ``.zarr`` those tables were written
+    beside. Guessing at a plate and writing label sets into it is not a thing to
+    do on a maybe.
+    """
+    from pathlib import Path as _Path
+
+    with st.expander("Write these clusters into the plate", expanded=False):
+        st.markdown(
+            "Paints each object's cluster onto the nucleus it was measured from, as "
+            "another NGFF label set beside the segmentation. The nuclei are not "
+            "touched — this is a second label set, and deleting it leaves them as "
+            "they were.\n\n"
+            "Open the plate in the viewer afterwards and the clustering is there, in "
+            "the colours on this page, with the method recorded on it."
+        )
+
+        plate = st.text_input(
+            "Plate (.zarr)",
+            value=str(_guess_plate(path) or ""),
+            help="The store the segmentation lives in.",
+            key="writeback_plate",
+        )
+        columns = st.columns(3)
+        name = columns[0].text_input("Label set to write", value="clusters", key="writeback_name")
+        source = columns[1].text_input(
+            "Painted onto",
+            value=str(_guess_source(path) or "nuclei"),
+            help="The label set the objects were segmented into — the one whose label "
+                 "numbers the table's 'label' column refers to.",
+            key="writeback_source",
+        )
+        replace = columns[2].checkbox(
+            "Replace every clustering",
+            value=False,
+            help="Remove every label set in the plate that carries a clustering marker "
+                 "before writing. Segmentations are never touched: one is an hour of GPU "
+                 "and this is forty seconds.",
+            key="writeback_replace",
+        )
+
+        if not st.button("Write into the plate", key="writeback_go"):
+            return
+        if not plate or not _Path(plate).exists():
+            st.error("That plate does not exist.")
+            return
+
+        from microscopy_viewer import batch as mvbatch
+        from microscopy_viewer import clusters as mvclusters
+
+        try:
+            survey = mvbatch.survey_plate(plate)
+            frame = db.assignment_frame(adata)
+            assignments = mvclusters.assignments_from_frame(frame)
+            run = db.cluster_run(adata, source_labels=source, plate=str(plate))
+        except Exception as exc:  # noqa: BLE001 - shown on the page
+            st.exception(exc)
+            return
+
+        progress = st.empty()
+        rows = mvclusters.write_plate_clusters(
+            survey,
+            assignments,
+            run,
+            name=name or mvclusters.DEFAULT_NAME,
+            source_labels=source,
+            replace_existing=bool(replace),
+            progress=lambda text: progress.write(text),
+        )
+        progress.empty()
+
+        import pandas as pd
+
+        written = [row for row in rows if row[1] is not None]
+        report = pd.DataFrame(
+            [
+                {"image": component, "objects painted": assigned,
+                 "written": "yes" if target is not None else "no", "note": note}
+                for component, target, assigned, note in rows
+            ]
+        )
+        if written:
+            st.success(
+                f"Wrote “{name}” into {len(written)} of {len(rows)} image(s); "
+                f"{sum(row[2] for row in written):,} objects painted. "
+                f"Recorded as: {run.describe()}."
+            )
+        else:
+            st.error("Nothing was written — see the notes below.")
+        st.dataframe(report)
+
+
+def _guess_plate(path: str):
+    """The .zarr the tables beside this .h5ad were written for, if it is findable."""
+    from pathlib import Path as _Path
+
+    here = _Path(str(path)).parent
+    for folder in (here, here.parent):
+        try:
+            for entry in folder.iterdir():
+                if entry.is_dir() and entry.suffix.lower() == ".zarr":
+                    return entry
+        except OSError:
+            continue
+    return None
+
+
+def _guess_source(path: str) -> str:
+    """The label set the tables came from: ``…_nuclei_objects`` was run on ``nuclei``."""
+    from pathlib import Path as _Path
+
+    stem = _Path(str(path)).parent.name
+    if stem.endswith("_objects"):
+        middle = stem[: -len("_objects")]
+        return middle.rsplit("_", 1)[-1] or "nuclei"
+    return "nuclei"
+
+
+def _plate_tab(path: str, mtime: float, colour_scale: str = "scaled") -> None:
     """Every well at once: a UMAP in feature space, and what each well is made of.
 
     A function rather than inline, so that "there is nothing to show yet" can
@@ -313,14 +437,24 @@ def _plate_tab(path: str, mtime: float) -> None:
             mapping = db.group_colours(whole, colour_by) if categorical else None
             tooltips = _tooltip_columns(whole, colour_by)
             frame = _points(whole, umap[:, 0], umap[:, 1], colour_by, extra=tooltips)
+            limits, scale_note = None, ""
+            if mapping is None:
+                values, low, high, scale_note = db.colour_scale(
+                    _read(path, mtime), whole, colour_by, colour_scale
+                )
+                frame[colour_by] = values
+                limits = (low, high)
             chart, note = _scatter(
-                frame, colour_by, mapping, "UMAP 1", "UMAP 2", tooltips, height=520
+                frame, colour_by, mapping, "UMAP 1", "UMAP 2", tooltips, height=520,
+                limits=limits,
             )
             st.altair_chart(chart)
             hints = [
                 "Point at an object to see its well and its cluster — which is how you "
                 "find out whether a corner of this map is one well or many."
             ]
+            if scale_note:
+                hints.append(f"Colour scale: {scale_note}.")
             if note:
                 hints.append(note)
             if mapping is not None and db.OVERFLOW_COLOUR in mapping.values():
@@ -407,6 +541,8 @@ def _plate_tab(path: str, mtime: float) -> None:
                 "holding none of this cluster."
             )
 
+        _write_back(whole, path, plate_groups)
+
         with st.expander("The numbers"):
             st.dataframe(shares.style.format("{:.1%}"))
 
@@ -492,6 +628,23 @@ def main() -> None:
             )
             bins = st.slider("Bins", 2, 8, 4)
 
+        st.header("Colour scale")
+        colour_scale = st.selectbox(
+            "Features are coloured on",
+            db.COLOUR_SCALES,
+            format_func=lambda key: db.COLOUR_SCALE_LABELS[key],
+            help=(
+                "Clustering needs the features z-scored — integrated intensity is six "
+                "figures and solidity is below one — so that is what the matrix holds by "
+                "the time anything is drawn, and colouring by “Mean intensity” shows "
+                "standard deviations rather than grey levels.\n\n"
+                "The raw options read the measurement back off the file as it was loaded. "
+                "“This cycle” puts every well of a staining round on one scale, which is "
+                "how a plate is normally read: a well that is genuinely brighter then "
+                "looks brighter."
+            ),
+        )
+
         st.header("Neighbours")
         mode = st.selectbox(
             "Graph", db.GRAPH_MODES,
@@ -524,7 +677,7 @@ def main() -> None:
 
     # -- every well at once ---------------------------------------------------
     with plate:
-        _plate_tab(path, mtime)
+        _plate_tab(path, mtime, colour_scale)
     # -- where ----------------------------------------------------------------
     with look:
         left, right = st.columns([3, 2])
@@ -536,6 +689,13 @@ def main() -> None:
             )
             xy = np.asarray(adata.obsm["spatial"])
             points = _points(adata, xy[:, 0], xy[:, 1], colour, extra=_tooltip_columns(adata, colour))
+            limits, scale_note = None, ""
+            if colour != db.CLUSTER_KEY:
+                values, low, high, scale_note = db.colour_scale(
+                    _read(path, mtime), adata, colour, colour_scale
+                )
+                points[colour] = values
+                limits = (low, high)
             chart, note = _scatter(
                 points,
                 colour,
@@ -546,12 +706,13 @@ def main() -> None:
                 height=520,
                 # Image convention: y runs down the well, as it does in the viewer.
                 flip_y=True,
+                limits=limits,
             )
             st.altair_chart(chart)
-            st.caption(
-                "Point at an object to see which cluster it is in and what it measures. "
-                + note
-            )
+            hint = "Point at an object to see which cluster it is in and what it measures. "
+            if scale_note:
+                hint += f"Colour scale: {scale_note}. "
+            st.caption(hint + note)
 
         with right:
             st.subheader("How many of each")

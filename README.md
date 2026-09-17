@@ -914,6 +914,44 @@ colours back.
 | **select** | `rectangle` or `lasso` to pick objects out of the plot; `off` leaves the drag to pan the axes. |
 | **x** / **y** | The scatter axes. Above 100 000 points the plot draws a random sample, and says so — random rather than the first N, because a table is written in label order and the first N would be one corner of the well. |
 
+#### Writing a clustering back into the plate
+
+A phenotype is a row in a table until it is in the image. **Write these clusters
+into the plate**, in the dashboard's plate tab, paints each object's cluster onto
+the nucleus it was measured from and stores it in the `.zarr` as another NGFF
+label set:
+
+```
+AssayPlate_….zarr/G/07/0/labels/
+  nuclei/        the segmentation, untouched
+  clusters/      each nucleus painted with its cluster id
+```
+
+The nuclei are never edited — this is a second label set beside them, and deleting
+it leaves the segmentation exactly as it was.
+
+**An object the clustering did not see stays background.** The plate tab samples
+a few hundred objects per well, so most objects in a big well were never assigned;
+painting them into some "other" cluster would invent a phenotype they do not have.
+
+**What produced it travels with it.** The method, the resolution, the features, the
+label set it was painted onto, the cluster names and the colours are written into
+the label group. Open the plate months later and the layer can say what it is:
+
+```
+leiden, 7 cluster(s), on analysis-1, 18,428 objects
+```
+
+The colours are NGFF's own `image-label.colors`, so **the layer comes back into
+napari in the colours the dashboard drew** rather than in arbitrary label colours —
+which is what lets a cluster in the UMAP and a patch in the well be recognised as
+the same thing. The File explorer loads them like any other label set.
+
+**Replace every clustering** removes the ones already in the plate before writing.
+Only label sets carrying the clustering marker are touched: a segmentation is an
+hour of GPU and must not be swept away by a tidy-up meant for something that takes
+forty seconds to recompute.
+
 #### Out to squidpy, scanpy and the rest
 
 **Export as AnnData…** writes the table as `.h5ad`, which is what the single-cell
@@ -997,6 +1035,20 @@ Feature space, not the well: *which wells differ from which* is not a spatial
 question, and it is the one the other three tabs cannot ask, because their
 coordinates are per image. Give it a combined `.h5ad` — the analysis panel's
 **…the whole folder as one** — and it embeds every well together.
+
+**Features are coloured on z-scores unless you say otherwise.** Clustering needs
+them scaled — integrated intensity is six figures and solidity is below one — so
+by the time anything is drawn the matrix holds standard deviations, and colouring
+by "Mean intensity" showed those rather than grey levels. **Features are coloured
+on**, in the sidebar, is the choice: the scaled values the clustering saw, or the
+raw measurement against this image, this cycle, or the whole file. The same four
+scales the viewer's Measurement analysis panel offers, and they agree:
+
+```
+z-scored, this image      -1.5 …    4.8
+raw, this image          375.7 … 6176.1
+raw, this cycle          343.4 … 3483.2   (44 images, 557,915 objects)
+```
 
 **Sampled per image, not overall.** This plate runs from 16 objects in one well
 to 46 394 in another; a flat sample of the lot would be a picture of the big
@@ -1352,6 +1404,7 @@ microscopy_viewer/
   registration.py           atlas registration and the per-region readout; no Qt
   segmentation.py           Cellpose segmentation, the GPU device, per-object stats; no Qt
   analysis.py               object tables read back in: label colouring, plot helpers; no Qt
+  clusters.py               painting a clustering onto its nuclei, in the plate; no Qt
   dashboard.py              the spatial dashboard's own analysis, and starting it; no Qt
   dashboard_app.py          the Streamlit page: run by streamlit, not imported by the viewer
   batch.py                  plate-wide segmentation: survey, run, NGFF label writing; no Qt
@@ -1432,6 +1485,7 @@ python tests/test_batch.py          # plate survey, channel matching, NGFF label
 python tests/test_analysis.py       # object tables, colour scales, label colouring — no Qt needed
 python tests/test_explorer.py       # plate rows, miniatures, layer building, table folders — no Qt needed
 python tests/test_dashboard.py      # dashboard slicing, grouping, squidpy calls — no Qt; the squidpy half skips without it
+python tests/test_clusters.py       # painting a clustering into a plate, and reading it back — no Qt needed
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 

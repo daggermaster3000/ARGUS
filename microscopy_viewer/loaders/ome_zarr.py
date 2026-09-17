@@ -372,10 +372,53 @@ def _read_labels(path: Path, group, image_name: str) -> list[LayerSpec]:
         except Exception:  # a broken label set must not cost you the image
             logger.exception("%s: label set %r could not be read", image_name, name)
             continue
+        colors, note = _label_appearance(label_group)
         for spec in built:
             spec.layer_type = "labels"
+            spec.label_colors = colors
+            if note:
+                spec.metadata.extra.setdefault("Clustering", note)
         specs.extend(built)
     return specs
+
+
+def _label_appearance(label_group) -> tuple[dict, str]:
+    """``({value: rgba}, note)`` for a label set that records its own colours.
+
+    NGFF's ``image-label.colors`` is where a writer says what each label value
+    should look like. A clustering written by this viewer uses it so that the
+    colours in the plate are the ones the dashboard drew, and adds a block of its
+    own saying what produced it — which is the difference between a layer called
+    "clusters" and a layer you can trust.
+    """
+    attrs = ngff_attrs(label_group)
+    colors: dict[int, tuple[float, float, float, float]] = {}
+    marker = attrs.get("image-label")
+    entries = marker.get("colors") if isinstance(marker, dict) else None
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                value = int(entry["label-value"])
+                rgba = [float(channel) for channel in entry["rgba"]]
+            except (KeyError, TypeError, ValueError):
+                continue
+            while len(rgba) < 4:
+                rgba.append(255.0)
+            # NGFF writes 0-255; napari wants 0-1.
+            colors[value] = tuple(channel / 255.0 for channel in rgba[:4])
+
+    note = ""
+    try:
+        from ..clusters import read_run
+
+        run = read_run(label_group)
+        if run is not None:
+            note = run.describe()
+    except Exception:  # pragma: no cover - a malformed block must not cost the layer
+        logger.debug("could not read the clustering block", exc_info=True)
+    return colors, note
 
 
 def _read_image(

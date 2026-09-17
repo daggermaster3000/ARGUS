@@ -30,6 +30,16 @@ _BRIGHTFIELD_SUBSTRINGS = (
 _BRIGHTFIELD_TOKENS = frozenset({"bf", "tl", "dic", "ph", "phc", "phase", "trans", "bright"})
 
 
+def _direct_label_colormap(colors: dict):
+    """napari's explicit label colormap, with background transparent."""
+    from napari.utils.colormaps import DirectLabelColormap
+
+    mapping = {None: (0.0, 0.0, 0.0, 0.0), 0: (0.0, 0.0, 0.0, 0.0)}
+    for value, rgba in colors.items():
+        mapping[int(value)] = tuple(float(component) for component in rgba)
+    return DirectLabelColormap(color_dict=mapping)
+
+
 def is_brightfield(name: str | None) -> bool:
     """Whether a channel name describes transmitted light rather than fluorescence.
 
@@ -144,6 +154,11 @@ class LayerSpec:
             return ""
         return self.metadata.channel(self.channel_index).display_name
 
+    #: ``{label value: rgba}`` for a Labels layer that carries its own colours --
+    #: a clustering written into a plate does. Empty for an ordinary segmentation,
+    #: which napari colours by label value as it always has.
+    label_colors: dict = field(default_factory=dict)
+
     def to_kwargs(self) -> dict[str, Any]:
         """Keyword arguments for ``add_image`` — or ``add_labels``, see :attr:`layer_type`.
 
@@ -164,6 +179,12 @@ class LayerSpec:
         }
         # A Labels layer colours itself from the label values and takes neither a
         # colormap nor contrast limits; passing them is a TypeError, not a hint.
+        # The exception is an explicit label colormap -- a clustering stores the
+        # colour of each cluster in the plate, and loading it in napari's own
+        # arbitrary colours would lose the only thing tying the layer to the plot
+        # it came from.
+        if self.layer_type == "labels" and self.label_colors:
+            kwargs["colormap"] = _direct_label_colormap(self.label_colors)
         if self.layer_type != "labels":
             kwargs["colormap"] = napari_colormap(self.color, self.name) or self.colormap
             kwargs["blending"] = self.blending

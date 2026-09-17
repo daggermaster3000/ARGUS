@@ -30,6 +30,17 @@ single place that decides, and its palette is forty long rather than matplotlib'
 ten — a plate that clusters into seventeen drew clusters 0 and 10 in the same
 blue before it existed.
 
+**A feature's colours are z-scores unless told otherwise.** :func:`prepare`
+scales the matrix in place, which is what the clustering needs and is not what
+someone colouring by "Mean intensity" expects to see. :func:`colour_scale` is the
+choice between the two, and between this image's range and the plate's.
+
+**A clustering can go back into the plate.** :func:`assignment_frame` and
+:func:`cluster_run` prepare what :mod:`microscopy_viewer.clusters` needs to paint
+each object's phenotype onto the nucleus it was measured from, as another label
+set beside the segmentation — which is how a phenotype stops being a row in a
+table and becomes something you can see the position of.
+
 **The neighbour search is the whole cost.** Everything else here is seconds; the
 k-nearest-neighbour graph the clustering and the UMAP are both built on is not,
 and which library computes it matters more than anything else on this page. See
@@ -260,6 +271,81 @@ def obs_columns(adata, numeric_only: bool = False) -> list[str]:
         for name in adata.obs.columns
         if not numeric_only or pd.api.types.is_numeric_dtype(adata.obs[name])
     ]
+
+
+#: How a feature's colour scale is computed on the page.
+#:
+#: ``scaled``  the z-scored values the clustering was run on — what the page drew
+#:             before this existed, and the right thing when looking at what the
+#:             clustering saw. Clipped at 10 standard deviations by the scaling.
+#: ``image``   the raw measurement, scaled to this image's own 1-99 %.
+#: ``cycle``   the raw measurement, scaled to every well of this cycle.
+#: ``file``    the raw measurement, scaled to every object in the file.
+COLOUR_SCALES = ("scaled", "image", "cycle", "file")
+
+COLOUR_SCALE_LABELS = {
+    "scaled": "z-scored, this image (what the clustering saw)",
+    "image": "raw, this image",
+    "cycle": "raw, this cycle — every well",
+    "file": "raw, every object in the file",
+}
+
+
+def raw_values(source, adata, name: str) -> np.ndarray:
+    """*name* for the objects of *adata*, read off the untouched *source*.
+
+    :func:`prepare` z-scores in place, so by the time anything is drawn the matrix
+    holds standard deviations rather than grey levels. The file as it was read is
+    still the file as it was read, and the objects are matched back to it by name.
+    """
+    if name not in source.var_names:
+        return values_of(adata, name)
+    index = source.obs_names.get_indexer(adata.obs_names)
+    column = values_of(source, name)
+    out = np.full(adata.n_obs, np.nan, dtype=float)
+    found = index >= 0
+    out[found] = np.asarray(column, dtype=float)[index[found]]
+    return out
+
+
+def colour_scale(source, adata, name: str, scale: str = "scaled"):
+    """``(values, low, high, note)`` for colouring by *name* at the chosen scale."""
+    if scale == "scaled" or name not in source.var_names:
+        values = values_of(adata, name).astype(float)
+        low, high = (float(v) for v in np.nanpercentile(values, [1, 99]))
+        return values, low, high, COLOUR_SCALE_LABELS.get("scaled", scale)
+
+    values = raw_values(source, adata, name)
+    if scale == "image":
+        pool = values
+        covers = 1
+    else:
+        from .analysis import SCOPE_CYCLE, SCOPE_PLATE, scope_components
+
+        everything = images(source) or [""]
+        mine = str(adata.obs[IMAGE_KEY].iloc[0]) if IMAGE_KEY in adata.obs else ""
+        wanted = (
+            everything
+            if scale == "file"
+            else scope_components(mine, everything, SCOPE_CYCLE if mine else SCOPE_PLATE)
+        )
+        if IMAGE_KEY in source.obs and wanted:
+            mask = source.obs[IMAGE_KEY].astype(str).isin(wanted).to_numpy()
+            pool = values_of(source, name).astype(float)[mask]
+        else:
+            pool = values_of(source, name).astype(float)
+        covers = len(wanted)
+
+    finite = pool[np.isfinite(pool)]
+    if finite.size == 0:
+        return values, 0.0, 1.0, "nothing to scale against"
+    low, high = (float(v) for v in np.percentile(finite, [1, 99]))
+    if high <= low:
+        high = low + 1.0
+    note = COLOUR_SCALE_LABELS.get(scale, scale)
+    if covers > 1:
+        note += f" ({covers} images, {finite.size:,} objects)"
+    return values, low, high, note
 
 
 def values_of(adata, name: str) -> np.ndarray:
@@ -601,6 +687,53 @@ def plate_grid(shares, group: str):
     return frame.reindex(columns=sorted(frame.columns, key=lambda c: (len(c), c)))
 
 
+def assignment_frame(adata, key: str = CLUSTER_KEY):
+    """``label``, ``cluster`` and ``image`` per object, ready to be painted back.
+
+    The three columns a clustering needs to find its way home: which object, what
+    it was called, and which image it lives in.
+    """
+    import pandas as pd
+
+    if "label" not in adata.obs:
+        raise ValueError(
+            "this file has no obs['label'], so its objects cannot be matched to a mask"
+        )
+    frame = pd.DataFrame(
+        {
+            "label": adata.obs["label"].to_numpy(),
+            "cluster": adata.obs[key].astype(str).to_numpy(),
+        }
+    )
+    frame["image"] = (
+        adata.obs[IMAGE_KEY].astype(str).to_numpy()
+        if IMAGE_KEY in adata.obs
+        else ""
+    )
+    # Ordered, so the ids painted into the plate match the palette on the page.
+    if hasattr(adata.obs[key], "cat"):
+        frame["cluster"] = pd.Categorical(
+            frame["cluster"], categories=[str(c) for c in adata.obs[key].cat.categories]
+        )
+    return frame
+
+
+def cluster_run(adata, key: str = CLUSTER_KEY, source_labels: str = "", **extra):
+    """The provenance record for a clustering about to be written into a plate."""
+    from .clusters import ClusterRun, cluster_names
+
+    names = cluster_names(adata.obs[key])
+    return ClusterRun(
+        method=str(adata.uns.get(f"{key}_method", "clustering")),
+        names=tuple(names),
+        source=str(source_labels),
+        features=tuple(str(name) for name in adata.var_names),
+        n_objects=int(adata.n_obs),
+        colors=tuple(colour_map(names)[name] for name in names),
+        extra=dict(extra),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Space
 # ---------------------------------------------------------------------------
@@ -722,7 +855,7 @@ def command(path: str | Path | None = None, port: int = 8501, python: str | None
 
 def module_command(
     path: str | Path | None = None,
-    port: int = 8501,
+    port: int = 8504,
     python: str | None = None,
     open_browser: bool = True,
 ) -> list[str]:
@@ -742,7 +875,7 @@ def module_command(
     return argv
 
 
-def free_port(start: int = 8501, tries: int = 20) -> int:
+def free_port(start: int = 8504, tries: int = 20) -> int:
     """A port nothing is listening on, so a second dashboard does not fail silently."""
     import socket
 
