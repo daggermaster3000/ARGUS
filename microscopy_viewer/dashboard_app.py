@@ -187,7 +187,7 @@ def _read(path: str, mtime: float):
     return db.read(path)
 
 
-@st.cache_resource(show_spinner="Grouping the objects…")
+@st.cache_resource(show_spinner="Building the neighbourhood graph…")
 def _analysed(
     path: str,
     mtime: float,
@@ -197,30 +197,29 @@ def _analysed(
     n_neighs: int,
     radius: float,
     grouping: str,
-    resolution: float,
     bins: int,
+    stamp: str,
 ):
-    """One image, grouped and joined up. Cached because everything below reuses it."""
+    """One image, joined up and ready for the spatial statistics.
+
+    It does **not** cluster. The clusters come from the one clustering on the
+    file, so this image's groups are the plate's groups — which is the only way a
+    colour can mean the same thing here as on the UMAP. *stamp* is when that
+    clustering was computed, and is in the cache key so that re-clustering
+    invalidates this.
+    """
     adata = db.select_image(_read(path, mtime), image or None)
     adata = db.subsample(adata, limit)
     if grouping == "cluster":
-        method = db.cluster(adata, resolution=resolution)
+        record = db.load_clustering(_read(path, mtime))
+        method = f"{record.get('method', 'the clustering')} (plate-wide)"
     else:
-        db.prepare(adata)
+        # No scaling first: quartiles of a z-score are the quartiles of the raw
+        # column anyway, and leaving it raw means the bin edges are in the units
+        # the legend will name.
         method = db.bin_column(adata, grouping, bins=bins)
     graph = db.build_graph(adata, mode=mode, n_neighs=n_neighs, radius_um=radius)
     return adata, method, graph
-
-
-@st.cache_resource(show_spinner="Embedding the plate — this is the slow one…")
-def _plate(path: str, mtime: float, per_image: int, resolution: float,
-           n_neighbors: int, min_dist: float):
-    """Every well, sampled evenly, clustered and laid out. Cached: it is minutes."""
-    adata = db.stratified_subsample(_read(path, mtime), per_image)
-    db.prepare(adata)
-    method = db.cluster(adata, resolution=resolution)
-    how = db.embed(adata, n_neighbors=n_neighbors, min_dist=min_dist)
-    return adata, method, how
 
 
 def _figure(width: float = 6.0, height: float = PLOT_HEIGHT):
@@ -380,116 +379,74 @@ WELL_PANEL = 190
 
 
 def _well_display_tab(path: str, mtime: float) -> None:
-    """Every well's spatial view, laid out as a plate, drawn from the cached points.
+    """Every well's spatial view, laid out as a plate, from the one clustering.
 
-    Computed once and kept in the file, because what costs minutes is clustering
-    the plate — and the clusters have to come from *one* clustering or the panels
-    would each be coloured by their own groups and could not be compared, which is
-    the only reason to put them side by side.
+    Derived rather than stored: the clustering is what costs minutes and it is
+    already on the file, so the panels are a subsample of it and are recomputed in
+    a moment. Storing them separately was one more thing that could disagree with
+    the clustering it came from.
     """
     source = _read(path, mtime)
-    frame, meta = db.load_well_views(source)
-
-    with st.expander("Compute the views", expanded=frame is None):
-        st.markdown(
-            "Clusters the whole plate once, reduces each well to a few hundred "
-            "objects, and keeps them in the `.h5ad` — points rather than pictures, "
-            "so every panel below can still be pointed at.\n\n"
-            "The file is rewritten, which for a plate is a hundred megabytes and a "
-            "few seconds."
+    record = db.load_clustering(source)
+    if not record:
+        st.info(
+            "Nothing is clustered yet. Set the clustering in the sidebar and press "
+            "**Cluster** — this tab reads it like every other."
         )
-        controls = st.columns(4)
-        per_well = controls[0].number_input(
-            "Objects per well", 100, 2000, db.DEFAULT_VIEW_POINTS, step=50, key="wv_points"
-        )
-        sample = controls[1].number_input(
-            "Sampled for clustering", 100, 3000, 750, step=50, key="wv_sample",
-            help="Objects per well used to find the clusters. Separate from the number "
-                 "drawn: the clustering wants enough to find phenotypes, the panels want "
-                 "few enough to stay quick.",
-        )
-        resolution = controls[2].slider("Resolution", 0.2, 2.0, 0.6, step=0.1, key="wv_res")
-        save = controls[3].checkbox(
-            "Save into the file", value=True, key="wv_save",
-            help="Untick to look at them without rewriting the .h5ad.",
-        )
-        if st.button("Compute the well views", key="wv_go"):
-            try:
-                with st.spinner("Clustering the plate…"):
-                    whole = db.stratified_subsample(source.copy(), int(sample))
-                    db.prepare(whole)
-                    db.cluster(whole, resolution=float(resolution))
-                    frame, meta = db.well_views(
-                        whole, per_well=int(per_well), source=source
-                    )
-                    db.store_well_views(source, frame, meta)
-                if save:
-                    with st.spinner("Writing the file…"):
-                        db.save_well_views(path, source)
-                    st.success(f"Computed and saved into {Path(path).name}.")
-                else:
-                    st.success("Computed. Not saved — tick the box to keep them.")
-            except Exception as exc:  # noqa: BLE001 - shown on the page
-                st.exception(exc)
-                return
-
-    if frame is None or frame.empty:
-        st.info("No well views in this file yet. Compute them above.")
         return
 
-    st.caption(
-        f"**{frame['image'].nunique()} wells**, {len(frame):,} points · "
-        f"{meta.get('method', 'clustering')} into {len(meta.get('clusters', []))} clusters"
-        + (f" · computed {meta['created']}" if meta.get("created") else "")
-    )
+    groups = [str(name) for name in record["clusters"]]
+    palette = db.clustering_palette(record)
 
-    options = st.columns(3)
-    columns = options[0].slider("Panels per row", 2, 10, WELL_COLUMNS, key="wv_cols")
-    size = options[1].slider("Panel size", 110, 320, WELL_PANEL, step=10, key="wv_size")
-    shared = options[2].checkbox(
+    options = st.columns(4)
+    per_well = options[0].number_input(
+        "Objects per panel", 100, 2000, db.DEFAULT_VIEW_POINTS, step=50, key="wv_points",
+        help="Drawn per well. The clustering is not redone — this only decides how many "
+             "of its objects each panel shows.",
+    )
+    columns = options[1].slider("Panels per row", 2, 10, WELL_COLUMNS, key="wv_cols")
+    size = options[2].slider("Panel size", 110, 320, WELL_PANEL, step=10, key="wv_size")
+    shared = options[3].checkbox(
         "One scale for every well", value=True, key="wv_shared",
         help="On, the panels are on the same micrometre scale, so a small well looks "
-             "small. Off, each fills its own panel, which shows its structure better "
-             "and makes the wells look the same size.",
+             "small. Off, each fills its own panel.",
     )
 
-    names = [str(name) for name in meta.get("clusters", [])] or sorted(
-        frame["cluster"].astype(str).unique()
+    frame = _well_frame(path, mtime, int(per_well), str(record.get("created", "")))
+    totals = source.obs[db.IMAGE_KEY].astype(str).value_counts().to_dict()
+    frame = frame.assign(
+        objects_in_well=[int(totals.get(str(image), 0)) for image in frame[db.IMAGE_KEY]]
     )
-    stored = [str(colour) for colour in meta.get("colors", [])]
-    mapping = (
-        dict(zip(names, stored)) if len(stored) == len(names) else db.colour_map(names)
+
+    st.caption(
+        f"**{frame[db.IMAGE_KEY].nunique()} wells**, {len(frame):,} points drawn of "
+        f"{record['n_objects']:,} · {record['method']} into {len(groups)} clusters · "
+        "the same clustering as every other tab"
     )
+
     chosen = st.multiselect(
-        "Show clusters", names, default=names, key="wv_clusters",
+        "Show clusters", groups, default=groups, key="wv_clusters",
         help="Narrow to one phenotype to see where it sits in every well at once — "
              "which is the question this layout exists for.",
     )
     shown = frame[frame["cluster"].astype(str).isin(chosen)] if chosen else frame
+    domain = [name for name in groups if name in set(chosen or groups)]
 
-    totals = meta.get("totals") or {}
-    shown = shown.assign(
-        objects_in_well=[int(totals.get(str(image), 0)) for image in shown["image"]]
-    )
-
-    domain = [name for name in names if name in set(chosen or names)]
     chart = (
         alt.Chart(shown)
         .mark_circle(size=9, opacity=0.8)
         .encode(
             x=alt.X("x:Q", title=None, axis=None, scale=alt.Scale(zero=False, nice=False)),
-            y=alt.Y(
-                "y:Q", title=None, axis=None,
-                scale=alt.Scale(zero=False, nice=False, reverse=True),
-            ),
+            y=alt.Y("y:Q", title=None, axis=None,
+                    scale=alt.Scale(zero=False, nice=False, reverse=True)),
             color=alt.Color(
                 "cluster:N",
-                scale=alt.Scale(domain=domain, range=[mapping[n] for n in domain]),
+                scale=alt.Scale(domain=domain, range=[palette[n] for n in domain]),
                 legend=alt.Legend(title="cluster", symbolSize=80),
             ),
             tooltip=[
                 alt.Tooltip("well:N"),
-                alt.Tooltip("image:N", title="image"),
+                alt.Tooltip(f"{db.IMAGE_KEY}:N", title="image"),
                 alt.Tooltip("cluster:N"),
                 alt.Tooltip("label:Q", title="object"),
                 alt.Tooltip("objects_in_well:Q", title="objects in well"),
@@ -498,220 +455,200 @@ def _well_display_tab(path: str, mtime: float) -> None:
             ],
         )
         .properties(width=int(size), height=int(size))
-        .facet(facet=alt.Facet("image:N", title=None, sort=sorted(frame["image"].unique())),
-               columns=int(columns))
+        .facet(
+            facet=alt.Facet(f"{db.IMAGE_KEY}:N", title=None,
+                            sort=sorted(frame[db.IMAGE_KEY].unique())),
+            columns=int(columns),
+        )
     )
     if not shared:
         chart = chart.resolve_scale(x="independent", y="independent")
     st.altair_chart(chart)
     st.caption(
         "Point at any object in any panel: it says its well, its cluster and how many "
-        "objects that well holds in total. The panels share one clustering, which is "
-        "what makes them comparable — a per-well clustering would colour each by its "
-        "own groups."
+        "objects that well holds in total. Every panel is coloured by the one "
+        "clustering, which is what makes them comparable."
         + ("" if shared else " Each panel is on its own scale, so the wells are not "
            "comparable in size.")
     )
 
 
+@st.cache_data(show_spinner="Laying out the wells…")
+def _well_frame(path: str, mtime: float, per_well: int, stamp: str):
+    """Points per well, drawn from the stored clustering. *stamp* invalidates it."""
+    import pandas as pd
+
+    source = _read(path, mtime)
+    parts = []
+    for image in db.images(source) or [""]:
+        part = db.clustered_frame(source, image=image or None, limit=int(per_well))
+        parts.append(part)
+    return pd.concat(parts, ignore_index=True)
+
+
 def _plate_tab(path: str, mtime: float, colour_scale: str = "scaled") -> None:
-    """Every well at once: a UMAP in feature space, and what each well is made of.
+    """Every well at once: the stored UMAP, and what each well is made of.
 
-    A function rather than inline, so that "there is nothing to show yet" can
-    return instead of calling st.stop() -- Streamlit renders every tab on the
-    same run, and stopping here would take the spatial tabs down with it.
+    Draws the clustering the sidebar computed rather than one of its own. There
+    used to be a clustering here, another for each image and a third for the well
+    display, which meant cluster 3 was three different things on one page.
     """
-    if not db.images(_read(path, mtime)):
+    source = _read(path, mtime)
+    record = db.load_clustering(source)
+    if not record:
         st.info(
-            "This file holds one image, so there is no plate to compare. Export the "
-            "whole folder as one AnnData — the Measurement analysis panel's "
-            "**…the whole folder as one** — to get a file with every well in it."
+            "Nothing is clustered yet. Set the clustering in the sidebar and press "
+            "**Cluster** — this tab and every other read it."
         )
-    else:
+        return
+    if "umap" not in record:
+        st.warning("This clustering was stored without an embedding. Re-cluster to get one.")
+        return
+
+    groups = [str(name) for name in record["clusters"]]
+    palette = db.clustering_palette(record)
+    st.markdown(
+        "**Which wells hold which phenotypes.** Every well at once, in feature space "
+        "rather than in the well — this is the question the spatial tabs cannot ask, "
+        "because the coordinates in them are per image."
+    )
+    st.caption(
+        f"**{record['n_objects']:,} objects** from {source.obs[db.IMAGE_KEY].nunique()} images · "
+        f"{record['method']} into {len(groups)} clusters · "
+        f"{record['n_clustered']:,} clustered, {record['n_assigned']:,} assigned by neighbours"
+        + (f" · {record['created']}" if record.get("created") else "")
+    )
+
+    # The embedding covers the objects that were clustered; the rest have a
+    # cluster but no place on the map, which is what an embedding is.
+    import pandas as pd
+
+    umap = record["umap"]
+    embedded = pd.DataFrame({"object": umap["names"], "x": umap["x"], "y": umap["y"]})
+    columns = ["cluster", "well", db.IMAGE_KEY, "label", db.ORIGIN_COLUMN]
+    lookup = db.clustered_frame(source)
+    embedded = embedded.merge(
+        lookup[[c for c in ["object", *columns] if c in lookup.columns]], on="object", how="left"
+    )
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("The map")
+        colour_by = st.selectbox(
+            "Colour by",
+            ["cluster", "well", "row", "column"] + db.feature_names(source),
+            key="umap_colour",
+        )
+        frame = embedded.copy()
+        if colour_by in ("row", "column"):
+            part = 0 if colour_by == "row" else 1
+            frame[colour_by] = [db.row_column(str(name))[part] for name in frame[db.IMAGE_KEY]]
+        categorical = colour_by in ("cluster", "well", "row", "column")
+        mapping = None
+        limits, scale_note = None, ""
+        if categorical:
+            levels = groups if colour_by == "cluster" else sorted(set(frame[colour_by].astype(str)))
+            mapping = palette if colour_by == "cluster" else db.colour_map(levels)
+        else:
+            values, low, high, scale_note = db.colour_scale(
+                source, source[[str(n) for n in frame["object"]]], colour_by, colour_scale
+            )
+            frame[colour_by] = values
+            limits = (low, high)
+
+        tooltips = [c for c in ("object", "cluster", "well", db.IMAGE_KEY, "label",
+                                db.ORIGIN_COLUMN, colour_by) if c in frame.columns]
+        chart, note = _scatter(
+            frame, colour_by, mapping, "UMAP 1", "UMAP 2", tooltips, height=520, limits=limits
+        )
+        st.altair_chart(chart)
+        hints = [
+            "Point at an object to see its well and its cluster — which is how you find "
+            "out whether a corner of this map is one well or many."
+        ]
+        if scale_note:
+            hints.append(f"Colour scale: {scale_note}.")
+        if note:
+            hints.append(note)
+        if mapping is not None and db.OVERFLOW_COLOUR in mapping.values():
+            spare = sum(1 for c in mapping.values() if c == db.OVERFLOW_COLOUR)
+            hints.append(f"{spare} of the {len(mapping)} {colour_by}s share grey.")
+        st.caption(" ".join(hints))
+        st.caption(
+            "Distances between clusters on a UMAP mean nothing; only what is together "
+            "and what is apart does. Two wells landing in different places is a real "
+            "difference — but it can be a difference in staining or focus as easily as "
+            "in biology, so check a couple in the image before believing it. Only the "
+            f"{record['n_clustered']:,} clustered objects are on the map; the rest have "
+            "a cluster but no position in it."
+        )
+
+    with right:
+        st.subheader("What each well is made of")
+        shares = db.composition(source, by="well")
+        stacked = shares.reset_index()
+        stacked = stacked.melt(
+            id_vars=stacked.columns[0], var_name="cluster", value_name="share"
+        )
+        stacked.columns = ["well", "cluster", "share"]
+        stacked["cluster"] = stacked["cluster"].astype(str)
+        domain = [name for name in groups if name in set(stacked["cluster"])]
+        st.altair_chart(
+            alt.Chart(stacked)
+            .mark_bar()
+            .encode(
+                x=alt.X("well:N", title=None, sort=list(shares.index)),
+                y=alt.Y("share:Q", stack="normalize", axis=alt.Axis(format="%")),
+                color=alt.Color(
+                    "cluster:N",
+                    scale=alt.Scale(domain=domain, range=[palette[n] for n in domain]),
+                    legend=alt.Legend(title="cluster"),
+                ),
+                tooltip=[
+                    alt.Tooltip("well:N"),
+                    alt.Tooltip("cluster:N"),
+                    alt.Tooltip("share:Q", format=".1%"),
+                ],
+            )
+            .properties(height=260)
+        )
+        st.caption(
+            "The share of each well's objects in each cluster — every object, not only "
+            "the sampled ones, and shares rather than counts because the wells hold "
+            "wildly different numbers of objects."
+        )
+
+        st.subheader("As a plate")
+        which = st.selectbox("Share of cluster", groups, key="plate_group")
+        swatch = palette.get(str(which), db.OVERFLOW_COLOUR)
         st.markdown(
-            "**Which wells hold which phenotypes.** Every well at once, in feature "
-            "space rather than in the well — this is the question the spatial tabs "
-            "cannot ask, because the coordinates in them are per image."
+            f'<span style="display:inline-block;width:12px;height:12px;'
+            f'background:{swatch};border-radius:2px;margin-right:6px;"></span>'
+            f"cluster {which}, the same colour it is everywhere else",
+            unsafe_allow_html=True,
         )
-        settings = st.columns(4)
-        per_image = settings[0].number_input(
-            "Objects per image", 100, 5000, db.DEFAULT_PER_IMAGE, step=50,
-            help="Taken from each image separately. This plate runs from 16 objects "
-                 "in one well to 46 394 in another, and a flat sample of the lot "
-                 "would be a picture of the big wells with the small ones invisible.",
-        )
-        plate_resolution = settings[1].slider("Cluster resolution", 0.2, 2.0, 0.6, step=0.1,
-                                              key="plate_res")
-        umap_neighbours = settings[2].slider("UMAP neighbours", 5, 50,
-                                             db.DEFAULT_UMAP_NEIGHBOURS, key="umap_n")
-        min_dist = settings[3].slider("UMAP min_dist", 0.0, 1.0, db.DEFAULT_MIN_DIST,
-                                      step=0.05, key="umap_d")
+        grid = db.plate_grid(shares, which)
+        values = grid.to_numpy(dtype=float)
+        from matplotlib import colormaps
 
-        n_images = len(db.images(_read(path, mtime)))
+        shaded = colormaps["magma"].with_extremes(bad="0.85")
+        figure = _figure(6.0, 3.6)
+        axes = figure.add_subplot(111)
+        heat = axes.imshow(values, cmap=shaded, vmin=0.0, vmax=float(np.nanmax(values) or 1.0))
+        axes.set_xticks(range(len(grid.columns)), list(grid.columns), fontsize=7)
+        axes.set_yticks(range(len(grid.index)), list(grid.index), fontsize=7)
+        figure.colorbar(heat, ax=axes, shrink=0.8, label=f"share in {which}")
+        st.pyplot(figure)
         st.caption(
-            f"{n_images} images x {per_image} = up to {n_images * int(per_image):,} objects. "
-            "Computed once and remembered; changing a setting recomputes it."
+            "A plate is a physical object and the answer often is too — an edge effect, "
+            "a column of controls, a row that did not take. Grey cells are wells this "
+            "plate does not have, which is not the same as a well holding none."
         )
-        # Behind a button because it is minutes, and remembered in the session
-        # rather than read off the button, which is only true on the click's own
-        # rerun -- every later interaction would otherwise wipe the plot.
-        if st.button("Embed the plate", key="plate_go"):
-            st.session_state["plate_embedded"] = True
-        if not st.session_state.get("plate_embedded"):
-            st.info("Press **Embed the plate** to compute it.")
-            return
 
-        try:
-            whole, plate_method, how = _plate(
-                path, mtime, int(per_image), plate_resolution, int(umap_neighbours), min_dist
-            )
-        except Exception as exc:  # noqa: BLE001
-            st.exception(exc)
-            st.stop()
+    _write_back(source, path, groups)
 
-        plate_groups = list(whole.obs[db.CLUSTER_KEY].cat.categories)
-        st.caption(
-            f"**{whole.n_obs:,} objects** from {whole.obs[db.IMAGE_KEY].nunique()} images "
-            f"· {plate_method} into {len(plate_groups)} · {how}"
-        )
-        st.caption(
-            "Every plot in this tab shares one colour per cluster. The spatial tabs "
-            "cluster one well on its own, so their colours are a different set of "
-            "groups — cluster 3 here and cluster 3 there are not the same thing, and "
-            "colouring them alike would claim they were."
-        )
-        if not db.clustered_with_leiden(whole):
-            st.warning(
-                f"Grouped with **{plate_method}** because leidenalg is not installed. "
-                "k-means needs the number of groups decided in advance, which is exactly "
-                "what you do not know yet — the map below is still the map, but the "
-                "colouring on it is cruder than it should be. "
-                "`pip install leidenalg igraph` and press Embed again."
-            )
-
-        left, right = st.columns(2)
-        umap = np.asarray(whole.obsm["X_umap"])
-        with left:
-            st.subheader("The map")
-            colour_by = st.selectbox(
-                "Colour by",
-                [db.CLUSTER_KEY, "well", "row", "column"] + db.feature_names(whole),
-                key="umap_colour",
-            )
-            categorical = (
-                colour_by in whole.obs and str(whole.obs[colour_by].dtype) == "category"
-            )
-            mapping = db.group_colours(whole, colour_by) if categorical else None
-            tooltips = _tooltip_columns(whole, colour_by)
-            frame = _points(whole, umap[:, 0], umap[:, 1], colour_by, extra=tooltips)
-            limits, scale_note = None, ""
-            if mapping is None:
-                values, low, high, scale_note = db.colour_scale(
-                    _read(path, mtime), whole, colour_by, colour_scale
-                )
-                frame[colour_by] = values
-                limits = (low, high)
-            chart, note = _scatter(
-                frame, colour_by, mapping, "UMAP 1", "UMAP 2", tooltips, height=520,
-                limits=limits,
-            )
-            st.altair_chart(chart)
-            hints = [
-                "Point at an object to see its well and its cluster — which is how you "
-                "find out whether a corner of this map is one well or many."
-            ]
-            if scale_note:
-                hints.append(f"Colour scale: {scale_note}.")
-            if note:
-                hints.append(note)
-            if mapping is not None and db.OVERFLOW_COLOUR in mapping.values():
-                spare = sum(1 for c in mapping.values() if c == db.OVERFLOW_COLOUR)
-                hints.append(
-                    f"{spare} of the {len(mapping)} {colour_by}s share grey — the palette "
-                    "holds forty distinct colours and this is past it. Hover still names them."
-                )
-            st.caption(" ".join(hints))
-            st.caption(
-                "Distances between clusters on a UMAP mean nothing; only what is "
-                "together and what is apart does. Two wells landing in different "
-                "places is a real difference — but it can be a difference in "
-                "staining or focus as easily as in biology, so check a couple in "
-                "the image before believing it."
-            )
-
-        with right:
-            st.subheader("What each well is made of")
-            shares = db.composition(whole, by="well")
-            stacked = shares.reset_index()
-            stacked = stacked.melt(
-                id_vars=stacked.columns[0], var_name=db.CLUSTER_KEY, value_name="share"
-            )
-            stacked.columns = ["well", db.CLUSTER_KEY, "share"]
-            stacked[db.CLUSTER_KEY] = stacked[db.CLUSTER_KEY].astype(str)
-            plate_colours = db.colour_map(plate_groups)
-            plate_domain, plate_scheme = db.scale_for(plate_colours)
-            st.altair_chart(
-                alt.Chart(stacked)
-                .mark_bar()
-                .encode(
-                    x=alt.X("well:N", title=None, sort=list(shares.index)),
-                    y=alt.Y("share:Q", stack="normalize", axis=alt.Axis(format="%")),
-                    color=alt.Color(
-                        f"{db.CLUSTER_KEY}:N",
-                        scale=alt.Scale(domain=plate_domain, range=plate_scheme),
-                        legend=alt.Legend(title="cluster"),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("well:N"),
-                        alt.Tooltip(f"{db.CLUSTER_KEY}:N", title="cluster"),
-                        alt.Tooltip("share:Q", format=".1%"),
-                    ],
-                )
-                .properties(height=260),
-            )
-            st.caption(
-                "The share of each well's objects in each cluster — shares rather "
-                "than counts, because the wells hold wildly different numbers of "
-                "objects and a count chart is a chart of how full each well was."
-            )
-
-            st.subheader("As a plate")
-            which = st.selectbox("Share of cluster", plate_groups, key="plate_group")
-            swatch = plate_colours.get(str(which), db.OVERFLOW_COLOUR)
-            st.markdown(
-                f'<span style="display:inline-block;width:12px;height:12px;'
-                f'background:{swatch};border-radius:2px;margin-right:6px;"></span>'
-                f"cluster {which}, the same colour it is above",
-                unsafe_allow_html=True,
-            )
-            grid = db.plate_grid(shares, which)
-            values = grid.to_numpy(dtype=float)
-            # A well the plate does not have must not look like a well full of this
-            # cluster: NaN draws transparent by default, and transparent over a
-            # white page is the same white as the top of magma.
-            from matplotlib import colormaps
-
-            shaded = colormaps["magma"].with_extremes(bad="0.85")
-            figure = _figure(6.0, 3.6)
-            axes = figure.add_subplot(111)
-            heat = axes.imshow(values, cmap=shaded, vmin=0.0,
-                               vmax=float(np.nanmax(values) or 1.0))
-            axes.set_xticks(range(len(grid.columns)), list(grid.columns), fontsize=7)
-            axes.set_yticks(range(len(grid.index)), list(grid.index), fontsize=7)
-            figure.colorbar(heat, ax=axes, shrink=0.8, label=f"share in {which}")
-            st.pyplot(figure)
-            st.caption(
-                "A plate is a physical object and the answer often is too — an edge "
-                "effect, a column of controls, a row that did not take. A bar chart "
-                "of forty-four wells hides that; the grid does not. Grey cells are "
-                "wells this plate does not have, which is not the same as a well "
-                "holding none of this cluster."
-            )
-
-        _write_back(whole, path, plate_groups)
-
-        with st.expander("The numbers"):
-            st.dataframe(shares.style.format("{:.1%}"))
+    with st.expander("The numbers"):
+        st.dataframe(shares.style.format("{:.1%}"))
 
 
 def main() -> None:
@@ -779,17 +716,89 @@ def main() -> None:
                  "objects is minutes; on eight thousand it is seconds and the same shape.",
         )
 
+        st.header("Clustering")
+        st.caption(
+            "One clustering for the whole page. Every plot, the well display and the "
+            "label set written into the plate all read it, so a colour means the same "
+            "thing everywhere."
+        )
+        stored = db.load_clustering(adata)
+        current = stored.get("params", db.ClusteringParams())
+        wanted = db.ClusteringParams(
+            sample_per_well=int(
+                st.number_input("Objects per image", 100, 5000, int(current.sample_per_well),
+                                step=50, key="cl_sample",
+                                help="Sampled from each image and clustered. Every other "
+                                     "object then takes the cluster of its neighbours.")
+            ),
+            resolution=float(
+                st.slider("Resolution", 0.2, 2.0, float(current.resolution), step=0.1,
+                          key="cl_res")
+            ),
+            n_neighbors=int(
+                st.slider("UMAP neighbours", 5, 50, int(current.n_neighbors), key="cl_neigh")
+            ),
+            min_dist=float(
+                st.slider("UMAP min_dist", 0.0, 1.0, float(current.min_dist), step=0.05,
+                          key="cl_dist")
+            ),
+            assign_all=bool(
+                st.checkbox("Give every object a cluster", value=bool(current.assign_all),
+                            key="cl_all",
+                            help="The objects the clustering did not sample take the "
+                                 "cluster of their neighbours in the same feature space. "
+                                 "Off, they have none, and the label set written into the "
+                                 "plate is mostly empty.")
+            ),
+        )
+
+        stale = bool(stored) and wanted != current
+        if not stored:
+            st.info("Not clustered yet.")
+        elif stale:
+            st.warning("The settings have changed since this was computed.")
+        else:
+            st.caption(
+                f"{stored['method']} into {len(stored['clusters'])} clusters · "
+                f"{stored['n_clustered']:,} clustered, {stored['n_assigned']:,} assigned"
+                + (f" · {stored['created']}" if stored.get("created") else "")
+            )
+
+        recluster = st.button(
+            ("Cluster" if not stored else "Re-cluster"),
+            type=("primary" if (stale or not stored) else "secondary"),
+            key="cl_go",
+        )
+        keep = st.checkbox(
+            "Save into the file", value=True, key="cl_save",
+            help="Writes the clustering into the .h5ad, so it is still there next time "
+                 "and the label sets written into the plate match what is on screen.",
+        )
+
+        if recluster:
+            progress = st.empty()
+            try:
+                db.run_clustering(adata, wanted, progress=lambda text: progress.write(text))
+                if keep:
+                    progress.write("writing the file…")
+                    db.save_clustering(path, adata)
+                progress.empty()
+                _read.clear()
+                st.rerun()
+            except Exception as exc:  # noqa: BLE001 - shown in the sidebar
+                progress.empty()
+                st.exception(exc)
+
         st.header("Grouping")
         grouping_choice = st.radio(
-            "Objects are grouped by",
-            ["Clustering on the features", "Bins of one measurement"],
-            help="The neighbourhood statistics need a label per object. A cluster finds "
-                 "phenotypes; bins of one column are cruder and far easier to explain.",
+            "The spatial statistics group by",
+            ["The clustering", "Bins of one measurement"],
+            help="The neighbourhood statistics need a label per object. The clustering "
+                 "above is the usual one; bins of a single column are cruder and far "
+                 "easier to explain in a figure legend.",
         )
-        resolution, bins, grouping = 1.0, 4, "cluster"
-        if grouping_choice.startswith("Clustering"):
-            resolution = st.slider("Resolution", 0.2, 2.0, 1.0, step=0.1)
-        else:
+        grouping, bins = "cluster", 4
+        if not grouping_choice.startswith("The clustering"):
             grouping = st.selectbox(
                 "Measurement", db.feature_names(adata) + db.obs_columns(adata, numeric_only=True)
             )
@@ -822,16 +831,27 @@ def main() -> None:
         n_neighs = st.slider("Neighbours (knn)", 3, 20, 6) if mode == "knn" else 6
         radius = st.slider("Radius (um)", 5.0, 200.0, 30.0) if mode == "radius" else 30.0
 
+    if grouping == "cluster" and not stored:
+        st.info(
+            "Nothing is clustered yet. Set the clustering in the sidebar and press "
+            "**Cluster** — every tab on this page reads it."
+        )
+        st.stop()
+
     try:
         adata, method, graph = _analysed(
-            path, mtime, image, limit, mode, n_neighs, radius, grouping, resolution, bins
+            path, mtime, image, limit, mode, n_neighs, radius, grouping, bins,
+            str(stored.get("created", "")),
         )
     except Exception as exc:  # noqa: BLE001 - shown on the page, not in a terminal
         st.exception(exc)
         st.stop()
 
     groups = list(adata.obs[db.CLUSTER_KEY].cat.categories)
-    colours = db.group_colours(adata)
+    # From the stored record, so the well display, the UMAP and the plate's own
+    # label set are all painted the same.
+    colours = db.clustering_palette(stored) if grouping == "cluster" else db.group_colours(adata)
+    colours = {name: colours.get(name, db.OVERFLOW_COLOUR) for name in map(str, groups)}
     st.caption(
         f"**{adata.n_obs:,} objects**"
         + (f" from {image}" if image else "")

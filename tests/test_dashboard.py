@@ -568,80 +568,98 @@ def test_the_embedding(directory: Path) -> None:
     check(apart > spread, f"the two populations land apart ({apart:.1f} against a spread of {spread:.1f})")
 
 
-def test_well_views(directory: Path) -> None:
-    print("every well, cached in the file")
+def test_one_clustering(directory: Path) -> None:
+    print("one clustering, and everything reads it")
 
-    if not (_has("anndata") and _has("scanpy")):
-        print("  skip anndata/scanpy are not installed")
+    if not (_has("anndata") and _has("scanpy") and _has("sklearn")):
+        print("  skip anndata/scanpy/scikit-learn are not installed")
         return
-    import pandas as pd
 
-    path = _plate_file(directory, images=4, per_image=150)
+    path = _plate_file(directory, images=4, per_image=200)
     source = db.read(path)
-    whole = db.stratified_subsample(source, 100)
-    db.prepare(whole)
-    db.cluster(whole, resolution=1.0)
+    check(db.load_clustering(source) == {}, "a fresh file has no clustering")
 
-    frame, meta = db.well_views(whole, per_well=40, source=source)
+    params = db.ClusteringParams(sample_per_well=50, resolution=1.0)
     check(
-        set(frame.columns) >= {"image", "well", "x", "y", "cluster", "label"},
-        f"the view is points, not a picture: {sorted(frame.columns)}",
-    )
-    check(frame["image"].nunique() == 4, f"one panel per image ({frame['image'].nunique()})")
-    check(
-        int(frame.groupby("image").size().max()) <= 40,
-        "each capped at the quota so the grid stays quick",
+        db.ClusteringParams.from_attrs(params.as_attrs()) == params,
+        "the parameters round-trip, which is what lets a stored one be compared",
     )
     check(
-        meta["totals"]["B/02/0"] == 150,
-        f"the totals are the well's real size, not the sample's — a tooltip saying a "
-        f"well holds forty objects when it holds thousands is worse than none "
-        f"({meta['totals']['B/02/0']})",
-    )
-    check(
-        len(meta["colors"]) == len(meta["clusters"]),
-        "with a colour per cluster, so the panels match the rest of the page",
-    )
-    check(
-        frame["well"].iloc[0] == db.well_of(frame["image"].iloc[0]),
-        "and the well is derived, for the tooltip",
+        params != db.ClusteringParams(sample_per_well=50, resolution=1.4),
+        "and a changed parameter is a different clustering",
     )
 
-    # One clustering for the plate, or the panels could not be compared.
+    record = db.run_clustering(source, params)
+    check(record["clusters"], f"it clusters ({len(record['clusters'])} groups)")
     check(
-        set(frame["cluster"]) <= set(meta["clusters"]),
-        "every point's cluster is one of the plate's, not a per-well grouping",
+        db.CLUSTER_KEY in source.obs and db.ORIGIN_COLUMN in source.obs,
+        "writing the cluster and its origin onto every object",
+    )
+    check(
+        (source.obs[db.CLUSTER_KEY].astype(str) != "").all(),
+        "every object has one, not only the sampled ones",
+    )
+    check(
+        record["n_clustered"] + record["n_assigned"] == source.n_obs,
+        f"and the two accounts add up ({record['n_clustered']} + {record['n_assigned']} "
+        f"= {source.n_obs})",
+    )
+    check(len(record["colors"]) == len(record["clusters"]), "with a colour per cluster")
+    check(
+        len(record["umap_names"]) == record["n_clustered"],
+        "the embedding covers the objects that were clustered, which is what an "
+        "embedding is",
     )
 
-    # Round trip through the file.
-    db.store_well_views(source, frame, meta)
-    check(db.WELL_VIEWS_KEY in source.uns, "stored in uns")
-    target = db.save_well_views(directory / "with_views.h5ad", source)
-    check(target.exists(), f"written ({target.name})")
+    # Round trip.
+    target = db.save_clustering(directory / "clustered.h5ad", source)
+    back = db.load_clustering(db.read(target))
+    check(back["params"] == params, "the parameters survive the file")
+    check(back["clusters"] == record["clusters"], "and so do the clusters")
+    check(back["colors"] == record["colors"], "and the colours, so every plot matches")
+    check("umap" in back and len(back["umap"]["x"]) == record["n_clustered"], "and the map")
 
+    # Everything derives from it, and agrees.
     reopened = db.read(target)
-    back, back_meta = db.load_well_views(reopened)
-    check(back is not None and len(back) == len(frame), f"read back whole ({len(back)})")
+    palette = db.clustering_palette(back)
     check(
-        bool(np.allclose(np.sort(back["x"].to_numpy()), np.sort(frame["x"].to_numpy()))),
-        "with the same coordinates",
+        palette == db.colour_map(back["clusters"]),
+        "the palette is the shared one, not a second set of colours",
     )
-    check(
-        back_meta["clusters"] == meta["clusters"] and back_meta["colors"] == meta["colors"],
-        "and the same clusters and colours, so the grid looks the same next time",
-    )
-    check(back_meta["method"] == meta["method"], f"and the method ({back_meta['method']})")
-    check(back_meta["totals"] == meta["totals"], "and the per-well totals")
-    check(reopened.n_obs == source.n_obs, "the objects themselves are untouched by the write")
 
-    empty, nothing = db.load_well_views(db.read(path))
-    check(empty is None and nothing == {}, "a file without them says so rather than raising")
+    whole = db.clustered_frame(reopened)
+    one = db.clustered_frame(reopened, image="B/02/0")
+    check(len(whole) == reopened.n_obs, f"the plate view is every object ({len(whole)})")
+    check(
+        set(one["cluster"]) <= set(back["clusters"]),
+        "and one image's groups are the plate's groups, not its own",
+    )
+    shared_object = one["object"].iloc[0]
+    check(
+        whole.loc[whole["object"] == shared_object, "cluster"].iloc[0]
+        == one.loc[one["object"] == shared_object, "cluster"].iloc[0]
+        == str(reopened.obs[db.CLUSTER_KEY].loc[shared_object]),
+        "and one object has one cluster whichever view asks — which is the whole point",
+    )
+    check(
+        len(db.clustered_frame(reopened, limit=25)) == 25,
+        "a view can be subsampled for a plot without changing what a cluster is",
+    )
+
+    from microscopy_viewer import clusters as mvc
+
+    names = mvc.cluster_names(reopened.obs[db.CLUSTER_KEY])
+    check(
+        names == back["clusters"],
+        "the label set written into the plate numbers the clusters the same way the "
+        "page colours them",
+    )
 
     try:
-        db.well_views(source, per_well=10)
-        check(False, "a file that has not been clustered is refused")
+        db.clustered_frame(db.read(path))
+        check(False, "an unclustered file is refused")
     except ValueError as exc:
-        check("clustered" in str(exc), f"a file that has not been clustered is refused: {exc}")
+        check("not been clustered" in str(exc), f"an unclustered file is refused: {exc}")
 
 
 def test_every_object_gets_a_cluster(directory: Path) -> None:
@@ -779,7 +797,7 @@ def main() -> int:
             ("composition", test_composition_and_the_plate_grid),
             ("umap", test_the_embedding),
             ("colours", test_colours_follow_the_categories),
-            ("wellviews", test_well_views),
+            ("oneclustering", test_one_clustering),
             ("assignall", test_every_object_gets_a_cluster),
             ("blanks", test_blanks_do_not_poison_the_pca),
         ):
