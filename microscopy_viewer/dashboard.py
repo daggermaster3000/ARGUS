@@ -281,7 +281,11 @@ def obs_columns(adata, numeric_only: bool = False) -> list[str]:
 #: ``image``   the raw measurement, scaled to this image's own 1-99 %.
 #: ``cycle``   the raw measurement, scaled to every well of this cycle.
 #: ``file``    the raw measurement, scaled to every object in the file.
-COLOUR_SCALES = ("scaled", "image", "cycle", "file")
+COLOUR_SCALES = ("cycle", "file", "image", "scaled")
+
+#: Offered first, and for the same reason the viewer's panel defaults to it: a
+#: plate is run to compare wells, and a well scaled against itself cannot be.
+DEFAULT_COLOUR_SCALE = "cycle"
 
 COLOUR_SCALE_LABELS = {
     "scaled": "z-scored, this image (what the clustering saw)",

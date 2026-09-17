@@ -110,6 +110,99 @@ def _as_tuple(values) -> tuple[float, ...]:
         return ()
 
 
+class ColourBar(QWidget):
+    """The colour scale, drawn. Gradient, the two ends, and what they cover.
+
+    A number printed in a label is not a scale bar: the point of one is to be
+    looked at while looking at the image, and to say in passing that this well is
+    being painted against the whole plate rather than against itself.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._stops: list[tuple[float, tuple[int, int, int]]] = []
+        self._low = 0.0
+        self._high = 1.0
+        self._caption = ""
+        self.setMinimumHeight(54)
+        self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().Fixed)
+
+    def set_scale(self, colormap: str, low: float, high: float, caption: str = "") -> None:
+        self._low, self._high, self._caption = float(low), float(high), str(caption)
+        self._stops = []
+        try:
+            from matplotlib import colormaps
+
+            table = colormaps[colormap]
+            for index in range(17):
+                fraction = index / 16.0
+                red, green, blue, _alpha = table(fraction)
+                self._stops.append(
+                    (fraction, (int(red * 255), int(green * 255), int(blue * 255)))
+                )
+        except Exception:  # pragma: no cover - an unknown colormap draws grey
+            logger.debug("could not sample %r for the scale bar", colormap, exc_info=True)
+            self._stops = [(0.0, (40, 40, 40)), (1.0, (230, 230, 230))]
+        self.update()
+
+    def clear(self) -> None:
+        self._stops = []
+        self._caption = ""
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt's spelling
+        from qtpy.QtCore import QPointF, QRectF
+        from qtpy.QtGui import QColor, QLinearGradient, QPainter
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        width, height = float(self.width()), float(self.height())
+        if not self._stops or width < 8.0:
+            return
+
+        font = painter.font()
+        font.setPointSizeF(max(6.5, font.pointSizeF() - 1.5))
+        painter.setFont(font)
+        line = float(painter.fontMetrics().height())
+
+        # Three bands, measured from the bottom up so the text always fits: the
+        # caption, the two ends, and whatever is left over is the gradient. Sized
+        # the other way round, a short widget drew its labels over its own bar.
+        caption_height = line if self._caption else 0.0
+        bar_height = max(8.0, height - line - caption_height - 6.0)
+        bar = QRectF(1.0, 1.0, width - 2.0, bar_height)
+
+        gradient = QLinearGradient(bar.left(), 0.0, bar.right(), 0.0)
+        for fraction, (red, green, blue) in self._stops:
+            gradient.setColorAt(fraction, QColor(red, green, blue))
+        painter.fillRect(bar, gradient)
+        painter.setPen(QColor(120, 120, 120))
+        painter.drawRect(bar)
+
+        # Placed by point rather than by aligning inside a rectangle: one call,
+        # one position, and nothing to get wrong about which overload of drawText
+        # a given Qt binding resolves.
+        metrics = painter.fontMetrics()
+        painter.setPen(self.palette().windowText().color())
+        baseline = bar.bottom() + 2.0 + metrics.ascent()
+        low_text, high_text = format_number(self._low), format_number(self._high)
+        painter.drawText(QPointF(2.0, baseline), low_text)
+        painter.drawText(
+            QPointF(width - 2.0 - metrics.horizontalAdvance(high_text), baseline), high_text
+        )
+
+        if self._caption:
+            painter.setPen(QColor(140, 140, 140))
+            caption = metrics.elidedText(self._caption, Qt.ElideRight, int(width - 6))
+            painter.drawText(
+                QPointF(
+                    max(2.0, (width - metrics.horizontalAdvance(caption)) / 2.0),
+                    baseline + line,
+                ),
+                caption,
+            )
+
+
 class FrameModel(QAbstractTableModel):
     """A read-only Qt model over a pandas DataFrame.
 
@@ -411,6 +504,10 @@ class MeasurementAnalysisWidget(QWidget):
             "“The whole plate” pools the cycles too, which on a 4i plate means pooling "
             "different stains; only use it when the cycles really are the same stain."
         )
+        # The plate, not the well: a plate is run to compare wells, and a well
+        # painted against its own range cannot be compared with the one beside it.
+        default = self._scope_box.findData(analysis.DEFAULT_SCOPE)
+        self._scope_box.setCurrentIndex(default if default >= 0 else 0)
         self._scope_box.currentIndexChanged.connect(self._on_scope_changed)
         form.addRow("Normalise over", self._scope_box)
 
@@ -420,6 +517,7 @@ class MeasurementAnalysisWidget(QWidget):
             "Perceptually uniform maps first: a measurement painted in a map with "
             "false edges in it is a measurement misread."
         )
+        self._colormap_box.currentTextChanged.connect(lambda _text: self._update_range_label())
         form.addRow("Colormap", self._colormap_box)
 
         limits = QWidget()
@@ -446,9 +544,16 @@ class MeasurementAnalysisWidget(QWidget):
             limits_layout.addWidget(spin)
         form.addRow("Percentiles", limits)
 
+        self._colour_bar = ColourBar()
+        self._colour_bar.setToolTip(
+            "The scale the colours mean. Its ends are the low and high the objects are "
+            "painted between, and the line under it says what those were computed over."
+        )
+        form.addRow("Scale", self._colour_bar)
+
         self._range_label = QLabel("—")
         self._range_label.setWordWrap(True)
-        form.addRow("Scale", self._range_label)
+        form.addRow("", self._range_label)
 
         buttons = QWidget()
         button_layout = QHBoxLayout(buttons)
@@ -772,11 +877,16 @@ class MeasurementAnalysisWidget(QWidget):
         _labels, values = self._current_values()
         if values is None:
             self._range_label.setText("—")
+            self._colour_bar.clear()
             return
         scale = self.scale_range()
         if scale is None:
             self._range_label.setText("—")
+            self._colour_bar.clear()
             return
+        self._colour_bar.set_scale(
+            self._colormap_box.currentText(), scale.low, scale.high, scale.describe()
+        )
         text = f"{format_number(scale.low)} … {format_number(scale.high)} over {scale.describe()}"
         if scale.scope != analysis.SCOPE_IMAGE:
             here = analysis.value_range(

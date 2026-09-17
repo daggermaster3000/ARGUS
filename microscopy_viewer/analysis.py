@@ -150,6 +150,16 @@ SCOPE_PLATE = "plate"
 
 SCOPES = (SCOPE_IMAGE, SCOPE_WELL, SCOPE_CYCLE, SCOPE_PLATE)
 
+#: What a colour scale covers unless told otherwise: every well of this cycle.
+#:
+#: The plate rather than the well, because a well painted against its own range
+#: cannot be compared with the one beside it and that is almost never the question
+#: -- a plate is run to compare wells. The *cycle* rather than every image,
+#: because on a 4i plate the cycles are different stains, and pooling them puts a
+#: bright stain's range on a dim stain's objects. ``plate`` is there for when the
+#: cycles really are the same measurement.
+DEFAULT_SCOPE = SCOPE_CYCLE
+
 SCOPE_LABELS = {
     SCOPE_IMAGE: "this image",
     SCOPE_WELL: "this well, every cycle",

@@ -853,6 +853,15 @@ changes the picture completely:
 | **this cycle, every well** | how a plate is normally read. One staining round shares a scale, so a well that is genuinely brighter looks brighter. |
 | **the whole plate** | cycles pooled. Only when the cycles are the same stain — on a 4i plate they are not, and pooling puts a bright cycle's range on a dim cycle's objects. |
 
+**The plate is the default**, not the well: a plate is run to compare wells, and a
+well painted against its own range cannot be. Specifically *this cycle, every
+well* rather than every image — on a 4i plate the cycles are different stains, and
+pooling them puts a bright stain's range on a dim stain's objects. **The whole
+plate** is one click away for when the cycles really are the same measurement.
+
+There is a colour bar to look at, not just a number: the gradient, its two ends,
+and a line saying what they cover.
+
 The scale line under the control says which was taken, how many images it covered,
 and — when the scope is wider than one image — what this image alone would have
 given, because the gap between those two numbers is the whole point:
