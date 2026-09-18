@@ -129,7 +129,7 @@ class RegionsWidget(QWidget):
         outer = QVBoxLayout(box)
 
         row = QHBoxLayout()
-        add = QPushButton("Add region")
+        add = self._add_button = QPushButton("Add region")
         add.setToolTip(
             "Start a new outline. The region layer is selected and put into polygon "
             "mode; double-click to close the shape, then type its name below."
@@ -176,7 +176,7 @@ class RegionsWidget(QWidget):
         outer.addWidget(note)
 
         row = QHBoxLayout()
-        save = QPushButton("Save to file")
+        save = self._save_button = QPushButton("Save to file")
         save.setToolTip(
             "Write these outlines into the open sample's own .ims file." "\n"
             "For a whole folder at once, use the Experiment setup panel."
@@ -582,6 +582,10 @@ class RegionsWidget(QWidget):
                 self._viewer.dims.current_step = step
         except Exception:
             logger.debug("could not restore the view", exc_info=True)
+        self.raise_layer()
+
+    def raise_layer(self) -> None:
+        """Put the region layer on top, so outlines are not hidden under images."""
         layer = self.region_layer()
         if layer is None:
             return
@@ -591,6 +595,52 @@ class RegionsWidget(QWidget):
                 self._viewer.layers.move(index, len(self._viewer.layers))
         except Exception:
             logger.debug("could not raise the region layer", exc_info=True)
+
+    def has_unsaved_regions(self) -> bool:
+        """Whether the outlines on the canvas differ from what their sample stores.
+
+        Compared against the sample on screen (or, with none open, the file the
+        outlines were last read from or written to). Outlines with nowhere to
+        compare against are unsaved by definition.
+        """
+        from .. import ims_store
+
+        regions = self.collect_regions()
+        if not regions:
+            return False
+        source = self.sample_path() or self._regions_source
+        if source is None:
+            return True
+        stored = ims_store.load_rois(source)
+        if len(stored) != len(regions):
+            return True
+        for region, roi in zip(regions, stored):
+            if region.name != roi.name:
+                return True
+            ours = np.asarray(region.vertices_world, dtype=float)
+            theirs = np.asarray(roi.vertices_um, dtype=float)
+            if ours.shape != theirs.shape or not np.allclose(ours, theirs, atol=1e-6):
+                return True
+        return False
+
+    def clear_regions(self) -> bool:
+        """Take the region layer off the canvas and forget where it came from.
+
+        What switching samples does: the outlines belong to the sample that is
+        going away, and left on screen they would be counted against — and
+        stop the automatic load of — the one arriving.
+        """
+        self._regions_source = None
+        layer = self.region_layer()
+        if layer is None:
+            return False
+        self._viewer.layers.remove(layer)
+        self._regions = []
+        self._counts = []
+        self._stats = []
+        self._result_table.setRowCount(0)
+        self.refresh_regions()
+        return True
 
     def on_files_opened(self, specs) -> None:
         """Show the regions stored in a sample that has just been opened.

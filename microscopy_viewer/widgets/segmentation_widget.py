@@ -103,9 +103,12 @@ def _unit_kwargs(source, ndim: int) -> dict:
 class SegmentationWidget(QWidget):
     """Pick a channel, segment it with Cellpose, measure the objects."""
 
-    def __init__(self, viewer, parent: QWidget | None = None):
+    def __init__(self, viewer, parent: QWidget | None = None, app=None):
         super().__init__(parent)
         self._viewer = viewer
+        #: The Batch tab, when the panel is built inside the full viewer — it
+        #: needs the Experiment setup panel for its samples.
+        self.batch = None
         self._worker = None
         self._result: sg.SegmentationResult | None = None
         self._stats: list[sg.ObjectStat] = []
@@ -122,6 +125,11 @@ class SegmentationWidget(QWidget):
         self._tabs = QTabWidget()
         self._tabs.addTab(self._build_setup_tab(), "Setup")
         self._tabs.addTab(self._build_objects_tab(), "Objects")
+        if app is not None:
+            from .batch_segmentation_widget import BatchSegmentationTab
+
+            self.batch = BatchSegmentationTab(app, self.settings)
+            self._tabs.addTab(self.batch, "Batch")
         layout.addWidget(self._tabs, stretch=1)
 
         self._status = QLabel("Pick a channel, set the object diameter in µm, then Segment.")

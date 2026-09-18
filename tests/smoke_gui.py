@@ -672,6 +672,7 @@ def main() -> int:
     check("segmentation" in identifiers, "segmentation panel registered")
     check("regions" in identifiers, "brain regions panel registered")
     check("experiment" in identifiers, "experiment setup panel registered")
+    check("analysis" in identifiers, "analysis panel registered")
     for identifier in identifiers:
         check(identifier in app.panels, f"{identifier} built and tracked in app.panels")
         check(identifier in app.docks, f"{identifier} has a dock")
@@ -980,14 +981,33 @@ def main() -> int:
 
         # The batch borrows the segmentation panel's settings rather than
         # duplicating them.
-        borrowed = exp_panel._batch_settings()
+        from microscopy_viewer.widgets.batch_segmentation_widget import channel_spec
+
+        batch = app.segmentation_widget.batch
+        check(batch is not None, "the segmentation panel has a Batch tab")
+        check(
+            [app.segmentation_widget._tabs.tabText(i)
+             for i in range(app.segmentation_widget._tabs.count())][-1] == "Batch",
+            "beside Setup and Objects",
+        )
+        check(not hasattr(exp_panel, "run_batch"), "and the experiment panel no longer has one")
+        borrowed = batch.batch_settings()
         check(
             borrowed.mode == app.segmentation_widget.settings().mode,
-            "the batch takes its settings from the segmentation panel",
+            "the batch takes its settings from the Setup tab",
         )
-        check(exp_panel._channel_spec("2") == 2, "a bare number is a channel index")
-        check(exp_panel._channel_spec("dapi") == "dapi", "anything else is a channel name")
-        check(exp_panel._channel_spec("  ") is None, "and an empty box is no channel at all")
+        check(batch.options().channel == "dapi", "segments DAPI by default")
+        batch._channel_edit.setText("")
+        check(batch.options() is None, "and refuses to run without a channel")
+        batch._channel_edit.setText("dapi")
+        check(channel_spec("2") == 2, "a bare number is a channel index")
+        check(channel_spec("dapi") == "dapi", "anything else is a channel name")
+        check(channel_spec("  ") is None, "and an empty box is no channel at all")
+        exp_panel._grid.clearSelection()
+        exp_panel._worker = object()
+        batch.run()
+        check("already running" in batch._status.text(), "a batch will not start during a scan")
+        exp_panel._worker = None
 
         # The check that matters: opening a sample must put its stored regions
         # back by itself. Saving them and then having to remember a Load button
@@ -1067,17 +1087,86 @@ def main() -> int:
                 "the sample that went away released its file",
             )
 
-            # Outlines are not samples: they must survive the swap, or drawing
-            # the same regions across a folder would be impossible.
-            kept = stepper.regions_widget.region_layer(create=True)
-            kept.add_rectangles(np.array([[0.0, 0.0], [0.0, 20.0], [30.0, 20.0], [30.0, 0.0]]))
-            stepper.regions_widget.refresh_regions()
+            # What a sample stores comes up with it: fish_1 carries two outlines
+            # and a label map, both written earlier in this section.
+            def _labels():
+                from napari.layers import Labels
+
+                return [layer.name for layer in stepper.viewer.layers if isinstance(layer, Labels)]
+
+            regions_panel_2 = stepper.regions_widget
             _show(0)
             check(
-                reg.REGION_LAYER_NAME in stepper.viewer.layers,
-                "the region layer survives a sample swap",
+                len(regions_panel_2.collect_regions()) == 2,
+                f"opening a sample loads its stored regions ({len(regions_panel_2.collect_regions())})",
             )
+            check(
+                _labels() == ["fish_1 — DAPI labels"],
+                f"and its stored label map ({_labels()})",
+            )
+            check(
+                stepper.viewer.layers[-1].name == reg.REGION_LAYER_NAME,
+                "with the outlines drawn on top",
+            )
+
+            # Switching takes all of it away — the old outlines must not stay on
+            # screen and block the next sample's own.
+            fish_2 = folder / "fish_2.ims"
+            store.save_rois(fish_2, [store.StoredRoi("hindbrain", np.array(
+                [[0.0, 0.0], [0.0, 5.0], [5.0, 5.0], [5.0, 0.0]]))])
+            _show(1)
+            names = [region.name for region in regions_panel_2.collect_regions()]
+            check(names == ["hindbrain"], f"the next sample shows its own regions, only ({names})")
+            check(_labels() == [], f"and the previous sample's labels went with it ({_labels()})")
             check(len(_images()) == first, "and the swap still replaced the images")
+            check(not regions_panel_2.has_unsaved_regions(), "freshly loaded outlines are not unsaved")
+
+            # Unsaved drawing is never lost in silence: cancel keeps everything,
+            # save writes it into the outgoing sample, discard drops it.
+            layer = regions_panel_2.region_layer()
+            layer.add_rectangles(np.array([[0.0, 0.0], [0.0, 20.0], [30.0, 20.0], [30.0, 0.0]]))
+            regions_panel_2.refresh_regions()
+            check(regions_panel_2.has_unsaved_regions(), "a new outline counts as unsaved")
+
+            real_settle = panel._settle_regions
+            try:
+                panel._settle_regions = lambda _regions: None
+                _show(0)
+                check(
+                    len(regions_panel_2.collect_regions()) == 2 and "fish_2" in str(regions_panel_2.sample_path()),
+                    "cancelling keeps the sample and its drawing",
+                )
+
+                def _save(regions):
+                    rois = [
+                        store.StoredRoi(name=r.name or "extra", vertices_um=r.vertices_world)
+                        for r in regions.collect_regions()
+                    ]
+                    return (fish_2, rois)
+
+                panel._settle_regions = _save
+                _show(0)
+                check(
+                    len(store.load_rois(fish_2)) == 2,
+                    f"saving writes the drawing into the outgoing sample ({len(store.load_rois(fish_2))})",
+                )
+                check(
+                    [region.name for region in regions_panel_2.collect_regions()]
+                    == ["cerebellum left", "midbrain"],
+                    "and the incoming sample still shows its own",
+                )
+
+                regions_panel_2.region_layer().add_rectangles(
+                    np.array([[0.0, 0.0], [0.0, 9.0], [9.0, 9.0], [9.0, 0.0]])
+                )
+                panel._settle_regions = lambda _regions: ()
+                _show(1)
+                check(
+                    len(store.load_rois(folder / "fish_1.ims")) == 2,
+                    "discarding writes nothing",
+                )
+            finally:
+                panel._settle_regions = real_settle
 
             # Selecting two shows exactly two.
             panel._grid.clearSelection()
@@ -1085,6 +1174,49 @@ def main() -> int:
                 panel._grid.item(row).setSelected(True)
             panel.open_selected()
             check(len(_images()) == 2 * first, f"two selected shows both ({len(_images())})")
+
+            # The analysis panel reads the selection straight out of the files.
+            analysis = stepper.analysis_widget
+            check(analysis is not None, "analysis panel built")
+            panel._grid.selectAll()
+            analysis.run()
+            for _ in range(3000):
+                QCoreApplication.processEvents()
+                if analysis._worker is None and analysis._outcomes:
+                    break
+                time.sleep(0.01)
+            check(len(analysis._outcomes) == 2, f"both samples analysed ({len(analysis._outcomes)})")
+            check(
+                all(outcome.ok for outcome in analysis._outcomes),
+                f"without errors ({[o.error for o in analysis._outcomes]})",
+            )
+            check(analysis._table.rowCount() == 2, "and listed in the panel")
+            check(len(_images()) == 2 * first, "analysing did not disturb the open samples")
+            try:
+                np.asarray(_images()[0].data[0][0] if _images()[0].multiscale else _images()[0].data[0])
+                readable = True
+            except Exception:
+                readable = False
+            check(readable, "their files are still readable on screen")
+            auto = analysis.last_report
+            check(
+                auto is not None and auto.parent == folder and any(auto.glob("*.png")),
+                f"the run left a report folder with figures in the experiment folder ({auto})",
+            )
+            elsewhere = folder / "elsewhere"
+            elsewhere.mkdir()
+            saved = analysis.export(str(elsewhere))
+            if saved is not None:
+                import pandas as pd
+
+                books = list(saved.glob("*.xlsx"))
+                sheets = pd.read_excel(books[0], sheet_name=None) if books else {}
+                check(
+                    {"Region features", "Region intensities", "PCA matrix"} <= set(sheets),
+                    f"the analysis workbook has its extra sheets ({sorted(sheets)})",
+                )
+            else:
+                check(False, "the report was saved elsewhere too")
         finally:
             stepper.viewer.close()
             for name in ("fish_1.ims", "fish_2.ims"):
@@ -1102,6 +1234,76 @@ def main() -> int:
             bare.viewer.close()
 
     app.viewer.layers.remove(reg.REGION_LAYER_NAME)
+    print(flush=True)
+
+    print("guided tour", flush=True)
+    from qtpy.QtCore import QPoint
+
+    from microscopy_viewer import onboarding as ob
+    from microscopy_viewer.widgets.tour import TourOverlay
+
+    real_state_file = ob.state_file
+    with tempfile.TemporaryDirectory() as directory:
+        # Never record anything in the real settings of whoever runs this.
+        ob.state_file = lambda: Path(directory) / "onboarding.json"
+        guided = MicroscopyViewer(show=True)
+        try:
+            guided.viewer.window._qt_window.resize(1400, 900)
+            for _ in range(60):
+                QCoreApplication.processEvents()
+                time.sleep(0.01)
+            check("tour" in guided.toolbar._buttons, "the toolbar has a Tour button")
+            check(not ob.has_seen(), "a fresh profile has not seen the tour")
+            tour = guided.maybe_start_tour()
+            check(isinstance(tour, TourOverlay), "so it starts by itself")
+            missing = []
+            for index, step in enumerate(ob.TOUR):
+                tour.go(index)
+                for _ in range(10):
+                    QCoreApplication.processEvents()
+                if step.target and (tour.target is None or not tour.target.isVisible()):
+                    missing.append(step.target)
+            check(missing == [], f"every step finds its control, on screen ({missing})")
+
+            tour.go(2)
+            for _ in range(10):
+                QCoreApplication.processEvents()
+            target = tour.target
+            centre = tour.mapFromGlobal(target.mapToGlobal(target.rect().center()))
+            check(not tour.mask().contains(centre), "the highlighted control can be clicked")
+            check(tour.mask().contains(QPoint(2, tour.height() - 2)), "the rest is blocked")
+            check(
+                guided.docks["experiment"].isVisible(),
+                "the step's panel was brought forward",
+            )
+            tour.go(8)
+            tabs = guided.segmentation_widget._tabs
+            check(tabs.tabText(tabs.currentIndex()) == "Batch", "and the step's tab chosen")
+
+            outcomes = []
+            tour.finished.connect(outcomes.append)
+            tour._escape.activated.emit()
+            QCoreApplication.processEvents()
+            check(outcomes == [False], f"Esc stops the tour ({outcomes})")
+            check(guided._tour is None and not tour.isVisible(), "and takes the overlay away")
+            check(ob.has_seen(), "a stopped tour is not started again by itself")
+            check(guided.maybe_start_tour() is None, "…and indeed is not")
+
+            again = guided.start_tour()
+            done = []
+            again.finished.connect(done.append)
+            for _ in range(len(ob.TOUR)):
+                again.next()
+            QCoreApplication.processEvents()
+            check(done == [True], f"the Tour button runs it again, to the end ({done})")
+            replaced = guided.start_tour(3)
+            newer = guided.start_tour()
+            check(guided._tour is newer and not replaced.isVisible(), "starting twice replaces the first")
+            newer.end()
+            newer.end()  # a second stop is harmless
+        finally:
+            ob.state_file = real_state_file
+            guided.viewer.close()
     print(flush=True)
 
     print("ROI intensity comparison panel", flush=True)

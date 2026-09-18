@@ -94,7 +94,9 @@ def _register_builtin_panels() -> None:
     def _segmentation(app):
         from .segmentation_widget import SegmentationWidget
 
-        return SegmentationWidget(app.viewer)
+        # The app is passed for the Batch tab, which segments the samples
+        # selected in the Experiment setup panel.
+        return SegmentationWidget(app.viewer, app=app)
 
     def _regions(app):
         from .regions_widget import RegionsWidget
@@ -109,6 +111,12 @@ def _register_builtin_panels() -> None:
         # Takes the app: opening a sample goes through ``open_paths`` and the
         # batch run borrows the segmentation panel's settings.
         return ExperimentWidget(app)
+
+    def _analysis(app):
+        from .analysis_widget import AnalysisWidget
+
+        # Takes the app: it analyses whatever the experiment panel has selected.
+        return AnalysisWidget(app)
 
     def _timeseries(app):
         from .timeseries_widget import TimeSeriesWidget
@@ -198,6 +206,18 @@ def _register_builtin_panels() -> None:
             # starts rather than something consulted mid-analysis.
             area="left",
             order=5,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="analysis",
+            title="Analysis",
+            factory=_analysis,
+            attribute="analysis_widget",
+            # Beside the experiment panel: it works off that panel's selection.
+            area="left",
+            tabify_with="experiment",
+            order=6,
         )
     )
 

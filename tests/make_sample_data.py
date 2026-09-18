@@ -205,13 +205,22 @@ def write_ome_zarr(path: Path, shape=(2, 5, 96, 128)) -> Path:
     import zarr
 
     n_c, n_z, n_y, n_x = shape
-    root = zarr.open_group(str(path), mode="w")
+    # NGFF 0.4 is a zarr v2 layout. zarr 3 writes v3 by default and has dropped
+    # ``create_dataset``, so ask for v2 and use whichever creation call exists.
+    major = int(str(zarr.__version__).split(".")[0])
+    if major >= 3:
+        root = zarr.open_group(str(path), mode="w", zarr_format=2)
+    else:
+        root = zarr.open_group(str(path), mode="w")
     datasets = []
     for level in range(2):
         factor = 2**level
         level_shape = (n_c, n_z, max(n_y // factor, 1), max(n_x // factor, 1))
         array = _blobs((n_c * n_z, level_shape[2], level_shape[3]), seed=level).reshape(level_shape)
-        root.create_dataset(str(level), data=array, chunks=(1, 1, 64, 64), overwrite=True)
+        if major >= 3:
+            root.create_array(str(level), data=array, chunks=(1, 1, 64, 64), overwrite=True)
+        else:
+            root.create_dataset(str(level), data=array, chunks=(1, 1, 64, 64), overwrite=True)
         datasets.append(
             {
                 "path": str(level),

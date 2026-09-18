@@ -58,6 +58,7 @@ class ViewerToolbar(QWidget):
             ("ndisplay", "2D / 3D (MIP)", "Switch between slice view and 3D maximum-intensity projection (Ctrl+D)", self.toggle_ndisplay),
             ("scalebar", "Toggle Scale Bar", "Show or hide the calibrated scale bar (Ctrl+B)", self.toggle_scale_bar),
             ("metadata", "Show/Hide Metadata", "Toggle the acquisition metadata panel (Ctrl+M)", self.toggle_metadata),
+            ("tour", "Tour", "Walk through an experiment step by step, pointing at each control (Esc stops it)", self.start_tour),
         ):
             button = QPushButton(label)
             button.setToolTip(tooltip)
@@ -209,6 +210,9 @@ class ViewerToolbar(QWidget):
         visible = not self._viewer.scale_bar.visible
         self._viewer.scale_bar.visible = visible
         self.set_status(f"Scale bar {'shown' if visible else 'hidden'}.")
+
+    def start_tour(self) -> None:
+        self._app.start_tour()
 
     def toggle_metadata(self) -> None:
         self._app.toggle_metadata_panel()

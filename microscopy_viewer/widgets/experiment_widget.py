@@ -1,6 +1,6 @@
 """Dock panel: a folder of samples, previewed as thumbnails and processed at once.
 
-Three things in one panel, because they are three steps of one job:
+Two steps of one job:
 
 1. **Pick the folder and look at it.** Every readable dataset gets a thumbnail
    read off a middle pyramid level, so a bad mount or an empty stub is visible
@@ -8,12 +8,14 @@ Three things in one panel, because they are three steps of one job:
 2. **Put ROIs on the samples.** An outline drawn in the viewer — the same Shapes
    layer the *Brain regions* panel uses — is written into the ``.ims`` files
    themselves, either into the one sample it was drawn on or into every sample
-   selected.
-3. **Run Cellpose over the folder**, with the settings from the *Segmentation*
-   panel, writing each label map back into its own file.
+   selected. Opening a sample brings back the outlines and label maps stored in
+   it, and opening the next one clears them again.
+Segmenting the selected samples lives in the *Segmentation* panel's Batch tab,
+beside the settings it runs with; it reads its samples from this panel's
+selection. Analysing them lives in the *Analysis* panel.
 
-Everything heavy happens on a ``thread_worker``. Two of them, actually: the
-preview scan and the batch run, which cannot both be going at once.
+The preview scan runs on a ``thread_worker``, and refuses to start while a
+batch is writing into the files.
 
 **Why samples get closed.** HDF5 will not open a file for writing while it is
 open for reading, so a file cannot be written to while the viewer is showing it.
@@ -32,7 +34,6 @@ from qtpy.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QFileDialog,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -49,7 +50,6 @@ from qtpy.QtWidgets import (
 from .. import experiment as ex
 from .. import ims_store
 from .. import regions as rg
-from ..exports import WORKBOOK_FILTER, default_stem, export_sheets
 from ..utils import get_logger
 
 logger = get_logger("experiment_widget")
@@ -59,6 +59,18 @@ ICON_SIZE = 128
 
 #: Role the sample's path is stashed under on its list item.
 PATH_ROLE = Qt.UserRole + 1
+
+#: Layer metadata key naming the file a layer was read out of, for layers that
+#: are not image channels (a stored label map has no acquisition metadata) but
+#: still belong to that sample and have to go when it does.
+SAMPLE_KEY = "argus_sample"
+
+
+def _layer_source(layer) -> str:
+    """The file a layer belongs to: its acquisition's, or the one it was read from."""
+    meta = layer.metadata.get("mv_metadata")
+    source = str(getattr(meta, "file_path", "") or "") if meta is not None else ""
+    return source or str(layer.metadata.get(SAMPLE_KEY, "") or "")
 
 
 class _Relay(QObject):
@@ -82,7 +94,6 @@ class ExperimentWidget(QWidget):
         self._entries: list[ex.SampleEntry] = []
         self._worker = None
         self._cancelled = False
-        self._outcomes: list[ex.BatchOutcome] = []
         self._relay = _Relay()
         self._relay.message.connect(self._log)
         self._relay.preview.connect(self._set_preview)
@@ -93,7 +104,7 @@ class ExperimentWidget(QWidget):
         layout.addWidget(self._build_folder_box())
         layout.addWidget(self._build_samples_box(), stretch=1)
         layout.addWidget(self._build_roi_box())
-        layout.addWidget(self._build_batch_box())
+        layout.addWidget(self._build_log())
 
         self._status = QLabel("Choose the folder this experiment was acquired into.")
         self._status.setWordWrap(True)
@@ -111,9 +122,9 @@ class ExperimentWidget(QWidget):
         self._folder_edit.setReadOnly(True)
         row.addWidget(self._folder_edit, stretch=1)
 
-        choose = QPushButton("Choose…")
-        choose.clicked.connect(self.choose_folder)
-        row.addWidget(choose)
+        self._choose_button = QPushButton("Choose…")
+        self._choose_button.clicked.connect(self.choose_folder)
+        row.addWidget(self._choose_button)
         outer.addLayout(row)
 
         options = QHBoxLayout()
@@ -158,6 +169,10 @@ class ExperimentWidget(QWidget):
              self.open_selected),
             ("Close", "Take the selected samples off screen and release their files, "
                       "which is what lets anything be written into them.", self.close_selected),
+            ("Load labels", "Read a label map stored in the selected sample into the viewer, "
+                            "so what a batch wrote can be looked at rather than taken on "
+                            "trust. Opening a sample does this for all of them.",
+             self.load_labels_from_sample),
             ("Select all", "", self._grid.selectAll),
         ):
             button = QPushButton(label)
@@ -181,7 +196,7 @@ class ExperimentWidget(QWidget):
         outer.addWidget(note)
 
         row = QHBoxLayout()
-        to_selected = QPushButton("Write to selected")
+        to_selected = self._write_rois_button = QPushButton("Write to selected")
         to_selected.setToolTip(
             "Write the outlines now on screen into every selected sample's .ims file.\n"
             "The vertices are in micrometres from each image's own origin, so this is "
@@ -199,83 +214,12 @@ class ExperimentWidget(QWidget):
         outer.addLayout(row)
         return box
 
-    def _build_batch_box(self) -> QGroupBox:
-        box = QGroupBox("Batch segmentation")
-        outer = QVBoxLayout(box)
-
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignRight)
-
-        self._channel_edit = QLineEdit("dapi")
-        self._channel_edit.setToolTip(
-            "Which channel to segment, matched against the channel names in each file — "
-            "“dapi” finds it wherever it sits, which matters because the channel order "
-            "is not the same in every acquisition.\n"
-            "A bare number is taken as an index instead. A name that matches nothing "
-            "skips that file and says so, rather than quietly segmenting channel 0."
-        )
-        form.addRow("Segment channel", self._channel_edit)
-
-        self._measure_edit = QLineEdit("")
-        self._measure_edit.setToolTip(
-            "Optional: the channel per-object intensities are read from. Segment on DAPI, "
-            "measure on the reporter."
-        )
-        form.addRow("Measure channel", self._measure_edit)
-
-        self._restrict = QCheckBox("Only inside the stored ROIs")
-        self._restrict.setToolTip(
-            "Blank everything outside each file's stored ROIs before segmenting. This is "
-            "what drawing them was for: Cellpose does not know that the skin and the yolk "
-            "are not brain, and finds plenty of objects in both.\n"
-            "A file with no stored ROIs is segmented whole."
-        )
-        form.addRow("Restrict", self._restrict)
-
-        self._save_labels = QCheckBox("Write the labels into each .ims file")
-        self._save_labels.setChecked(True)
-        self._save_labels.setToolTip(
-            "Stored under /ARGUS/Labels inside the file, beside the image data rather "
-            "than in a sidecar, so the result travels with the sample.\n"
-            "Imaris ignores the group and opens the file normally — but it does not show "
-            "these as its own Surfaces either."
-        )
-        form.addRow("Results", self._save_labels)
-        outer.addLayout(form)
-
-        row = QHBoxLayout()
-        self._run_button = QPushButton("Run on selected")
-        self._run_button.setToolTip(
-            "Segment every selected sample with the settings currently on the Segmentation "
-            "panel — model, mode, diameters, device. Nothing selected means all of them."
-        )
-        self._run_button.clicked.connect(self.run_batch)
-        row.addWidget(self._run_button)
-
-        load_labels = QPushButton("Load labels")
-        load_labels.setToolTip(
-            "Read a label map stored in the selected sample back into the viewer, so what "
-            "the batch wrote can be looked at rather than taken on trust."
-        )
-        load_labels.clicked.connect(self.load_labels_from_sample)
-        row.addWidget(load_labels)
-
-        export = QPushButton("Export…")
-        export.setToolTip(
-            "Write the per-sample counts, the per-region counts and every object to one "
-            "workbook. The genotype column is read out of each file name."
-        )
-        export.clicked.connect(self.export)
-        row.addWidget(export)
-        row.addStretch(1)
-        outer.addLayout(row)
-
+    def _build_log(self) -> QPlainTextEdit:
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)
-        self._log_view.setMaximumHeight(120)
+        self._log_view.setMaximumHeight(100)
         self._log_view.setPlaceholderText("Progress appears here.")
-        outer.addWidget(self._log_view)
-        return box
+        return self._log_view
 
     # -- small helpers --------------------------------------------------------
 
@@ -285,8 +229,20 @@ class ExperimentWidget(QWidget):
 
     def _busy(self, running: bool) -> None:
         self._scan_button.setEnabled(not running)
-        self._run_button.setEnabled(not running)
         self._stop_button.setEnabled(running)
+
+    def is_running(self) -> bool:
+        return self._worker is not None
+
+    def _batch_running(self) -> bool:
+        panel = getattr(self._app, "segmentation_widget", None)
+        batch = getattr(panel, "batch", None)
+        return bool(batch is not None and batch.is_running())
+
+    def folder(self) -> Path | None:
+        """The experiment folder, if one is chosen."""
+        text = self._folder_edit.text().strip()
+        return Path(text) if text else None
 
     def stop(self) -> None:
         """Ask the running worker to stop after the file it is on."""
@@ -320,7 +276,7 @@ class ExperimentWidget(QWidget):
         if not folder:
             self._status.setText("Choose a folder first.")
             return
-        if self._worker is not None:
+        if self._worker is not None or self._batch_running():
             self._status.setText("Something is already running — stop it first.")
             return
 
@@ -426,9 +382,14 @@ class ExperimentWidget(QWidget):
         avoid. The selection *is* what is shown, so opening two shows exactly
         those two.
 
-        Only the samples go. Anything not backed by a file — the region outlines
-        above all — stays put, which is what makes drawing the same regions
-        across a folder possible.
+        Everything that belongs to the outgoing sample goes with it — its
+        channels, the label maps read out of it, and its brain-region outlines.
+        Outlines left behind would be drawn over the next fish, would stop its
+        own stored outlines from loading, and would be counted against its
+        objects. Outlines not yet saved are offered for saving first.
+
+        What the incoming samples carry comes up with them: their stored
+        outlines (through the Brain regions panel) and their stored label maps.
         """
         entries = [entry for entry in self.selected_entries() if entry.readable]
         if not entries:
@@ -445,8 +406,36 @@ class ExperimentWidget(QWidget):
             if answer != QMessageBox.Yes:
                 return
 
+        regions = getattr(self._app, "regions_widget", None)
+        pending = self._settle_regions(regions)
+        if pending is None:
+            return
+
         closed = self._close_all_samples()
+        notes: list[str] = []
+        if pending:
+            target, rois = pending
+            try:
+                ims_store.save_rois(target, rois)
+                notes.append(f"Saved {len(rois)} region(s) into {target.name} first.")
+                self._refresh_entries([target])
+            except Exception as exc:
+                logger.exception("could not save the outgoing regions into %s", target)
+                QMessageBox.warning(
+                    self,
+                    "Microscopy Viewer",
+                    f"Could not save the regions into {target.name}:\n{exc}\n\n"
+                    "They are still on the canvas; the new sample was not opened.",
+                )
+                return
+        if regions is not None:
+            regions.clear_regions()
+
         opened = self._app.open_paths([entry.path for entry in entries])
+        loaded = self._load_stored_labels(entries)
+        if regions is not None:
+            regions.raise_layer()
+
         # Name the sample. Imaris records the acquiring machine's own path as the
         # image name, so every file in a folder can produce identically named
         # layers — and once opening replaces rather than adds, the layer list
@@ -455,9 +444,63 @@ class ExperimentWidget(QWidget):
         if len(entries) > 3:
             shown += f" and {len(entries) - 3} more"
         message = f"Showing {shown} — {opened} layer(s)."
+        n_regions = len(regions.collect_regions()) if regions is not None else 0
+        if n_regions:
+            message += f" {n_regions} stored region(s)."
+        if loaded:
+            message += f" {loaded} stored label map(s)."
         if closed:
             message += f" Replaced the {closed} layer(s) that were on screen."
-        self._log(message)
+        self._log(" ".join([message, *notes]))
+
+    def _settle_regions(self, regions):
+        """Decide what happens to unsaved outlines before the sample goes.
+
+        Returns ``None`` to abandon the switch, ``()`` to go ahead, or
+        ``(path, rois)`` to go ahead and write *rois* into *path* once the
+        sample is closed — the write needs the file to itself.
+        """
+        if regions is None or not regions.has_unsaved_regions():
+            return ()
+        target = regions.sample_path()
+        writable = target is not None and ims_store.can_write(target)[0]
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Microscopy Viewer")
+        where = f" into {target.name}" if target is not None else ""
+        box.setText(
+            "The brain regions on the canvas have not been saved"
+            + (f" into {target.name}." if target is not None else ".")
+        )
+        box.setInformativeText(
+            "They are cleared when another sample is opened."
+            + ("" if writable else " There is no writable sample to save them into.")
+        )
+        save = box.addButton(f"Save{where}", QMessageBox.AcceptRole) if writable else None
+        discard = box.addButton("Discard", QMessageBox.DestructiveRole)
+        cancel = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(save or cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if save is not None and clicked is save:
+            rois = [
+                ims_store.StoredRoi(name=region.name, vertices_um=region.vertices_world)
+                for region in regions.collect_regions()
+            ]
+            return (Path(target), rois)
+        if clicked is discard:
+            return ()
+        return None
+
+    def _load_stored_labels(self, entries) -> int:
+        """Put every label map stored in *entries* on screen. Returns how many."""
+        loaded = 0
+        for entry in entries:
+            for key in ims_store.list_labels(entry.path):
+                if self._add_labels_layer(entry, key) is not None:
+                    loaded += 1
+        return loaded
 
     def close_selected(self) -> int:
         """Take the selected samples off screen and release their files."""
@@ -467,8 +510,7 @@ class ExperimentWidget(QWidget):
         """Close every layer that came from a file, whichever panel opened it."""
         sources = []
         for layer in self._viewer.layers:
-            meta = layer.metadata.get("mv_metadata")
-            source = str(getattr(meta, "file_path", "") or "") if meta is not None else ""
+            source = _layer_source(layer)
             if source and source not in sources:
                 sources.append(source)
         return self._close_paths(sources) if sources else 0
@@ -485,8 +527,7 @@ class ExperimentWidget(QWidget):
         wanted = {str(Path(path).resolve()) for path in paths}
         removed = 0
         for layer in list(self._viewer.layers):
-            meta = layer.metadata.get("mv_metadata")
-            source = str(getattr(meta, "file_path", "") or "") if meta is not None else ""
+            source = _layer_source(layer)
             if not source:
                 continue
             try:
@@ -589,6 +630,15 @@ class ExperimentWidget(QWidget):
             self._log(f"{entry.name} has no stored ROIs.")
             return
 
+        regions = getattr(self._app, "regions_widget", None)
+        if regions is not None:
+            # The panel's own layer: names drawn on the canvas, and kept out of
+            # the Measurements panel, which would rename every shape.
+            regions.set_regions(rois)
+            regions.raise_layer()
+            self._log(f"Loaded {len(rois)} ROI(s) from {entry.name}.")
+            return
+
         layer = self._shapes_layer()
         if layer is None:
             from ..loaders.layer_spec import world_units
@@ -620,124 +670,7 @@ class ExperimentWidget(QWidget):
             entry.label_keys = ims_store.list_labels(entry.path)
             self._grid.item(index).setText(f"{entry.name}\n{entry.describe()}")
 
-    # -- the batch ------------------------------------------------------------
-
-    def _batch_settings(self):
-        """The segmentation settings, taken from the Segmentation panel.
-
-        Read live rather than duplicated here: two sets of controls for one set of
-        parameters is how a batch ends up run with settings nobody chose.
-        """
-        from .. import segmentation as sg
-
-        panel = getattr(self._app, "segmentation_widget", None)
-        if panel is None:
-            return sg.SegmentationSettings()
-        try:
-            return panel.settings()
-        except Exception:
-            logger.debug("could not read the segmentation settings", exc_info=True)
-            return sg.SegmentationSettings()
-
-    @staticmethod
-    def _channel_spec(text: str):
-        """A channel box's contents as an index or a name; empty means none."""
-        cleaned = str(text).strip()
-        if not cleaned:
-            return None
-        return int(cleaned) if cleaned.isdigit() else cleaned
-
-    def run_batch(self) -> None:
-        """Segment every selected sample and write the labels back into the files."""
-        if self._worker is not None:
-            self._status.setText("Something is already running — stop it first.")
-            return
-        entries = [entry for entry in self.selected_entries() if entry.readable]
-        if not entries:
-            self._status.setText("Nothing readable selected.")
-            return
-
-        channel = self._channel_spec(self._channel_edit.text())
-        if channel is None:
-            self._status.setText("Say which channel to segment.")
-            return
-
-        settings = self._batch_settings()
-        options = ex.BatchOptions(
-            channel=channel,
-            measure_channel=self._channel_spec(self._measure_edit.text()),
-            settings=settings,
-            save_to_file=self._save_labels.isChecked(),
-            restrict_to_rois=self._restrict.isChecked(),
-        )
-
-        paths = [entry.path for entry in entries]
-        if options.save_to_file:
-            # Writing needs the files to itself, and they may well be the ones
-            # just used to draw the ROIs.
-            self._close_paths(paths)
-
-        self._outcomes = []
-        self._log_view.clear()
-        self._cancelled = False
-        self._busy(True)
-        self._log(
-            f"Segmenting {len(paths)} sample(s) on “{channel}” with {settings.resolved_model()}, "
-            f"{settings.mode}."
-        )
-
-        relay = self._relay
-
-        from napari.qt.threading import thread_worker
-
-        @thread_worker
-        def _run():
-            return ex.run_batch(
-                paths,
-                options,
-                progress=relay.message.emit,
-                should_cancel=self._should_cancel,
-            )
-
-        worker = _run()
-        worker.returned.connect(self._on_batch_done)
-        worker.errored.connect(self._on_error)
-        worker.finished.connect(self._clear_worker)
-        self._worker = worker
-        worker.start()
-
-    def _on_batch_done(self, outcomes) -> None:
-        self._outcomes = list(outcomes)
-        done = [outcome for outcome in self._outcomes if outcome.ok]
-        failed = [outcome for outcome in self._outcomes if not outcome.ok]
-        total = sum(outcome.n_objects for outcome in done)
-        seconds = sum(outcome.elapsed_s for outcome in self._outcomes)
-
-        summary = (
-            f"{total} object(s) across {len(done)} sample(s) in {seconds:.0f} s."
-        )
-        # Say how many label maps reached the files, not just how many objects
-        # were found. The two can differ — a read-only file, a full disk — and
-        # the difference is only noticed weeks later, when the counts are wanted
-        # and the .ims files turn out to be empty.
-        saved = [outcome for outcome in self._outcomes if outcome.saved]
-        if self._save_labels.isChecked():
-            summary += f" Labels written into {len(saved)} of {len(self._outcomes)} file(s)."
-            if len(saved) < len(done):
-                summary += " Press “Load labels” on a sample to check."
-        else:
-            summary += " Nothing written into the files — “Write the labels” is off."
-        if failed:
-            summary += " Failed: " + ", ".join(
-                f"{outcome.name} ({outcome.error})" for outcome in failed[:2]
-            )
-            if len(failed) > 2:
-                summary += f" and {len(failed) - 2} more"
-        if self._cancelled:
-            summary += " Stopped early."
-        self._log(summary)
-        self._refresh_entries([outcome.path for outcome in self._outcomes])
-        logger.info("batch finished: %s", summary)
+    # -- stored label maps ----------------------------------------------------
 
     def load_labels_from_sample(self) -> None:
         """Put a label map stored in the selected sample back into the viewer.
@@ -775,10 +708,21 @@ class ExperimentWidget(QWidget):
             if not chosen:
                 return
 
-        masks, attrs = ims_store.load_labels(entry.path, key)
-        if masks is None:
+        layer = self._add_labels_layer(entry, key)
+        if layer is None:
             self._log(f"Could not read “{key}” out of {entry.name}.")
             return
+        masks = layer.data
+        self._log(
+            f"Loaded “{key}” from {entry.name}: {int(np.max(masks)) if masks.size else 0} "
+            f"object(s), {' × '.join(str(int(n)) for n in masks.shape)}."
+        )
+
+    def _add_labels_layer(self, entry, key: str):
+        """Read one stored label map into a Labels layer tied to its sample."""
+        masks, attrs = ims_store.load_labels(entry.path, key)
+        if masks is None:
+            return None
 
         scale = tuple(float(v) for v in np.asarray(attrs.get("voxel_size_um", ())).ravel())
         if len(scale) != int(masks.ndim):
@@ -789,44 +733,11 @@ class ExperimentWidget(QWidget):
         name = f"{entry.name} — {key}"
         if name in self._viewer.layers:
             self._viewer.layers.remove(name)
-        kwargs = {"name": name}
+        kwargs = {"name": name, "metadata": {SAMPLE_KEY: str(entry.path)}}
         if scale:
             kwargs["scale"] = scale
         kwargs.update(world_units(self._viewer, int(masks.ndim)) or {})
-        self._viewer.add_labels(np.asarray(masks), **kwargs)
-        self._log(
-            f"Loaded “{key}” from {entry.name}: {int(np.max(masks)) if masks.size else 0} "
-            f"object(s), {' × '.join(str(int(n)) for n in masks.shape)}."
-        )
-
-    # -- export ---------------------------------------------------------------
-
-    def export(self) -> None:
-        """Write the batch summary and every object it found to one workbook."""
-        if not self._outcomes:
-            self._status.setText("Nothing to export — run a batch first.")
-            return
-        suggested = str(
-            Path(self._folder_edit.text().strip() or Path.home())
-            / f"{default_stem('batch_segmentation')}.xlsx"
-        )
-        path, _selected = QFileDialog.getSaveFileName(
-            self, "Export batch results", suggested, WORKBOOK_FILTER
-        )
-        if not path:
-            return
-        sheets = {
-            "Samples": ex.batch_dataframe(self._outcomes),
-            "Regions": ex.regions_dataframe(self._outcomes),
-            "Objects": ex.objects_dataframe(self._outcomes),
-        }
-        try:
-            written = export_sheets(sheets, path)
-        except Exception as exc:
-            logger.exception("batch export failed")
-            QMessageBox.critical(self, "Microscopy Viewer", f"Export failed:\n{exc}")
-            return
-        self._log(f"Batch results written to {written}.")
+        return self._viewer.add_labels(np.asarray(masks), **kwargs)
 
 
 def _to_pixmap(rgb: np.ndarray):

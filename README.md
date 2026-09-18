@@ -863,6 +863,21 @@ The region layer is deliberately kept out of the **Measurements** panel. That pa
 renames every shape it finds to `ROI 1`, `ROI 2`, … on each recompute, which would
 overwrite the anatomical names as fast as they were typed.
 
+### Guided tour
+
+The first time the viewer opens, a short tour walks through one experiment —
+choose the folder, browse samples, outline regions, segment, analyse, find the
+report — highlighting the control for each step and bringing its panel (and
+tab) forward. The highlighted control stays clickable; the rest of the window is
+dimmed and blocked while the tour runs.
+
+Stop it at any time with **End tour** or **Esc**; **Back** and **Next** move
+between steps. Stopped or finished, it does not start by itself again. The
+**Tour** button in the toolbar runs it whenever you like, and
+`microscopy-viewer --no-tour` skips the automatic start (for a shared or demo
+machine). Whether it has been seen is kept in `onboarding.json` in the app's
+data folder — delete that file to see it again on the next launch.
+
 ### Experiment setup
 
 **Experiment setup** treats a folder as the unit of work. An acquisition session
@@ -906,9 +921,13 @@ The workflow the panel is shaped around:
 2. **Open** replaces the sample on screen rather than adding to it — the panel is
    a way to look at thirty samples one after another, and accumulating them would
    rebuild the layer list it exists to avoid. The selection *is* what is shown, so
-   selecting two shows exactly those two. Anything not backed by a file stays put,
-   the region outlines above all, which is what makes drawing the same regions
-   across a folder possible. The log line names the sample that is up: Imaris
+   selecting two shows exactly those two. Everything belonging to the outgoing
+   sample goes with it — its channels, the label maps read out of it, and its
+   `Brain regions` outlines — and what the incoming sample stores comes up with
+   it: its outlines and every label map written into it. Outlines that differ
+   from what the outgoing sample stores are offered for saving first (**Save**,
+   **Discard** or **Cancel**), so a switch never loses drawing in silence. The
+   log line names the sample that is up: Imaris
    records the acquiring machine's own path as the image name, so every file in a
    folder can produce identically named layers.
 3. Draw the outlines on the `Brain regions` layer, then **Write to selected** — into that one sample, or into every sample selected at
@@ -916,10 +935,12 @@ The workflow the panel is shaped around:
    alike and wrong when they are not: the vertices are in micrometres from each
    image's own origin, so a fish sitting 200 µm further along its field gets an
    outline 200 µm out of place. **Load from sample** reads them back.
-4. **Run on selected.** The batch takes its model, mode, diameters and device from
-   the **Segmentation** panel rather than duplicating those controls — two sets of
-   controls for one set of parameters is how a batch ends up run with settings
-   nobody chose.
+4. **Segment them** in the **Segmentation** panel's **Batch** tab, beside the
+   settings it runs with: **Run on selected** segments the samples selected here,
+   with the model, mode, diameters and device on the Setup tab — one set of
+   controls for one set of parameters. A batch and a scan never run at once,
+   since the batch is writing into the files the scan reads. **Load labels**
+   (here, under the grid) reads a stored label map back into the viewer.
 
 | Batch setting | What it does |
 |---|---|
@@ -933,15 +954,17 @@ skipped — thirty files is long enough that aborting on the twenty-ninth becaus
 is a stub would be its own kind of failure. **Stop** ends the run after the file it
 is on.
 
-**Load labels** reads a stored map back into the viewer, at the voxel size it was
-written with. It is worth pressing once after the first batch: labels inside an
+**Load labels** (Experiment setup, under the grid) reads a stored map back into
+the viewer, at the voxel size it was written with; opening a sample loads all of
+them. It is worth pressing once after the first batch: labels inside an
 `.ims` are invisible to Imaris (see *Brain regions* above for why nothing is
 written as an Imaris Surface), so this is the only way to look at what the run
 produced.
 
 #### What the batch export contains
 
-**Export…** writes one workbook with three sheets:
+**Export…** on the Batch tab writes one workbook with three sheets (the
+Analysis panel writes the same three and more, straight from the files):
 
 - **Samples** — one row per file: genotype, channel, object count, how many
   regions the file carries, how long it took, where the labels went, and what
@@ -994,6 +1017,121 @@ silently merge two groups of an experiment. **A name that encodes no genotype
 gives an empty cell, never a guess** — a blank is visible in the workbook and
 gets fixed, a wrong one becomes a result. The same column is added to the *Brain
 regions* panel's own export, alongside the sample name.
+
+### Analysis
+
+**Analysis** sits beside *Experiment setup* and works on the samples selected
+there — nothing needs to be open. Every file's stored label map and outlines are
+read back out of `/ARGUS` and every channel is summarised inside every outline.
+
+**Every run writes a report folder** into the experiment folder, named after the
+experiment and the time of the run, so a second run never overwrites the first
+(**Save report to…** writes another copy elsewhere):
+
+```
+<experiment>_analysis_20260916_143012/
+    <experiment>_analysis_20260916_143012.xlsx
+    violin_cell_count.png     cells per region, split by genotype, one dot per sample
+    violin_region_area.png    region area, the same layout
+    pca_cells.png             PCA of every segmented cell, coloured by sample
+    cell_outlines.npz         every segmented cell's outline, for the region explorer
+```
+
+The violins show the median as a black tick; a group with fewer than two
+distinct values gets its dots and median only. The cell PCA is fitted on every
+cell's standardised size, diameter and intensity measurements (columns that do
+not vary are dropped and named on the figure); above 20 000 cells a random,
+reproducible subset is drawn. In the PCA colour is the sample and marker shape
+the genotype; each sample's median is drawn large with a number that the legend
+maps to its name. Up to eight samples get eight distinct hues; past that each
+genotype keeps one hue and its samples are shades of it, dark to light. In the
+violins colour is the genotype, and the reference groups (`wt`, `ctl`, `sib`)
+come first everywhere.
+A figure that cannot be drawn is reported in the panel's log; the workbook is
+still written.
+
+The workbook holds the three batch sheets above, then
+
+- **Region features** — one row per sample and region, every column a number.
+  The outline's own shape (area, volume through the stack, perimeter,
+  circularity, solidity, major/minor axis, aspect ratio, eccentricity,
+  orientation, centroid, bounding box); the objects inside it (count, density
+  per mm² and per mm³, object volume fraction, mean/median/SD of diameter, size
+  and intensity); and, for every channel, mean, median, SD, CV, 5th/95th/99th
+  percentile and integrated intensity inside the outline. This is the table to
+  run a PCA of regions on.
+- **Region intensities** — the same channel statistics in long form (one row
+  per sample, region and channel, with min, max and the quartiles too), plus an
+  `(all regions)` row for the union of a sample's outlines. Robust to files that
+  name their channels differently, which the wide sheets are not.
+- **PCA matrix** — one row per sample, one column per `region | feature`: the
+  shape a PCA of samples wants. Nothing is dropped or scaled; that is the
+  analysis's decision, not the export's.
+- **Region outlines** — every outline's vertices in µm, one row per vertex, so
+  a plot of the regions can draw their shapes without the `.ims` files.
+- **Cell shapes** — one row per segmented cell, joining *Objects* on Sample and
+  Label: footprint area, perimeter, circularity, solidity, major/minor axis,
+  aspect ratio, eccentricity and orientation of the cell seen from above. A 3D
+  cell is outlined by its footprint — every (y, x) it covers in any plane. The
+  outlines themselves (24 points each, in µm) go to `cell_outlines.npz`, since a
+  hundred thousand cells is not spreadsheet material. **Trace every cell's
+  outline** in the panel turns this off; it costs about 3 s per 20 000 cells.
+
+| Setting | What it does |
+|---|---|
+| **Label map** | Which stored map to count, matched against its name. Empty takes the first. A file with none still gets its shapes and intensities, and says why its object columns are blank. |
+| **Object intensity** | Channel the per-object intensities come from. Empty uses the channel recorded with the label map. |
+| **Channels** | Comma-separated names or indices to describe. Empty is every channel. |
+| **Intensity level** | Pyramid level the region intensities are read at. `0` is exact; `1` reads an eighth of the data. |
+
+Region channel intensities are measured in 2D: a stack is first reduced to its
+maximum-intensity projection (Z, and T if present), and the statistics are
+taken inside each outline on that plane, so empty planes above and below the
+tissue do not dilute them. Objects and region volumes are still measured in 3D. The
+excluded rows are deliberate: `(outside every region)` and `(all regions)` are
+not anatomical units and would dominate the first component.
+
+#### Region explorer
+
+`apps/region_explorer.py` is a Streamlit app for the workbook an analysis run
+writes. It reads the *Region features* sheet and has three tabs:
+
+- **UMAP** of the regions, 2D or 3D. Tick the feature groups to use — region
+  shape, objects, each channel's intensities; position (centroid, orientation)
+  is off by default so mounting does not separate samples. Columns missing in
+  more than a chosen share of rows are dropped, the rest median-filled and
+  standardised; constant columns are dropped and listed. Colour by genotype,
+  sample or region, marker shape by region or genotype; hover shows sample,
+  genotype, region, cells, area and density. The embedding downloads as CSV.
+- **Scatter**, 2D or 3D, of any columns against each other, coloured by
+  sample, genotype or region, with log axes.
+- **Cells** — the segmented cells themselves: a UMAP or PCA (2D or 3D) over
+  their size & intensity and cell-shape measurements (position off by
+  default), or a free 2D/3D scatter of any two or three cell columns, coloured
+  by sample, genotype or region. A random subset is used (5 000 by default, up
+  to 50 000) so UMAP stays quick. **Draw as → Outlines** draws each cell as its
+  own shape, from `cell_outlines.npz` — found automatically beside a workbook
+  given as a path, or uploaded in the sidebar. At most 3 000 cell outlines are
+  drawn at once; beyond that the page stops being responsive.
+- **Table** of the rows being plotted, filtered by the region, genotype and
+  sample pickers in the sidebar.
+
+In 2D, **Draw as → Outlines** draws each region as its own shape, centred on
+its point and filled in its colour, from the *Region outlines* sheet; hover
+still works. **Keep relative region sizes** shows real size differences (the
+largest region sets the scale); untick it to scale every outline to the same
+size and compare shape alone. Outlines are sized in screen pixels, so they stay
+undistorted even when the two axes are in unrelated units — which is why an
+outline plot has a fixed size and is not drawn on log axes.
+
+Colours match the report figures: the same genotype colours, and the same
+per-sample shades.
+
+```bash
+pip install ".[explorer]"
+streamlit run apps/region_explorer.py                       # then load the .xlsx
+streamlit run apps/region_explorer.py -- path/to/report/    # or point it at a report folder
+```
 
 ### Exports
 
@@ -1291,6 +1429,8 @@ python tests/test_projection.py     # batch MIP, and the TIFF / Imaris writers �
 python tests/test_regions.py        # region geometry and per-region counting — no Qt needed
 python tests/test_experiment.py     # folder scans, the in-file store, batch runs — no Qt needed
 python tests/test_naming.py         # reading the genotype out of a file name — no Qt needed
+python tests/test_onboarding.py     # the tour's script and its seen/not-seen memory — no Qt needed
+python tests/test_analysis.py       # region morphometrics, channel statistics, the report folder — no Qt needed
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 

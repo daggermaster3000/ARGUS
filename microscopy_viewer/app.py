@@ -292,6 +292,26 @@ class MicroscopyViewer:
             except Exception:
                 logger.exception("could not restore the stored brain regions")
 
+    # -- the tour -------------------------------------------------------------
+
+    def start_tour(self, index: int = 0):
+        """Run the guided tour from step *index*."""
+        from .widgets.tour import start_tour
+
+        return start_tour(self, index)
+
+    def maybe_start_tour(self):
+        """Start the tour unless this version of it has been seen already."""
+        from .onboarding import has_seen
+
+        if has_seen():
+            return None
+        try:
+            return self.start_tour()
+        except Exception:
+            logger.exception("could not start the guided tour")
+            return None
+
     # -- panels ---------------------------------------------------------------
 
     def toggle_metadata_panel(self) -> None:
@@ -353,6 +373,7 @@ def launch(
     suppress_plugin_warning: bool = True,
     splash: bool = True,
     busy_overlay: bool = True,
+    tour: bool = True,
 ) -> MicroscopyViewer:
     """Create the viewer, open any given paths, and optionally run the Qt loop.
 
@@ -368,6 +389,9 @@ def launch(
     responding for longer than :data:`microscopy_viewer.busy.BUSY_AFTER_S`, the
     same animation is put over the window by a second process until it comes back.
     See :mod:`microscopy_viewer.busy` for why that has to be another process.
+
+    With *tour* the guided tour starts once the window is up, the first time this
+    version of the tour has not been seen (see :mod:`microscopy_viewer.onboarding`).
     """
     import napari
     from napari.qt import get_qapp
@@ -408,6 +432,12 @@ def launch(
             application = QApplication.instance()
             if application is not None:
                 application.aboutToQuit.connect(app.busy_watchdog.stop)
+
+    if tour:
+        from qtpy.QtCore import QTimer
+
+        # After the event loop has laid the window out: the tour measures it.
+        QTimer.singleShot(800, app.maybe_start_tour)
 
     if block:
         napari.run()
