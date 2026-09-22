@@ -45,8 +45,8 @@ class TourStep:
 TOUR: tuple[TourStep, ...] = (
     TourStep(
         "Welcome to ARGUS",
-        "A quick tour of one experiment, from a folder of .ims files to a PCA-ready "
-        "workbook. It takes about a minute.\n\n"
+        "A quick tour of how to process one experiment, from a folder of .ims files. "
+        "It takes about a minute.\n\n"
         "Press Next to continue, Back to go back, and End tour or Esc to stop at any "
         "time. The Tour button in the toolbar starts it again.",
     ),
@@ -94,7 +94,7 @@ TOUR: tuple[TourStep, ...] = (
     ),
     TourStep(
         "5 · Set up segmentation",
-        "Choose the Cellpose model, 2D or 3D mode, the expected nucleus diameter and "
+        "Choose the Cellpose model, 2D or 3D mode (we will do 2D + Stitch), the expected nucleus diameter and "
         "the device. Segment tries it on the channel on screen.",
         panel="segmentation",
         tab="Setup",
