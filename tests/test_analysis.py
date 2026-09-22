@@ -112,6 +112,24 @@ def test_label_key_pick() -> None:
     check(an.pick_label_key([], "") == "", "nothing stored, nothing picked")
 
 
+def test_object_intensities() -> None:
+    print("per-cell intensities")
+    masks = np.zeros((6, 8), dtype=np.int32)
+    masks[0:2, 0:2] = 1
+    masks[3:6, 4:8] = 3  # label 2 absent: numbering has holes
+    signal = np.arange(48, dtype=np.uint16).reshape(6, 8)
+    found = an.object_intensities(masks, signal)
+    check(abs(found["Mean"][1] - signal[0:2, 0:2].mean()) < 1e-9, "mean inside the cell")
+    check(abs(found["SD"][3] - signal[3:6, 4:8].std()) < 1e-9, "SD inside the cell")
+    check(found["Max"][3] == 47 and found["Integrated"][1] == signal[0:2, 0:2].sum(), "max and sum")
+    check(np.isnan(found["Mean"][2]), "a missing label is blank, not zero")
+    stack = np.stack([signal, signal * 2])
+    labels3d = np.stack([masks, masks])
+    deep = an.object_intensities(labels3d, stack)
+    check(abs(deep["Mean"][1] - np.concatenate([signal[0:2, 0:2], 2 * signal[0:2, 0:2]]).mean()) < 1e-9,
+          "a 3D cell is measured through every plane")
+
+
 def test_whole_workbook() -> None:
     print("analysing files")
     from make_sample_data import write_ims
@@ -169,7 +187,7 @@ def test_whole_workbook() -> None:
             list(sheets) == [
                 "Samples", "Regions", "Objects",
                 "Region features", "Region intensities", "PCA matrix", "Region outlines",
-                "Cell shapes",
+                "Cell shapes", "Cell intensities",
             ],
             f"the batch sheets and then the new ones ({list(sheets)})",
         )
@@ -210,6 +228,21 @@ def test_whole_workbook() -> None:
             abs(three["Footprint area (µm²)"] - 100 * 0.13 * 0.13) < 1e-6,
             "a 3D cell is measured by its footprint, not its volume",
         )
+        per_cell = sheets["Cell intensities"]
+        check(len(per_cell) == 3 * 2, f"an intensity row per cell, per sample ({len(per_cell)})")
+        means = [c for c in per_cell.columns if c.endswith(" Mean")]
+        check(len(means) == 2, f"a mean per channel ({means})")
+        gfp = next(c for c in means if "GFP" in c)
+        for stat in good.stats:
+            row = per_cell[(per_cell["Sample"] == "fish_wt_1") & (per_cell["Label"] == stat.label)].iloc[0]
+            check(abs(row[gfp] - stat.mean) < 1e-2,
+                  f"cell {stat.label}: same GFP mean as the Objects sheet ({row[gfp]} vs {stat.mean:.3f})")
+        other = next(c for c in means if c != gfp)
+        check(per_cell[other].notna().all(), "and the other channel is measured too")
+        quiet = an.analyse([first], an.AnalysisOptions(cell_channels=False))
+        release(first)
+        check(an.cell_intensities_dataframe(quiet).empty, "switched off, the sheet is empty")
+
         outline = good.cell_outlines[1]
         check(outline.shape == (an.CONTOUR_POINTS, 2), f"outline resampled ({outline.shape})")
         centre = outline.mean(axis=0)
@@ -280,7 +313,8 @@ def test_plot_helpers() -> None:
 
 def main() -> int:
     for test in (
-        test_region_shape, test_channel_stats, test_projection, test_label_key_pick, test_whole_workbook, test_plot_helpers
+        test_region_shape, test_channel_stats, test_projection, test_label_key_pick, test_object_intensities,
+        test_whole_workbook, test_plot_helpers
     ):
         test()
         print()

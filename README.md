@@ -1076,6 +1076,12 @@ The workbook holds the three batch sheets above, then
   outlines themselves (24 points each, in µm) go to `cell_outlines.npz`, since a
   hundred thousand cells is not spreadsheet material. **Trace every cell's
   outline** in the panel turns this off; it costs about 3 s per 20 000 cells.
+- **Cell intensities** — one row per segmented cell, joining *Objects* on
+  Sample and Label: mean, SD, maximum and integrated intensity of **every**
+  channel inside the cell (`<channel> Mean`, …), not only the one it was
+  segmented on. Measured on the label map's grid: a 3D label map against each
+  full-resolution stack, a 2D one against each channel's maximum projection.
+  **Measure every channel in every cell** in the panel turns this off.
 
 | Setting | What it does |
 |---|---|

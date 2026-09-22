@@ -24,6 +24,10 @@ Three decisions worth knowing about:
   at full resolution is a few gigabytes per channel; level 1 is an eighth of
   that and its means and percentiles are the same to a few percent. Level 0 is
   the default because it is the honest one.
+* **Every cell is measured in every channel.** On the label map's own grid:
+  a 3D label map against each channel's full-resolution stack, a 2D one
+  against each channel's maximum-intensity projection, the same plane its
+  cells were segmented on. The *Cell intensities* sheet has the result.
 * **Channels are matched by name across samples.** The wide sheets name their
   columns after the channel, so a file that calls it "Confocal - GFP" and one
   that calls it "GFP" produce different columns. The long sheet does not care.
@@ -97,6 +101,9 @@ class AnalysisOptions:
     #: Trace every object's outline and measure its shape. Costs a few seconds
     #: per ten thousand objects.
     cell_outlines: bool = True
+    #: Measure every described channel inside every object, not only the one
+    #: it was segmented on. One more full-resolution read per channel.
+    cell_channels: bool = True
 
 
 @dataclass
@@ -161,6 +168,9 @@ class AnalysisOutcome(ex.BatchOutcome):
     cell_outlines: dict[int, np.ndarray] = field(default_factory=dict)
     #: ``label -> RegionShape`` of that outline, plus its pixel-counted area.
     cell_shapes: dict[int, tuple[RegionShape, float]] = field(default_factory=dict)
+    #: ``channel -> statistic -> values indexed by label`` (see
+    #: :func:`object_intensities`).
+    cell_intensities: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
     depth_um: float = 0.0
 
 
@@ -359,6 +369,47 @@ def project(array) -> np.ndarray:
     return result
 
 
+#: Per-object statistics of each channel, in the *Cell intensities* sheet.
+CELL_INTENSITY_STATS = ("Mean", "SD", "Max", "Integrated")
+
+
+def object_intensities(masks: np.ndarray, signal) -> dict[str, np.ndarray]:
+    """Each object's intensity statistics in *signal*, indexed by label.
+
+    *signal* must have the shape of *masks*; it may be lazy (an HDF5 dataset),
+    since it is read one plane at a time and only the labelled voxels of each
+    plane are kept. Labels with no voxels come back as NaN.
+    """
+    masks = np.asarray(masks)
+    highest = int(masks.max()) if masks.size else 0
+    count = np.zeros(highest + 1)
+    total = np.zeros(highest + 1)
+    squares = np.zeros(highest + 1)
+    maxima = np.full(highest + 1, -np.inf)
+    planes = masks.reshape(-1, *masks.shape[-2:]) if masks.ndim > 2 else masks[None]
+    for index, plane in enumerate(planes):
+        where = plane > 0
+        if not where.any():
+            continue
+        if masks.ndim > 2:
+            position = np.unravel_index(index, masks.shape[:-2])
+            values = np.asarray(signal[tuple(int(i) for i in position)])[where]
+        else:
+            values = np.asarray(signal)[where]
+        ids = plane[where].astype(np.int64, copy=False)
+        values = values.astype(np.float64)
+        count += np.bincount(ids, minlength=highest + 1)
+        total += np.bincount(ids, weights=values, minlength=highest + 1)
+        squares += np.bincount(ids, weights=values * values, minlength=highest + 1)
+        np.maximum.at(maxima, ids, values)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = total / count
+        sd = np.sqrt(np.maximum(squares / count - mean**2, 0.0))
+    empty = count == 0
+    maxima[empty] = np.nan
+    return {"Mean": mean, "SD": sd, "Max": maxima, "Integrated": np.where(empty, np.nan, total)}
+
+
 def region_masks(regions, shape_yx, voxel_yx) -> dict[str, np.ndarray]:
     """One boolean (Y, X) mask per region, plus their union, on one pixel grid."""
     from .intensity import polygon_mask, world_to_data
@@ -548,6 +599,23 @@ def analyse_sample(
                 outcome.cell_outlines, outcome.cell_shapes = cell_outlines(
                     masks, voxel[-2:], say
                 )
+            if options.cell_channels and outcome.n_objects:
+                for index in _channels_to_describe(names, options.channels):
+                    spec = specs[index]
+                    array = spec.data[0] if spec.multiscale else spec.data
+                    shape = tuple(int(n) for n in np.shape(array))
+                    say(f"measuring every cell in “{names[index]}”")
+                    if masks.ndim == 2 and len(shape) > 2 and shape[-2:] == masks.shape:
+                        # The plane the cells were segmented on.
+                        array = project(array)
+                    elif shape != masks.shape:
+                        outcome.warnings.append(
+                            f"“{names[index]}” is {shape} and the labels are {masks.shape}; "
+                            "its per-cell intensities were not measured"
+                        )
+                        continue
+                    outcome.cell_intensities[names[index]] = object_intensities(masks, array)
+                    del array
             del masks
 
         # -- regions ------------------------------------------------------------
@@ -846,6 +914,39 @@ def cell_shapes_dataframe(outcomes: Sequence[AnalysisOutcome]):
     return pd.DataFrame(rows, columns=list(CELL_SHAPE_COLUMNS))
 
 
+def cell_intensities_dataframe(outcomes: Sequence[AnalysisOutcome]):
+    """One row per object, every channel's intensity inside it.
+
+    Joins the *Objects* sheet on Sample and Label. Columns are
+    ``<channel> <statistic>``, channels matched by name across samples as in
+    the wide region sheets; a sample without a channel leaves its cells blank.
+    """
+    import pandas as pd
+
+    channels: list[str] = []
+    for outcome in outcomes:
+        for channel in outcome.cell_intensities:
+            if channel not in channels:
+                channels.append(channel)
+    columns = ["Sample", "Genotype", "Label"] + [
+        f"{channel} {stat}" for channel in channels for stat in CELL_INTENSITY_STATS
+    ]
+    rows = []
+    for outcome in outcomes:
+        if not outcome.cell_intensities:
+            continue
+        for object_stat in outcome.stats:
+            label = int(object_stat.label)
+            row = {"Sample": outcome.name, "Genotype": outcome.genotype, "Label": label}
+            for channel, values in outcome.cell_intensities.items():
+                for stat in CELL_INTENSITY_STATS:
+                    column = values[stat]
+                    value = float(column[label]) if label < len(column) else float("nan")
+                    row[f"{channel} {stat}"] = ex._round(value, 3)
+            rows.append(row)
+    return pd.DataFrame(rows, columns=columns)
+
+
 def save_cell_outlines(outcomes: Sequence[AnalysisOutcome], path: str | Path) -> int:
     """Write every cell outline to one ``.npz``. Returns how many were written.
 
@@ -945,4 +1046,5 @@ def workbook_sheets(outcomes: Sequence[AnalysisOutcome]) -> dict[str, Any]:
         "PCA matrix": pca_matrix(features),
         "Region outlines": outlines_dataframe(outcomes),
         "Cell shapes": cell_shapes_dataframe(outcomes),
+        "Cell intensities": cell_intensities_dataframe(outcomes),
     }

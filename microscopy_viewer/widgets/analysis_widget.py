@@ -129,6 +129,15 @@ class AnalysisWidget(QWidget):
         )
         form.addRow("Cells", self._outlines_check)
 
+        self._cell_channels_check = QCheckBox("Measure every channel in every cell")
+        self._cell_channels_check.setChecked(True)
+        self._cell_channels_check.setToolTip(
+            "Each cell's mean, SD, maximum and integrated intensity in every channel "
+            "listed above (all of them when empty) — the Cell intensities sheet. Off: "
+            "only the channel the cells were segmented on, in the Objects sheet."
+        )
+        form.addRow("", self._cell_channels_check)
+
         row = QHBoxLayout()
         self._run_button = QPushButton("Analyse selected")
         self._run_button.setToolTip(
@@ -214,6 +223,7 @@ class AnalysisWidget(QWidget):
             intensity_level=int(self._level_spin.value()),
             channels=channels,
             cell_outlines=self._outlines_check.isChecked(),
+            cell_channels=self._cell_channels_check.isChecked(),
         )
 
     def sample_paths(self) -> list[Path]:
