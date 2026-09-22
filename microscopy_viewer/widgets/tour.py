@@ -7,8 +7,13 @@ Everything else is blocked while the tour runs, so a stray click cannot start
 something the tour is not talking about.
 
 It can be left at any point: **End tour**, or **Esc**. Panels living in their own
-floating windows are highlighted where they are, since the geometry is taken in
-screen coordinates.
+floating windows are highlighted where they are by a separate ring window, since
+the overlay can only draw inside the main window.
+
+The bubble is kept on the visible part of the screen: on macOS the main window is
+easily taller than the screen (menu bar, Dock, a size restored from a bigger
+monitor), so the window is first fitted to the screen and the bubble is then
+clamped to what can actually be seen.
 
 The script is :mod:`microscopy_viewer.onboarding`.
 """
@@ -16,7 +21,7 @@ The script is :mod:`microscopy_viewer.onboarding`.
 from __future__ import annotations
 
 from qtpy.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
-from qtpy.QtGui import QColor, QKeySequence, QPainter, QPen, QRegion
+from qtpy.QtGui import QColor, QGuiApplication, QKeySequence, QPainter, QPen, QRegion
 from qtpy.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -37,6 +42,84 @@ ACCENT = QColor("#2a78d6")
 #: Space between the highlighted control and the ring drawn round it.
 PADDING = 6
 BUBBLE_WIDTH = 340
+#: Width of the ring drawn round a control in another window.
+RING = 3
+
+
+def _screen_rect(widget) -> QRect:
+    """Available geometry (no menu bar or Dock) of the screen *widget* is mostly on."""
+    screen = None
+    try:
+        handle = widget.window().windowHandle()
+        screen = handle.screen() if handle is not None else None
+    except RuntimeError:
+        screen = None
+    if screen is None:
+        try:
+            centre = widget.mapToGlobal(widget.rect().center())
+            screen = QGuiApplication.screenAt(centre)
+        except RuntimeError:
+            screen = None
+    if screen is None:
+        screen = QGuiApplication.primaryScreen()
+    return screen.availableGeometry() if screen is not None else QRect()
+
+
+def _fit_to_screen(window) -> None:
+    """Move and shrink a top-level *window* so its frame is on its screen."""
+    if window is None or window.isFullScreen() or window.isMaximized():
+        return
+    area = _screen_rect(window)
+    if area.isEmpty():
+        return
+    frame = window.frameGeometry()
+    if area.contains(frame):
+        return
+    # The frame (title bar) is extra to the client size.
+    extra_w = frame.width() - window.width()
+    extra_h = frame.height() - window.height()
+    width = min(frame.width(), area.width())
+    height = min(frame.height(), area.height())
+    window.resize(max(width - extra_w, window.minimumWidth()), max(height - extra_h, window.minimumHeight()))
+    x = min(max(frame.x(), area.left()), area.right() + 1 - width)
+    y = min(max(frame.y(), area.top()), area.bottom() + 1 - height)
+    window.move(x, y)
+
+
+class _Ring(QWidget):
+    """A frameless, click-through outline over a control in another window."""
+
+    def __init__(self):
+        super().__init__(
+            None,
+            Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+            | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus,
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+
+    def show_around(self, rect: QRect) -> None:
+        """Outline the global *rect*."""
+        outer = rect.adjusted(-RING - 2, -RING - 2, RING + 2, RING + 2)
+        if self.geometry() != outer:
+            self.setGeometry(outer)
+        # Only the outline is part of the window, so clicks land on the control
+        # even where the platform ignores the transparent-for-input hint.
+        local = QRect(0, 0, outer.width(), outer.height())
+        self.setMask(QRegion(local).subtracted(QRegion(local.adjusted(RING + 1, RING + 1, -RING - 1, -RING - 1))))
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802 - Qt naming
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(ACCENT, RING))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(self.rect().adjusted(2, 2, -2, -2), 6, 6)
+        painter.end()
 
 
 class TourOverlay(QWidget):
@@ -54,6 +137,7 @@ class TourOverlay(QWidget):
         self._target = None
         self._hole = QRect()
         self._ended = False
+        self._ring = _Ring()
 
         self.setAttribute(Qt.WA_StyledBackground, False)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -126,6 +210,11 @@ class TourOverlay(QWidget):
         return self._target
 
     def start(self, index: int = 0) -> None:
+        try:
+            _fit_to_screen(self._window)
+        except Exception:
+            logger.debug("could not fit the window to the screen", exc_info=True)
+        self.setGeometry(self._window.rect())
         self.show()
         self.raise_()
         self._timer.start()
@@ -169,6 +258,8 @@ class TourOverlay(QWidget):
         self._timer.stop()
         self._escape.setEnabled(False)
         self._window.removeEventFilter(self)
+        self._ring.hide()
+        self._ring.deleteLater()
         self.hide()
         self.finished.emit(bool(completed))
         self.deleteLater()
@@ -183,6 +274,8 @@ class TourOverlay(QWidget):
             try:
                 dock.setVisible(True)
                 dock.raise_()
+                if dock.isFloating():
+                    _fit_to_screen(dock)
             except Exception:
                 logger.debug("could not bring %s forward", step.panel, exc_info=True)
         widget = getattr(self._app, "panels", {}).get(step.panel)
@@ -209,24 +302,51 @@ class TourOverlay(QWidget):
             self._update_geometry()
         return super().eventFilter(obj, event)
 
-    def _target_rect(self) -> QRect:
+    def _target_global_rect(self) -> QRect:
+        """The target in screen coordinates, or empty if it cannot be seen."""
         target = self._target
         if target is None:
             return QRect()
         try:
             if not target.isVisible() or target.width() <= 0:
                 return QRect()
-            top_left = self.mapFromGlobal(target.mapToGlobal(QPoint(0, 0)))
+            return QRect(target.mapToGlobal(QPoint(0, 0)), target.size())
         except RuntimeError:  # the widget was deleted under us
             self._target = None
             return QRect()
-        rect = QRect(top_left, target.size())
-        return rect.adjusted(-PADDING, -PADDING, PADDING, PADDING).intersected(self.rect())
+
+    def _in_main_window(self) -> bool:
+        try:
+            return self._target is not None and self._target.window() is self._window
+        except RuntimeError:
+            return False
+
+    def _visible_area(self) -> QRect:
+        """The part of the overlay that is on screen, in overlay coordinates."""
+        screen = _screen_rect(self._window)
+        if screen.isEmpty():
+            return self.rect()
+        local = QRect(self.mapFromGlobal(screen.topLeft()), screen.size())
+        visible = local.intersected(self.rect())
+        return visible if not visible.isEmpty() else self.rect()
 
     def _update_geometry(self) -> None:
         if self._ended:
             return
-        self._hole = self._target_rect()
+        rect = self._target_global_rect()
+        if not rect.isEmpty() and self._in_main_window():
+            local = QRect(self.mapFromGlobal(rect.topLeft()), rect.size())
+            self._hole = local.adjusted(-PADDING, -PADDING, PADDING, PADDING).intersected(self._visible_area())
+            self._ring.hide()
+        else:
+            # In a floating panel (its own window) or nowhere: the overlay
+            # cannot reach it, so the ring window marks it and the bubble sits
+            # in the middle of the screen.
+            self._hole = QRect()
+            if rect.isEmpty():
+                self._ring.hide()
+            else:
+                self._ring.show_around(rect.adjusted(-PADDING, -PADDING, PADDING, PADDING))
         region = QRegion(self.rect())
         if not self._hole.isEmpty():
             region = region.subtracted(QRegion(self._hole))
@@ -242,11 +362,14 @@ class TourOverlay(QWidget):
         height = bubble.layout().totalHeightForWidth(BUBBLE_WIDTH)
         if height <= 0:
             height = bubble.sizeHint().height()
+        area = self._visible_area().adjusted(12, 12, -12, -12)
+        height = min(height, area.height())
         bubble.setFixedHeight(height)
-        area = self.rect().adjusted(12, 12, -12, -12)
         hole = self._hole
         if hole.isEmpty():
-            bubble.move(area.center() - bubble.rect().center())
+            x = min(max(area.center().x() - bubble.width() // 2, area.left()), area.right() - bubble.width())
+            y = min(max(area.center().y() - height // 2, area.top()), area.bottom() - height)
+            bubble.move(max(x, area.left()), max(y, area.top()))
             return
         width, height = bubble.width(), bubble.height()
         gap = 14
@@ -262,13 +385,13 @@ class TourOverlay(QWidget):
                 bubble.move(point)
                 return
         # Nothing fits cleanly: take the side with most room and clamp.
-        point = candidates[0] if hole.center().x() < self.width() / 2 else candidates[1]
+        point = candidates[0] if hole.center().x() < area.center().x() else candidates[1]
         x = min(max(point.x(), area.left()), area.right() - width)
         y = min(max(point.y(), area.top()), area.bottom() - height)
         placed = QRect(QPoint(x, y), bubble.size())
         if placed.intersects(hole):
             y = hole.bottom() + gap if hole.bottom() + gap + height <= area.bottom() else area.top()
-        bubble.move(x, y)
+        bubble.move(max(x, area.left()), max(y, area.top()))
 
     def paintEvent(self, event):  # noqa: N802 - Qt naming
         painter = QPainter(self)

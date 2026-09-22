@@ -1237,7 +1237,7 @@ def main() -> int:
     print(flush=True)
 
     print("guided tour", flush=True)
-    from qtpy.QtCore import QPoint
+    from qtpy.QtCore import QPoint, QRect
 
     from microscopy_viewer import onboarding as ob
     from microscopy_viewer.widgets.tour import TourOverlay
@@ -1256,14 +1256,22 @@ def main() -> int:
             check(not ob.has_seen(), "a fresh profile has not seen the tour")
             tour = guided.maybe_start_tour()
             check(isinstance(tour, TourOverlay), "so it starts by itself")
+            from microscopy_viewer.widgets.tour import _screen_rect
+
             missing = []
+            off_screen = []
             for index, step in enumerate(ob.TOUR):
                 tour.go(index)
                 for _ in range(10):
                     QCoreApplication.processEvents()
                 if step.target and (tour.target is None or not tour.target.isVisible()):
                     missing.append(step.target)
+                bubble = tour._bubble
+                placed = QRect(bubble.mapToGlobal(QPoint(0, 0)), bubble.size())
+                if not _screen_rect(tour).contains(placed):
+                    off_screen.append(index)
             check(missing == [], f"every step finds its control, on screen ({missing})")
+            check(off_screen == [], f"every bubble is on the screen ({off_screen})")
 
             tour.go(2)
             for _ in range(10):
