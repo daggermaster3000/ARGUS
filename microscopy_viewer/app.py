@@ -272,9 +272,6 @@ class MicroscopyViewer:
 
         if reset_view:
             self.viewer.reset_view()
-            from .contrast import auto_contrast
-
-            auto_contrast(self.viewer)
 
         self.metadata_widget.refresh()
         self.measurements_widget.refresh_layer_list()
