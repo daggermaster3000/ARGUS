@@ -10,7 +10,18 @@ and brain region, every column a number) and offers:
   coloured by sample, genotype or region.
 * **Cells**: UMAP or PCA of the segmented cells over their size, intensity and
   shape, plus a free scatter of cell measurements, coloured by sample,
-  genotype or region.
+  genotype, region or cluster, over the cells of the chosen regions only (the
+  cerebellum alone, say). Cells can be clustered (k-means, Gaussian
+  mixture or HDBSCAN) over the same feature groups; the clusters carry over to
+  the atlas.
+* **Atlas**: one region's outline (the cerebellum, say) registered across the
+  samples into a mean shape, with a heatmap of where the cells sit in it,
+  averaged per genotype and compared between them. The cells can be drawn on
+  it as dots or as their own outlines, coloured by cluster or genotype.
+* **Explain**: SHAP values of a random forest that tells the clusters, or the
+  genotypes, apart from the cells' measurements — which features matter, and
+  which way. Genotype is scored with whole samples held out, so a model cannot
+  pass by recognising the fish.
 * **Table** of exactly the rows being plotted.
 
 In 2D, each region can be drawn as its own outline instead of a dot, taken from
@@ -23,7 +34,8 @@ Run with::
     streamlit run apps/region_explorer.py
     streamlit run apps/region_explorer.py -- path/to/report.xlsx
 
-Needs ``streamlit``, ``plotly``, ``scikit-learn`` and ``umap-learn``.
+Needs ``streamlit``, ``plotly``, ``scikit-learn`` and ``umap-learn``; the
+Explain tab also ``shap``.
 """
 
 from __future__ import annotations
@@ -35,6 +47,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -125,6 +138,15 @@ def read_cells(source: bytes | str) -> pd.DataFrame:
         frame["Sample"] = frame["Sample"].astype(str)
     shapes = shapes.drop(columns=["Genotype"], errors="ignore")
     cells = objects.merge(shapes, on=["Sample", "Label"], how="left")
+    try:
+        channels = pd.read_excel(io.BytesIO(source) if isinstance(source, bytes) else source,
+                                 sheet_name=CELL_INTENSITIES)
+    except ValueError:  # workbooks from before every channel was measured per cell
+        channels = pd.DataFrame()
+    if not channels.empty:
+        channels["Sample"] = channels["Sample"].astype(str)
+        channels = channels.drop(columns=["Genotype"], errors="ignore")
+        cells = cells.merge(channels, on=["Sample", "Label"], how="left")
     cells["Genotype"] = [ap.genotype_label(value) for value in cells.get("Genotype", "")]
     cells["Region"] = cells.get("Region", "").astype(str)
     return cells
@@ -142,6 +164,10 @@ def read_cell_outlines(source: bytes | str) -> dict[tuple[str, int], list[np.nda
         flipped[key] = [xy]
     return flipped
 
+
+#: Sheet of every channel's intensity inside every cell.
+CELL_INTENSITIES = "Cell intensities"
+CELL_CHANNEL_STATS = (" Mean", " SD", " Max", " Integrated")
 
 #: Cell columns that say where a cell is, not what it is like.
 CELL_POSITION = ("Centroid Z (µm)", "Centroid Y (µm)", "Centroid X (µm)", "Orientation (°)")
@@ -161,8 +187,10 @@ def cell_groups(cells: pd.DataFrame) -> dict[str, list[str]]:
     ]
     shape = [c for c in numeric if c in CELL_SHAPE]
     position = [c for c in numeric if c in CELL_POSITION]
-    measured = [c for c in numeric if c not in shape and c not in position]
-    return {"Size & intensity": measured, "Cell shape": shape, "Position": position}
+    channels = [c for c in numeric if c.endswith(CELL_CHANNEL_STATS) and c not in shape]
+    measured = [c for c in numeric if c not in shape and c not in position and c not in channels]
+    return {"Size & intensity": measured, "Channel intensities": channels,
+            "Cell shape": shape, "Position": position}
 
 
 @st.cache_data(show_spinner="Embedding cells…")
@@ -210,8 +238,64 @@ def feature_groups(frame: pd.DataFrame) -> dict[str, list[str]]:
     return groups
 
 
+# -- clustering ---------------------------------------------------------------
+
+CLUSTER_METHODS = ("Off", "K-means", "Gaussian mixture", "HDBSCAN")
+#: Cells HDBSCAN calls noise, and clusters past the eighth: they share grey
+#: rather than get a ninth, generated hue.
+UNCLUSTERED = "Noise / other"
+NEUTRAL = "#8a8983"
+#: Cells outside the region that was clustered: lighter, so they recede.
+NOT_CLUSTERED = "Not clustered"
+FAINT = "#c9c8c3"
+
+
+@st.cache_data(show_spinner="Clustering cells…")
+def cluster_cells(matrix: np.ndarray, method: str, k: int, min_size: int, seed: int) -> np.ndarray:
+    """Integer cluster per row; -1 is noise (HDBSCAN only)."""
+    if method == "K-means":
+        from sklearn.cluster import KMeans
+
+        return KMeans(n_clusters=k, n_init=10, random_state=seed).fit_predict(matrix)
+    if method == "Gaussian mixture":
+        from sklearn.mixture import GaussianMixture
+
+        return GaussianMixture(n_components=k, random_state=seed).fit_predict(matrix)
+    from sklearn.cluster import HDBSCAN
+
+    return HDBSCAN(min_cluster_size=min_size).fit_predict(matrix)
+
+
+def cluster_names(labels) -> list[str]:
+    """``C1`` for the largest cluster, ``C2`` the next, …; the rest UNCLUSTERED.
+
+    Named by size so the colours do not change with the arbitrary numbers the
+    clustering hands out.
+    """
+    labels = np.asarray(labels)
+    ids, counts = np.unique(labels[labels >= 0], return_counts=True)
+    ranked = ids[np.argsort(-counts, kind="stable")][: len(REGION_COLORS)]
+    name = {int(c): f"C{i + 1}" for i, c in enumerate(ranked)}
+    return [name.get(int(v), UNCLUSTERED) for v in labels]
+
+
+def cluster_order(values) -> list[str]:
+    found = set(values)
+    rest = (UNCLUSTERED, NOT_CLUSTERED)
+    named = sorted((v for v in found if v not in rest), key=lambda v: int(v[1:]))
+    return named + [v for v in rest if v in found]
+
+
+def cluster_colors(order) -> dict[str, str]:
+    special = {UNCLUSTERED: NEUTRAL, NOT_CLUSTERED: FAINT}
+    return {c: special.get(c) or REGION_COLORS[int(c[1:]) - 1] for c in order}
+
+
 def color_map(frame: pd.DataFrame, by: str) -> tuple[dict[str, str], list[str]]:
     """Fixed colours per category, shared with the report's PNG figures."""
+    if by == "Cluster":
+        order = cluster_order(frame["Cluster"])
+        return cluster_colors(order), order
     if by == "Genotype":
         order = ap.genotype_order(frame["Genotype"])
         return {g: c for g, (c, _m) in ap.genotype_styles(order).items()}, order
@@ -252,6 +336,204 @@ def run_umap(matrix: np.ndarray, neighbors: int, min_dist: float, dims: int, see
         n_neighbors=neighbors, min_dist=min_dist, n_components=dims, random_state=seed
     )
     return reducer.fit_transform(matrix)
+
+
+# -- SHAP ---------------------------------------------------------------------
+
+#: Feature-value ramp in the beeswarm: one hue, light for low, dark for high.
+VALUE_SCALE = [[0.0, "#9ec5f4"], [0.5, "#2a78d6"], [1.0, "#0d366b"]]
+
+
+@st.cache_data(show_spinner="Training the model and computing SHAP values…")
+def explain_cells(matrix: np.ndarray, target: np.ndarray, groups: np.ndarray | None,
+                  n_explain: int, seed: int):
+    """Cross-validated score, which rows were explained, and their SHAP values.
+
+    A random forest predicts *target* from *matrix*. With *groups* (the sample
+    of each cell) the score holds whole groups out, so cells of one fish never
+    sit on both sides of a split. SHAP values come back as (rows, features,
+    classes), in the model's class order.
+    """
+    import shap
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import balanced_accuracy_score
+    from sklearn.model_selection import GroupKFold, StratifiedKFold, cross_val_predict
+
+    model = RandomForestClassifier(
+        n_estimators=200, max_depth=8, min_samples_leaf=3, class_weight="balanced",
+        n_jobs=-1, random_state=seed,
+    )
+    score = float("nan")
+    if groups is not None and len(set(groups)) >= 2:
+        folds = GroupKFold(n_splits=min(5, len(set(groups))))
+        predicted = cross_val_predict(model, matrix, target, cv=folds, groups=groups)
+        score = balanced_accuracy_score(target, predicted)
+    elif groups is None:
+        smallest = int(np.min(np.unique(target, return_counts=True)[1]))
+        if smallest >= 2:
+            folds = StratifiedKFold(n_splits=min(5, smallest), shuffle=True, random_state=seed)
+            predicted = cross_val_predict(model, matrix, target, cv=folds)
+            score = balanced_accuracy_score(target, predicted)
+    model.fit(matrix, target)
+    rows = np.random.default_rng(seed).permutation(len(matrix))[: int(n_explain)]
+    rows.sort()
+    values = shap.TreeExplainer(model).shap_values(matrix[rows])
+    if isinstance(values, list):  # older shap: one array per class
+        values = np.stack(values, axis=-1)
+    values = np.asarray(values, dtype=float)
+    if values.ndim == 2:
+        values = values[:, :, None]
+    return score, rows, values, list(model.classes_)
+
+
+# -- atlas helpers ------------------------------------------------------------
+
+#: Sequential ramp for cell density: one hue, light (few cells) to dark.
+DENSITY_SCALE = [
+    [0.0, "#f4f8fd"], [0.2, "#b7d3f6"], [0.4, "#6da7ec"],
+    [0.6, "#2a78d6"], [0.8, "#1c5cab"], [1.0, "#0d366b"],
+]
+#: The same, in grey: under cells coloured by cluster or genotype, whose hues
+#: would otherwise be lost against a blue ramp.
+DENSITY_SCALE_GREY = [
+    [0.0, "#f7f7f5"], [0.25, "#d9d8d3"], [0.5, "#b0afa9"], [0.75, "#76756f"], [1.0, "#3a3a37"],
+]
+#: Diverging ramp for a difference: blue lower, neutral grey equal, red higher.
+DIFFERENCE_SCALE = [
+    [0.0, "#1c5cab"], [0.25, "#86b6ef"], [0.5, "#f0efec"], [0.75, "#ee9191"], [1.0, "#b8302f"],
+]
+#: The template outline: a neutral mid grey that reads on light and dark.
+TEMPLATE_COLOR = "#8a8984"
+
+
+@st.cache_data(show_spinner="Registering outlines…")
+def register_region(outlines: dict, cells: dict, scale: bool, reflect: bool, warp: bool,
+                    smoothing: float):
+    """The atlas, its template and registered contours, per-sample fit, and the
+    cells carried in."""
+    from microscopy_viewer import shape_atlas as sa
+
+    atlas = sa.build_atlas(outlines, scale=scale, reflect=reflect, warp=warp, smoothing=smoothing)
+    mapped = {s: atlas.map_points(s, p) for s, p in cells.items() if s in atlas.transforms}
+    fits = {
+        s: {"Scale": t.scale, "Rotation (°)": t.angle, "Mirrored": t.mirrored,
+            "Residual (µm)": atlas.residual[s]}
+        for s, t in atlas.transforms.items()
+    }
+    return atlas, atlas.template, atlas.registered, fits, mapped
+
+
+def closed(points: np.ndarray) -> np.ndarray:
+    return np.vstack([points, points[:1]])
+
+
+def equal_axes(figure, count: int) -> None:
+    """Every subplot at one µm per pixel both ways, without axes clutter.
+
+    Positions in the template mean nothing on their own, so there are no tick
+    labels; :func:`scale_bar` gives the size instead.
+    """
+    for i in range(1, count + 1):
+        suffix = "" if i == 1 else str(i)
+        figure.layout[f"yaxis{suffix}"].update(scaleanchor=f"x{suffix}", scaleratio=1)
+    for update in (figure.update_xaxes, figure.update_yaxes):
+        update(showgrid=False, zeroline=False, showticklabels=False, ticks="")
+
+
+def scale_bar(figure, template: np.ndarray, row=None, col=None) -> None:
+    """A round-length bar under the template's lower left, labelled in µm."""
+    low, high = template.min(axis=0), template.max(axis=0)
+    width = float(high[0] - low[0])
+    length = next((v for v in (500, 200, 100, 50, 20, 10, 5) if v <= width * 0.5), 5)
+    y = float(low[1]) - 0.04 * float(high[1] - low[1])
+    x0 = float(low[0])
+    figure.add_trace(
+        go.Scatter(x=[x0, x0 + length], y=[y, y], mode="lines+text", showlegend=False,
+                   line={"color": TEMPLATE_COLOR, "width": 3}, text=["", f"{length} µm"],
+                   textposition="middle right", hoverinfo="skip"),
+        row=row, col=col,
+    )
+
+
+#: Colour of cells when they are not coloured by anything.
+PLAIN = "Cells"
+
+
+def overlay_traces(figure, groups: dict, colors: dict, shown: set, row, col) -> None:
+    """Cells of one panel: ``group -> {"points": (N, 2), "outlines": [(M, 2), ...]}``.
+
+    Outlines when there are any, dots otherwise. One trace per group; each
+    group is in the legend once, and toggling it there hides it in every panel.
+    """
+    for group, entry in groups.items():
+        color = colors.get(group, NEUTRAL)
+        plain = group == PLAIN
+        first = group not in shown
+        shown.add(group)
+        common = dict(name=str(group), legendgroup=str(group), showlegend=first and not plain)
+        if entry["outlines"]:
+            xs: list = []
+            ys: list = []
+            for poly in entry["outlines"]:
+                xs.extend([*poly[:, 0], poly[0, 0], None])
+                ys.extend([*poly[:, 1], poly[0, 1], None])
+            figure.add_trace(go.Scatter(
+                x=xs, y=ys, mode="lines", fill="toself", hoverinfo="skip",
+                line={"color": "#1f1f1e" if plain else color, "width": 1},
+                fillcolor="rgba(255,255,255,0.8)" if plain else _alpha(color, 0.6), **common,
+            ), row=row, col=col)
+        else:
+            points = np.asarray(entry["points"]).reshape(-1, 2)
+            figure.add_trace(go.Scatter(
+                x=points[:, 0], y=points[:, 1], mode="markers",
+                marker={"size": 7, "color": "rgba(255,255,255,0.85)" if plain else color,
+                        "line": {"width": 1, "color": "#1f1f1e" if plain else "white"}},
+                hovertemplate=f"{group}<extra></extra>", **common,
+            ), row=row, col=col)
+
+
+def density_figure(grid, panels: dict, template: np.ndarray, *, colorscale, zmin, zmax,
+                   unit: str, cells: dict | None = None, colors: dict | None = None,
+                   height: int = 620, columns: int = 0):
+    """One heatmap per panel on a shared colour scale, the template drawn over it.
+
+    *cells* maps a panel to its cells for :func:`overlay_traces`.
+    """
+    from plotly.subplots import make_subplots
+
+    names = list(panels)
+    columns = columns or len(names)
+    rows = int(np.ceil(len(names) / columns))
+    figure = make_subplots(rows=rows, cols=columns, subplot_titles=names,
+                           horizontal_spacing=0.03, vertical_spacing=0.08)
+    outline = closed(template)
+    shown: set = set()
+    for i, name in enumerate(names):
+        row, col = i // columns + 1, i % columns + 1
+        figure.add_trace(
+            go.Heatmap(
+                x=grid.x, y=grid.y, z=panels[name], coloraxis="coloraxis",
+                hovertemplate=f"x %{{x:.0f}} µm<br>y %{{y:.0f}} µm<br>%{{z:.3g}} {unit}<extra>{name}</extra>",
+            ),
+            row=row, col=col,
+        )
+        if cells and cells.get(name):
+            overlay_traces(figure, cells[name], colors or {}, shown, row, col)
+        figure.add_trace(
+            go.Scatter(x=outline[:, 0], y=outline[:, 1], mode="lines", showlegend=False,
+                       line={"color": TEMPLATE_COLOR, "width": 2}, hoverinfo="skip"),
+            row=row, col=col,
+        )
+        scale_bar(figure, template, row, col)
+    figure.update_layout(
+        coloraxis={"colorscale": colorscale, "cmin": zmin, "cmax": zmax,
+                   "colorbar": {"title": {"text": unit, "side": "right"}}},
+        height=height * rows, margin={"l": 10, "r": 10, "t": 50, "b": 40},
+        plot_bgcolor="rgba(0,0,0,0)",
+        legend={"orientation": "h", "x": 0, "y": 0, "yanchor": "top", "itemsizing": "constant"},
+    )
+    equal_axes(figure, len(names))
+    return figure
 
 
 def styled(figure, height: int = 620):
@@ -466,7 +748,36 @@ if rows.empty:
     st.warning("No rows left after filtering.")
     st.stop()
 
-umap_tab, scatter_tab, cells_tab, table_tab = st.tabs(["UMAP", "Scatter", "Cells", "Table"])
+# Every cell view — Cells, the clustering, the Atlas — sees only cells in the
+# size range kept here.
+cells_all = read_cells(source)
+SIZE_COLUMNS = ("Equivalent diameter (µm)", "Area (µm²)", "Footprint area (µm²)", "Volume (µm³)")
+if not cells_all.empty:
+    size_columns = [c for c in SIZE_COLUMNS if c in cells_all and cells_all[c].notna().any()]
+    if size_columns:
+        with st.sidebar:
+            st.header("Cells")
+            size_column = st.selectbox("Size measure", size_columns, key="size-column")
+            values = cells_all[size_column].astype(float)
+            low, high = float(values.min()), float(values.max())
+            if high > low:
+                kept = st.slider(
+                    "Keep cells from … to …", low, high, (low, high),
+                    step=float((high - low) / 500), format="%.1f", key=f"size-{size_column}",
+                    help="Drops debris below and merged clumps above, everywhere cells "
+                         "are shown, clustered or mapped.",
+                )
+                keep = values.between(*kept)
+                st.caption(f"{int(keep.sum()):,} of {len(cells_all):,} cells kept.")
+                cells_all = cells_all[keep].reset_index(drop=True)
+
+cell_outlines = read_cell_outlines(cell_source) if cell_source is not None else {}
+#: ``(sample, label) -> cluster name``, filled in by the Cells tab for the atlas.
+cluster_of: dict[tuple[str, int], str] = {}
+
+umap_tab, scatter_tab, cells_tab, atlas_tab, explain_tab, table_tab = st.tabs(
+    ["UMAP", "Scatter", "Cells", "Atlas", "Explain", "Table"]
+)
 
 # -- UMAP ---------------------------------------------------------------------
 
@@ -621,121 +932,693 @@ with scatter_tab:
 # -- cells --------------------------------------------------------------------
 
 with cells_tab:
-    cells_all = read_cells(source)
     if cells_all.empty:
         st.info("This workbook has no “Objects” sheet — no cells to show.")
     else:
-        cell_outlines = read_cell_outlines(cell_source) if cell_source is not None else {}
-        cells = cells_all[
-            cells_all["Region"].isin(regions)
-            & cells_all["Genotype"].isin(genotypes)
-            & cells_all["Sample"].isin(samples)
-        ].reset_index(drop=True)
+        cell_regions = list(dict.fromkeys(cells_all["Region"]))
         left, right = st.columns([1, 3])
         with left:
             st.subheader("Cells")
-            cap = st.slider("Cells to use", 100, max(100, min(50000, len(cells))),
-                            min(5000, max(100, len(cells))), 100,
-                            help="A random subset, the same for every setting. UMAP on "
-                                 "tens of thousands of cells takes a minute.")
-            cell_seed = st.number_input("Sampling seed", value=0, step=1, key="cell-seed")
-            view = st.radio("View", ("Embedding", "Scatter"), horizontal=True)
-            color_cells = st.selectbox("Colour by", ("Sample", "Genotype", "Region"), key="cell-color")
-            numeric_cells = [
-                c for c in cells.columns
-                if c not in CELL_IDENTITY and pd.api.types.is_numeric_dtype(cells[c])
-            ]
-            if view == "Embedding":
-                method = st.radio("Method", ("UMAP", "PCA"), horizontal=True)
-                cdims = st.radio("Dimensions", (2, 3), horizontal=True, key="cell-dims")
-                chosen_cells: list[str] = []
-                for name, columns in cell_groups(cells).items():
-                    if columns and st.checkbox(f"{name} ({len(columns)})",
-                                               value=name != "Position", key=f"cg-{name}"):
-                        chosen_cells.extend(columns)
-                cneighbors = st.slider("Neighbours", 2, 100, 15, key="cell-nb") if method == "UMAP" else 15
-                cmin_dist = st.slider("Minimum distance", 0.0, 1.0, 0.1, 0.05,
-                                      key="cell-md") if method == "UMAP" else 0.1
-                two_d = int(cdims) == 2
-            else:
-                cmode = st.radio("Plot", ("2D", "3D"), horizontal=True, key="cell-mode")
-                pick = [c for c in ("Equivalent diameter (µm)", "Mean intensity", "Circularity")
-                        if c in numeric_cells] + numeric_cells[:3]
-                cx = st.selectbox("X", numeric_cells, index=numeric_cells.index(pick[0]), key="cx")
-                cy = st.selectbox("Y", numeric_cells, index=numeric_cells.index(pick[1]), key="cy")
-                cz = (st.selectbox("Z", numeric_cells, index=numeric_cells.index(pick[2]), key="cz")
-                      if cmode == "3D" else None)
-                two_d = cmode == "2D"
-            if two_d:
-                cell_draw, cell_glyph, cell_true = glyph_controls(
-                    "cell", bool(cell_outlines),
-                    "Cell outlines need the cell_outlines.npz from the report folder — "
-                    "give the workbook as a path, or upload the file.",
-                )
-            else:
-                cell_draw = False
-
-        with right:
-            if len(cells) > cap:
-                subset = cells.sample(n=int(cap), random_state=int(cell_seed)).reset_index(drop=True)
-            else:
-                subset = cells
-            hover = {c: True for c in ("Sample", "Genotype", "Region", "Label") if c in subset}
-            hover.update({c: ":.4g" for c in CELL_HOVER if c in subset})
-            extra = [c for c in CELL_HOVER if c in subset]
-            ident = [c for c in ("Sample", "Genotype", "Region", "Label") if c in subset]
-            colors, order = color_map(subset, color_cells)
-            common = dict(
-                color=color_cells, color_discrete_map=colors,
-                category_orders={color_cells: order},
-                hover_name="Sample", hover_data=hover,
+            picked_regions = st.multiselect(
+                "From regions", cell_regions, default=cell_regions, key="cell-regions",
+                help="Only cells of these regions are embedded and clustered — pick the "
+                     "cerebellum alone, say, to see how its cells differ among themselves.",
             )
-            figure = None
-            cell_plot = None
-            if view == "Embedding":
-                cz = None
-                if len(subset) < 4 or not chosen_cells:
-                    st.warning("Choose at least one feature group (and have four cells or more).")
+        cells = cells_all[
+            cells_all["Region"].isin(picked_regions)
+            & cells_all["Genotype"].isin(genotypes)
+            & cells_all["Sample"].isin(samples)
+        ].reset_index(drop=True)
+        if cells.empty:
+            right.warning("No cells in the chosen regions, genotypes and samples.")
+        else:
+            with left:
+                cap = st.slider("Cells to use", 100, max(100, min(50000, len(cells))),
+                                min(5000, max(100, len(cells))), 100,
+                                help="A random subset, the same for every setting. UMAP on "
+                                     "tens of thousands of cells takes a minute.")
+                cell_seed = st.number_input("Sampling seed", value=0, step=1, key="cell-seed")
+                view = st.radio("View", ("Embedding", "Scatter"), horizontal=True)
+                clustering = st.session_state.get("clu-method", "Off") != "Off"
+                color_cells = st.selectbox(
+                    "Colour by", ("Sample", "Genotype", "Region") + (("Cluster",) if clustering else ()),
+                    key="cell-color",
+                )
+                numeric_cells = [
+                    c for c in cells.columns
+                    if c not in CELL_IDENTITY and pd.api.types.is_numeric_dtype(cells[c])
+                ]
+                if view == "Embedding":
+                    method = st.radio("Method", ("UMAP", "PCA"), horizontal=True)
+                    cdims = st.radio("Dimensions", (2, 3), horizontal=True, key="cell-dims")
+                    chosen_cells: list[str] = []
+                    for name, columns in cell_groups(cells).items():
+                        if columns and st.checkbox(f"{name} ({len(columns)})",
+                                                   value=name != "Position", key=f"cg-{name}"):
+                            chosen_cells.extend(columns)
+                    cneighbors = st.slider("Neighbours", 2, 100, 15, key="cell-nb") if method == "UMAP" else 15
+                    cmin_dist = st.slider("Minimum distance", 0.0, 1.0, 0.1, 0.05,
+                                          key="cell-md") if method == "UMAP" else 0.1
+                    two_d = int(cdims) == 2
                 else:
-                    matrix, sparse, constant, used = prepare_matrix(subset, chosen_cells, 0.5)
-                    if matrix is None:
-                        st.warning("Every chosen column was empty or constant.")
-                    else:
-                        points, names = embed(matrix, method, int(cdims),
-                                              int(min(cneighbors, len(subset) - 1)),
-                                              float(cmin_dist), 0)
-                        cell_plot = subset.assign(**{n: points[:, i] for i, n in enumerate(names)})
-                        title = f"{method} of {len(cell_plot):,} cells on {len(used)} features"
-                        cx, cy = names[0], names[1]
-                        cz = names[2] if len(names) > 2 else None
-                        st.caption("Features: " + ", ".join(used))
-            else:
-                cell_plot = subset.dropna(subset=[c for c in (cx, cy, cz) if c])
-                title = f"{len(cell_plot):,} cells"
-            if cell_plot is not None:
-                plot = cell_plot
-                if cell_draw:
-                    shown = plot
-                    if len(plot) > MAX_CELL_GLYPHS:
-                        shown = plot.sample(n=MAX_CELL_GLYPHS, random_state=0)
-                        st.caption(f"Outlines drawn for {MAX_CELL_GLYPHS:,} of {len(plot):,} cells.")
-                    figure, missing = outline_figure(
-                        shown, cx, cy, color_cells, colors, order, cell_outlines,
-                        cell_glyph, cell_true, title, key_of=cell_key, ident=ident, extra=extra,
+                    cmode = st.radio("Plot", ("2D", "3D"), horizontal=True, key="cell-mode")
+                    pick = [c for c in ("Equivalent diameter (µm)", "Mean intensity", "Circularity")
+                            if c in numeric_cells] + numeric_cells[:3]
+                    cx = st.selectbox("X", numeric_cells, index=numeric_cells.index(pick[0]), key="cx")
+                    cy = st.selectbox("Y", numeric_cells, index=numeric_cells.index(pick[1]), key="cy")
+                    cz = (st.selectbox("Z", numeric_cells, index=numeric_cells.index(pick[2]), key="cz")
+                          if cmode == "3D" else None)
+                    two_d = cmode == "2D"
+                if two_d:
+                    cell_draw, cell_glyph, cell_true = glyph_controls(
+                        "cell", bool(cell_outlines),
+                        "Cell outlines need the cell_outlines.npz from the report folder — "
+                        "give the workbook as a path, or upload the file.",
                     )
-                    if missing:
-                        st.caption(f"{missing} cell(s) have no stored outline.")
-                elif cz is not None and not two_d:
-                    figure = px.scatter_3d(plot, x=cx, y=cy, z=cz, title=title, **common)
-                    figure.update_traces(marker={"size": 3})
-                    figure.update_layout(height=700)
                 else:
-                    figure = px.scatter(plot, x=cx, y=cy, title=title, render_mode="webgl", **common)
-                    figure.update_traces(marker={"size": 6, "opacity": 0.8})
-                    figure.update_layout(height=620)
-            if figure is not None:
-                st.plotly_chart(figure, width="content" if cell_draw else "stretch",
-                                theme="streamlit")
+                    cell_draw = False
+
+                st.subheader("Clusters")
+                cluster_method = st.selectbox(
+                    "Clustering", CLUSTER_METHODS, key="clu-method",
+                    help="Over every cell of one region passing the filters, not only the "
+                     "sampled ones. "
+                         "Features are standardised first. The clusters colour the cells here "
+                         "and in the Atlas tab.",
+                )
+                cluster_features: list[str] = []
+                cluster_k, cluster_min = 4, 15
+                cluster_region = None
+                if cluster_method != "Off":
+                    here = list(dict.fromkeys(cells["Region"]))
+                    wanted = st.session_state.get("atlas-region", "CB")
+                    cluster_region = st.selectbox(
+                        "Cluster the cells of", here,
+                        index=here.index(wanted) if wanted in here else 0, key="clu-region",
+                        help="Only this region's cells are clustered; the others are "
+                             "shown as “not clustered”. Follows the Atlas region at first.",
+                    )
+                    for name, columns in cell_groups(cells).items():
+                        if columns and st.checkbox(f"{name} ({len(columns)})",
+                                                   value=name != "Position", key=f"clu-{name}"):
+                            cluster_features.extend(columns)
+                    if cluster_method == "HDBSCAN":
+                        cluster_min = st.slider(
+                            "Smallest cluster", 5, 200, 15, key="clu-min",
+                            help="HDBSCAN finds the number of clusters itself; cells in "
+                                 "no cluster are noise.",
+                        )
+                    else:
+                        cluster_k = st.slider("Clusters", 2, len(REGION_COLORS), 4, key="clu-k")
+
+            cluster_used: list[str] = []
+            if cluster_method != "Off":
+                matrix = None
+                members = cells["Region"] == cluster_region
+                clustered = cells[members]
+                if cluster_features and len(clustered) > max(cluster_k, 2):
+                    matrix, _sparse, _constant, cluster_used = prepare_matrix(
+                        clustered, cluster_features, 0.5
+                    )
+                if matrix is None:
+                    left.warning(f"Not enough {cluster_region} cells, or no feature group with "
+                                 "values, to cluster.")
+                else:
+                    found = cluster_cells(matrix, cluster_method, int(cluster_k), int(cluster_min), 0)
+                    names = pd.Series(NOT_CLUSTERED, index=cells.index, dtype=object)
+                    names[members] = cluster_names(found)
+                    cells = cells.assign(Cluster=names.to_numpy())
+                    clustered = cells[members]
+                    cluster_of.update(zip(zip(clustered["Sample"], clustered["Label"].astype(int)),
+                                          clustered["Cluster"]))
+            if color_cells == "Cluster" and "Cluster" not in cells:
+                color_cells = "Sample"
+
+            with right:
+                if len(cells) > cap:
+                    subset = cells.sample(n=int(cap), random_state=int(cell_seed)).reset_index(drop=True)
+                else:
+                    subset = cells
+                hover = {c: True for c in ("Sample", "Genotype", "Region", "Cluster", "Label") if c in subset}
+                hover.update({c: ":.4g" for c in CELL_HOVER if c in subset})
+                extra = [c for c in CELL_HOVER if c in subset]
+                ident = [c for c in ("Sample", "Genotype", "Region", "Cluster", "Label") if c in subset]
+                colors, order = color_map(subset, color_cells)
+                common = dict(
+                    color=color_cells, color_discrete_map=colors,
+                    category_orders={color_cells: order},
+                    hover_name="Sample", hover_data=hover,
+                )
+                figure = None
+                cell_plot = None
+                if view == "Embedding":
+                    cz = None
+                    if len(subset) < 4 or not chosen_cells:
+                        st.warning("Choose at least one feature group (and have four cells or more).")
+                    else:
+                        matrix, sparse, constant, used = prepare_matrix(subset, chosen_cells, 0.5)
+                        if matrix is None:
+                            st.warning("Every chosen column was empty or constant.")
+                        else:
+                            points, names = embed(matrix, method, int(cdims),
+                                                  int(min(cneighbors, len(subset) - 1)),
+                                                  float(cmin_dist), 0)
+                            cell_plot = subset.assign(**{n: points[:, i] for i, n in enumerate(names)})
+                            title = f"{method} of {len(cell_plot):,} cells on {len(used)} features"
+                            cx, cy = names[0], names[1]
+                            cz = names[2] if len(names) > 2 else None
+                            st.caption("Features: " + ", ".join(used))
+                else:
+                    cell_plot = subset.dropna(subset=[c for c in (cx, cy, cz) if c])
+                    title = f"{len(cell_plot):,} cells"
+                if cell_plot is not None:
+                    plot = cell_plot
+                    if cell_draw:
+                        shown = plot
+                        if len(plot) > MAX_CELL_GLYPHS:
+                            shown = plot.sample(n=MAX_CELL_GLYPHS, random_state=0)
+                            st.caption(f"Outlines drawn for {MAX_CELL_GLYPHS:,} of {len(plot):,} cells.")
+                        figure, missing = outline_figure(
+                            shown, cx, cy, color_cells, colors, order, cell_outlines,
+                            cell_glyph, cell_true, title, key_of=cell_key, ident=ident, extra=extra,
+                        )
+                        if missing:
+                            st.caption(f"{missing} cell(s) have no stored outline.")
+                    elif cz is not None and not two_d:
+                        figure = px.scatter_3d(plot, x=cx, y=cy, z=cz, title=title, **common)
+                        figure.update_traces(marker={"size": 3})
+                        figure.update_layout(height=700)
+                    else:
+                        figure = px.scatter(plot, x=cx, y=cy, title=title, render_mode="webgl", **common)
+                        figure.update_traces(marker={"size": 6, "opacity": 0.8})
+                        figure.update_layout(height=620)
+                if figure is not None:
+                    st.plotly_chart(figure, width="content" if cell_draw else "stretch",
+                                    theme="streamlit")
+                if "Cluster" in cells and cluster_used:
+                    with st.expander(f"Cluster profiles ({cluster_region})", expanded=False):
+                        clustered = cells[cells["Cluster"] != NOT_CLUSTERED]
+                        order = cluster_order(clustered["Cluster"])
+                        data = clustered[cluster_used].astype(float)
+                        spread = data.std().replace(0, np.nan)
+                        profile = ((data.groupby(clustered["Cluster"]).mean() - data.mean())
+                                   / spread).reindex(order)
+                        sizes = clustered["Cluster"].value_counts().reindex(order)
+                        st.caption(f"Mean of each feature per cluster, in standard deviations "
+                                   f"from the mean of all {cluster_region} cells.")
+                        profile.insert(0, "Cells", sizes)
+                        st.dataframe(
+                            profile.style.format("{:+.2f}", subset=cluster_used).background_gradient(
+                                cmap="RdBu_r", vmin=-2, vmax=2, subset=cluster_used
+                            ),
+                            width="stretch",
+                        )
+                        st.caption("Share of each genotype's cells in each cluster (%).")
+                        share = pd.crosstab(clustered["Cluster"], clustered["Genotype"],
+                                            normalize="columns") * 100
+                        st.dataframe(share.reindex(order).style.format("{:.1f}"), width="stretch")
+
+# -- atlas --------------------------------------------------------------------
+
+with atlas_tab:
+    from microscopy_viewer import shape_atlas as sa
+
+    atlas_regions = list(dict.fromkeys(region for (_s, region) in outlines))
+    if not atlas_regions:
+        st.info("The atlas needs the “Region outlines” sheet, which this workbook lacks.")
+    else:
+        left, right = st.columns([1, 3])
+        with left:
+            st.subheader("Mean shape")
+            region = st.selectbox(
+                "Region", atlas_regions, key="atlas-region",
+                index=atlas_regions.index("CB") if "CB" in atlas_regions else 0,
+                help="Its outline in every sample is registered into one mean shape.",
+            )
+            fit = st.radio(
+                "Registration", ("Shape (move, turn, scale)", "Rigid (move, turn)"),
+                help="Shape brings every outline to the same size, so the template is the "
+                     "mean shape at the mean size. Rigid keeps each sample's own size.",
+            )
+            reflect = st.checkbox("Allow mirroring", value=False,
+                                  help="For samples mounted the other way up.")
+            warp = st.checkbox(
+                "Bend each outline onto the mean (thin-plate spline)", value=True,
+                help="Cells follow their own outline's shape into the template, so a cell "
+                     "at the edge lands at the template's edge. Off: the move/turn/scale only.",
+            )
+            smoothing = st.slider("Bend smoothing", 0.0, 50.0, 0.0, 1.0, disabled=not warp,
+                                  help="0 bends the outline exactly onto the template; higher "
+                                       "values bend it less, ignoring small wiggles.")
+            st.subheader("Heatmap")
+            sigma = st.slider("Smoothing radius (µm)", 2.0, 60.0, 15.0, 1.0)
+            units = st.radio("Per sample", (sa.PER_AREA, sa.SHARE),
+                             help="Share compares where the cells are regardless of how many "
+                                  "each sample has.")
+            st.subheader("Cells")
+            draw = st.radio("Draw the cells", ("Hidden", "Dots", "Outlines"), horizontal=True,
+                            key="atlas-draw")
+            if draw == "Outlines" and not cell_outlines:
+                st.caption("Cell outlines need the cell_outlines.npz from the report folder; "
+                           "drawing dots instead.")
+            clusters_found = cluster_order(set(cluster_of.values()))
+            clustered_region = st.session_state.get("clu-region")
+            if clusters_found and clustered_region and clustered_region != region:
+                st.caption(f"The clusters are of the {clustered_region} cells; {region} cells "
+                           f"show as “{NOT_CLUSTERED}”. Pick {region} under Clusters in the "
+                           f"Cells tab to cluster them.")
+            atlas_color = st.selectbox(
+                "Colour the cells by",
+                (["Cluster"] if clusters_found else []) + ["Genotype", "Nothing"],
+                key="atlas-color",
+            )
+            heat_of = "All cells"
+            if clusters_found:
+                heat_of = st.selectbox("Heatmap of", ["All cells", *clusters_found], key="atlas-heat")
+            else:
+                st.caption("Turn clustering on in the Cells tab to colour the cells by "
+                           "cluster, or map one cluster.")
+
+        chosen = [s for s in samples if (s, region) in outlines]
+        genotype_of = dict(zip(features["Sample"], features["Genotype"]))
+        chosen = [s for s in chosen if genotype_of.get(s, ap.UNKNOWN_GENOTYPE) in genotypes]
+        with right:
+            if len(chosen) < 2:
+                st.warning(f"Registration needs the {region} outline of at least two samples.")
+            else:
+                shapes = {s: sa.largest_part(outlines[(s, region)]) for s in chosen}
+                several = [s for s in chosen if len(outlines[(s, region)]) > 1]
+                cell_points = {}
+                cell_labels = {}
+                if not cells_all.empty:
+                    inside = cells_all[cells_all["Region"] == region]
+                    for s in chosen:
+                        mine = inside[inside["Sample"] == s]
+                        # Same flip as the outlines: plot y grows upwards.
+                        cell_points[s] = np.column_stack(
+                            [mine["Centroid X (µm)"].to_numpy(float),
+                             -mine["Centroid Y (µm)"].to_numpy(float)]
+                        )
+                        cell_labels[s] = mine["Label"].astype(int).to_numpy()
+                try:
+                    atlas, template, registered, fits, mapped = register_region(
+                        shapes, cell_points, fit.startswith("Shape"), reflect, warp, smoothing
+                    )
+                except (ValueError, np.linalg.LinAlgError) as exc:
+                    st.error(f"Could not register the {region} outlines: {exc}")
+                    st.stop()
+                if several:
+                    st.caption(f"{', '.join(several)}: {region} has several parts; the largest is used.")
+
+                order = [g for g in ap.genotype_order([genotype_of.get(s) for s in chosen])]
+                styles = ap.genotype_styles(order)
+                by_genotype = {g: [s for s in chosen if genotype_of.get(s) == g] for g in order}
+
+                # Registered outlines, their genotype means and the template.
+                figure = go.Figure()
+                for g in order:
+                    color = styles[g][0]
+                    for k, s in enumerate(by_genotype[g]):
+                        line = closed(registered[s])
+                        figure.add_trace(go.Scatter(
+                            x=line[:, 0], y=line[:, 1], mode="lines", name=s,
+                            legendgroup=g, legendgrouptitle_text=g if k == 0 else None,
+                            line={"color": _alpha(color, 0.45), "width": 1.5},
+                            hovertemplate=f"{s}<extra>{g}</extra>",
+                        ))
+                    mean = np.mean([registered[s] for s in by_genotype[g]], axis=0)
+                    line = closed(mean)
+                    figure.add_trace(go.Scatter(
+                        x=line[:, 0], y=line[:, 1], mode="lines", name=f"{g} mean",
+                        legendgroup=g, line={"color": color, "width": 3},
+                        hovertemplate=f"mean of {len(by_genotype[g])} {g}<extra></extra>",
+                    ))
+                line = closed(template)
+                figure.add_trace(go.Scatter(
+                    x=line[:, 0], y=line[:, 1], mode="lines", name="Template (all samples)",
+                    line={"color": TEMPLATE_COLOR, "width": 3, "dash": "dash"},
+                    hovertemplate="template<extra></extra>",
+                ))
+                figure.update_layout(
+                    title=f"{region} of {len(chosen)} samples, registered", height=620,
+                    margin={"l": 10, "r": 10, "t": 50, "b": 10}, legend={"groupclick": "toggleitem"},
+                )
+                scale_bar(figure, template)
+                equal_axes(figure, 1)
+                shape_col, fit_col = st.columns([3, 2])
+                with shape_col:
+                    st.plotly_chart(figure, width="stretch", theme="streamlit")
+                with fit_col:
+                    fit_table = pd.DataFrame(
+                        [{"Sample": s, "Genotype": genotype_of.get(s),
+                          "Cells": len(cell_points.get(s, ())), **fits[s]} for s in chosen]
+                    )
+                    st.dataframe(
+                        fit_table.style.format({"Scale": "{:.3f}", "Rotation (°)": "{:.1f}",
+                                                "Residual (µm)": "{:.1f}"}),
+                        hide_index=True, width="stretch",
+                    )
+                    st.caption(
+                        "Residual: RMS distance of each registered outline from the "
+                        "template before bending — a large one is a sample whose outline "
+                        "differs in shape, or was drawn differently."
+                    )
+
+                if not any(len(p) for p in mapped.values()):
+                    st.info(f"No cells were detected in {region} in these samples.")
+                else:
+                    def group_of(sample: str, label: int) -> str:
+                        if atlas_color == "Cluster":
+                            return cluster_of.get((sample, int(label)), NOT_CLUSTERED)
+                        if atlas_color == "Genotype":
+                            return genotype_of.get(sample, ap.UNKNOWN_GENOTYPE)
+                        return PLAIN
+
+                    groups = {s: np.array([group_of(s, lab) for lab in cell_labels.get(s, ())], dtype=object)
+                              for s in mapped}
+                    if atlas_color == "Cluster":
+                        overlay_colors = cluster_colors(clusters_found + [UNCLUSTERED, NOT_CLUSTERED])
+                    else:
+                        overlay_colors = {g: c for g, (c, _m) in styles.items()}
+
+                    # Each cell's own outline, carried in with its sample's
+                    # transform: all of a sample's outlines in one go.
+                    cell_polys: dict[tuple[str, int], np.ndarray] = {}
+                    if draw == "Outlines" and cell_outlines:
+                        for s in mapped:
+                            labels_here = [int(lab) for lab in cell_labels.get(s, ())
+                                           if cell_outlines.get((s, int(lab)))]
+                            if not labels_here:
+                                continue
+                            polys = [cell_outlines[(s, lab)][0] for lab in labels_here]
+                            moved = atlas.map_points(s, np.vstack(polys))
+                            bounds = np.cumsum([0] + [len(p) for p in polys])
+                            for lab, a, b in zip(labels_here, bounds[:-1], bounds[1:]):
+                                cell_polys[(s, lab)] = moved[a:b]
+
+                    def overlay_for(members) -> dict:
+                        out: dict = {}
+                        for s in members:
+                            for point, lab, g in zip(mapped.get(s, ()), cell_labels.get(s, ()),
+                                                     groups.get(s, ())):
+                                entry = out.setdefault(g, {"points": [], "outlines": []})
+                                entry["points"].append(point)
+                                poly = cell_polys.get((s, int(lab)))
+                                if poly is not None:
+                                    entry["outlines"].append(poly)
+                        order_here = (cluster_order(out) if atlas_color == "Cluster" else list(out))
+                        return {g: out[g] for g in order_here}
+
+                    ramp = (DENSITY_SCALE_GREY if draw != "Hidden" and atlas_color != "Nothing"
+                            else DENSITY_SCALE)
+                    heat_points = mapped
+                    if heat_of != "All cells":
+                        heat_points = {
+                            s: p[np.array([cluster_of.get((s, int(lab))) == heat_of
+                                           for lab in cell_labels.get(s, ())], dtype=bool)]
+                            if len(p) else p
+                            for s, p in mapped.items()
+                        }
+                    grid = sa.density_maps(template, heat_points, sigma=sigma, units=units)
+                    unit = "cells / 1000 µm²" if units == sa.PER_AREA else "% / 1000 µm²"
+                    panels = {f"{g} (n={len(by_genotype[g])})": grid.mean_of(by_genotype[g])
+                              for g in order}
+                    top = max((float(np.nanmax(v)) for v in grid.maps.values() if np.isfinite(v).any()),
+                              default=0.0)
+                    top_mean = max((float(np.nanmax(v)) for v in panels.values() if np.isfinite(v).any()),
+                                   default=0.0)
+                    overlay = None
+                    if draw != "Hidden":
+                        overlay = {f"{g} (n={len(by_genotype[g])})": overlay_for(by_genotype[g])
+                                   for g in order}
+                    st.plotly_chart(
+                        density_figure(grid, panels, template, colorscale=ramp,
+                                       zmin=0.0, zmax=top_mean or 1.0, unit=unit, cells=overlay,
+                                       colors=overlay_colors),
+                        width="stretch", theme="streamlit",
+                    )
+                    st.caption(
+                        (f"Heatmap of cluster {heat_of} only. " if heat_of != "All cells" else "")
+                        + f"Mean over the samples of each genotype, each sample weighed the "
+                        f"same; smoothed over {sigma:g} µm. Densities are per µm² of the "
+                        f"template" + (", which the bending stretches or squeezes a little "
+                                       "from each sample's own area." if warp else ".")
+                    )
+
+                    if len(order) >= 2:
+                        pair = st.columns(2)
+                        base = pair[0].selectbox("Compare", order, index=0, key="atlas-base")
+                        other = pair[1].selectbox("with", [g for g in order if g != base],
+                                                  index=0, key="atlas-other")
+                        difference = grid.mean_of(by_genotype[other]) - grid.mean_of(by_genotype[base])
+                        span = float(np.nanmax(np.abs(difference))) if np.isfinite(difference).any() else 1.0
+                        st.plotly_chart(
+                            density_figure(grid, {f"{other} − {base}": difference}, template,
+                                           colorscale=DIFFERENCE_SCALE, zmin=-span or -1.0,
+                                           zmax=span or 1.0, unit=unit),
+                            width="stretch", theme="streamlit",
+                        )
+                        st.caption(f"Red: more cells in {other} than in {base} there; "
+                                   f"blue: fewer. With few samples per genotype, read this "
+                                   f"next to the per-sample maps below.")
+
+                    with st.expander("Every sample"):
+                        per_sample = {f"{s} ({genotype_of.get(s)})": grid.maps[s]
+                                      for g in order for s in by_genotype[g] if s in grid.maps}
+                        sample_cells = None
+                        if draw != "Hidden":
+                            sample_cells = {f"{s} ({genotype_of.get(s)})": overlay_for([s])
+                                            for g in order for s in by_genotype[g] if s in mapped}
+                        st.plotly_chart(
+                            density_figure(grid, per_sample, template, colorscale=ramp,
+                                           zmin=0.0, zmax=top or 1.0, unit=unit, cells=sample_cells,
+                                           colors=overlay_colors, height=480,
+                                           columns=min(4, len(per_sample))),
+                            width="stretch", theme="streamlit",
+                        )
+
+                    mapped_rows = pd.concat(
+                        [pd.DataFrame({"Sample": s, "Genotype": genotype_of.get(s),
+                                       "Label": cell_labels[s],
+                                       **({"Cluster": [cluster_of.get((s, int(lab)), NOT_CLUSTERED)
+                                                       for lab in cell_labels[s]]}
+                                          if clusters_found else {}),
+                                       "Template X (µm)": p[:, 0], "Template Y (µm)": -p[:, 1]})
+                         for s, p in mapped.items() if len(p)],
+                        ignore_index=True,
+                    )
+                    downloads = st.columns(2)
+                    downloads[0].download_button(
+                        "Cells in template space (CSV)", mapped_rows.to_csv(index=False),
+                        file_name=f"{region}_cells_in_template.csv",
+                    )
+                    downloads[1].download_button(
+                        "Template outline (CSV)",
+                        pd.DataFrame({"X (µm)": template[:, 0], "Y (µm)": -template[:, 1]}).to_csv(index=False),
+                        file_name=f"{region}_template.csv",
+                    )
+
+# -- explain ------------------------------------------------------------------
+
+with explain_tab:
+    try:
+        import shap  # noqa: F401
+    except ImportError:
+        st.info("The Explain tab needs the `shap` package: `pip install shap`.")
+    else:
+        if cells_all.empty:
+            st.info("This workbook has no “Objects” sheet — no cells to explain.")
+        else:
+            left, right = st.columns([1, 3])
+            with left:
+                st.subheader("Explain")
+                targets = (["Cluster"] if cluster_of else []) + ["Genotype"]
+                target_name = st.radio("What tells the cells apart", targets, key="shap-target",
+                                       help="Clusters come from the Cells tab.")
+                if not cluster_of:
+                    st.caption("Turn clustering on in the Cells tab to explain the clusters.")
+                explain_regions = list(dict.fromkeys(cells_all["Region"]))
+                if target_name == "Cluster":
+                    explain_region = st.session_state.get("clu-region")
+                    st.caption(f"The clustered cells: {explain_region}.")
+                else:
+                    wanted = st.session_state.get("atlas-region", "CB")
+                    explain_region = st.selectbox(
+                        "Cells of", explain_regions,
+                        index=explain_regions.index(wanted) if wanted in explain_regions else 0,
+                        key="shap-region",
+                    )
+                pool = cells_all[
+                    (cells_all["Region"] == explain_region)
+                    & cells_all["Genotype"].isin(genotypes)
+                    & cells_all["Sample"].isin(samples)
+                ].reset_index(drop=True)
+                if target_name == "Cluster":
+                    pool = pool.assign(Cluster=[
+                        cluster_of.get((sm, int(lab)))
+                        for sm, lab in zip(pool["Sample"], pool["Label"])
+                    ])
+                    pool = pool[pool["Cluster"].notna() & (pool["Cluster"] != UNCLUSTERED)]
+                    pool = pool.reset_index(drop=True)
+                explain_features: list[str] = []
+                for name, columns in cell_groups(pool).items():
+                    if columns and st.checkbox(f"{name} ({len(columns)})",
+                                               value=name != "Position", key=f"shap-{name}"):
+                        explain_features.extend(columns)
+                n_explain = st.slider("Cells to explain", 100, 3000, 1000, 100, key="shap-n",
+                                      help="SHAP values are computed for a random subset; the "
+                                           "model is trained on every cell.")
+                top_n = st.slider("Features shown", 5, 30, 12, key="shap-top")
+
+            with right:
+                labels = pool[target_name].astype(str) if len(pool) else pd.Series(dtype=str)
+                classes_present = labels.unique()
+                if len(pool) < 20 or len(classes_present) < 2 or not explain_features:
+                    st.warning("Needs at least 20 cells of two or more classes, and a feature group.")
+                else:
+                    data = pool[explain_features].astype(float)
+                    data = data.loc[:, data.notna().any() & (data.std() > 0)]
+                    used = list(data.columns)
+                    data = data.fillna(data.median())
+                    groups = pool["Sample"].to_numpy() if target_name == "Genotype" else None
+                    result = None
+                    try:
+                        result = explain_cells(
+                            data.to_numpy(), labels.to_numpy(), groups, int(min(n_explain, len(pool))), 0
+                        )
+                    except ValueError as exc:
+                        st.error(f"Could not train the model: {exc}")
+                    if result is not None:
+                        score, explained, values, classes = result
+
+                        if target_name == "Cluster":
+                            order = cluster_order(classes)
+                            colors = cluster_colors(order)
+                        else:
+                            order = ap.genotype_order(classes)
+                            colors = {g: c for g, (c, _m) in ap.genotype_styles(order).items()}
+                        index = {c: i for i, c in enumerate(classes)}
+                        chance = 1.0 / len(classes)
+                        st.metric(
+                            "Balanced accuracy, cross-validated",
+                            "—" if not np.isfinite(score) else f"{score:.0%}",
+                            None if not np.isfinite(score) else f"{score - chance:+.0%} vs chance ({chance:.0%})",
+                        )
+                        st.caption(
+                            ("Whole samples held out in turn: the model is scored on fish it has "
+                             "never seen. " if groups is not None else
+                             "Clusters were found from these same features, so a high score is "
+                             "expected; the point is which features the boundaries use. ")
+                            + f"{len(pool):,} {explain_region} cells, {len(used)} features."
+                        )
+                        if groups is not None and pool["Sample"].nunique() < 6:
+                            st.caption(f"Only {pool['Sample'].nunique()} samples: read the "
+                                       "features as leads, not findings.")
+
+                        # Global importance: mean |SHAP| per feature, per class.
+                        importance = np.abs(values).mean(axis=0)  # features × classes
+                        binary = len(classes) == 2
+                        total = importance[:, 0] if binary else importance.sum(axis=1)
+                        top = np.argsort(total)[::-1][: int(top_n)]
+                        figure = go.Figure()
+                        if binary:
+                            figure.add_trace(go.Bar(
+                                y=[used[i] for i in top], x=total[top], orientation="h",
+                                marker={"color": "#2a78d6"}, name="mean |SHAP|",
+                                hovertemplate="%{y}: %{x:.3g}<extra></extra>",
+                            ))
+                        else:
+                            for c in order:
+                                figure.add_trace(go.Bar(
+                                    y=[used[i] for i in top], x=importance[top, index[c]],
+                                    orientation="h", name=str(c),
+                                    marker={"color": colors.get(c, NEUTRAL),
+                                            "line": {"color": "white", "width": 1}},
+                                    hovertemplate=f"{c} · %{{y}}: %{{x:.3g}}<extra></extra>",
+                                ))
+                        figure.update_layout(
+                            barmode="stack", title="Which features the model leans on",
+                            xaxis_title="mean |SHAP value| (change in predicted probability)",
+                            yaxis={"autorange": "reversed", "automargin": True},
+                            xaxis={"automargin": True}, legend={"traceorder": "normal"},
+                            height=max(320, 28 * len(top) + 120),
+                            margin={"l": 10, "r": 10, "t": 50, "b": 10},
+                        )
+                        st.plotly_chart(figure, width="stretch", theme="streamlit")
+
+                        # Beeswarm for one class: each explained cell, by feature.
+                        if binary:
+                            focus = order[-1]
+                            st.caption(f"Positive SHAP values push a cell towards {focus}, "
+                                       f"negative towards {order[0]}.")
+                        else:
+                            focus = st.selectbox("Class", order, key="shap-class")
+                        shown = values[:, :, index[focus]]
+                        subset = data.iloc[explained]
+                        rng = np.random.default_rng(0)
+                        bees = go.Figure()
+                        for rank, i in enumerate(top):
+                            feature = subset.iloc[:, i].to_numpy()
+                            spread = np.ptp(feature)
+                            tone = (feature - feature.min()) / spread if spread > 0 else np.zeros_like(feature)
+                            bees.add_trace(go.Scatter(
+                                x=shown[:, i], y=rank + rng.uniform(-0.3, 0.3, len(feature)),
+                                mode="markers", showlegend=False,
+                                marker={"size": 5, "color": tone, "colorscale": VALUE_SCALE,
+                                        "cmin": 0, "cmax": 1, "opacity": 0.8,
+                                        "colorbar": {"title": {"text": "feature value"},
+                                                     "tickvals": [0, 1], "ticktext": ["low", "high"]}
+                                        if rank == 0 else None,
+                                        "showscale": rank == 0},
+                                customdata=feature,
+                                hovertemplate=f"{used[i]} = %{{customdata:.4g}}<br>SHAP %{{x:.3g}}<extra></extra>",
+                            ))
+                        bees.add_vline(x=0, line={"color": NEUTRAL, "width": 1})
+                        bees.update_layout(
+                            title=f"How each feature moves cells towards {focus}",
+                            xaxis_title=f"SHAP value for {focus}",
+                            yaxis={"tickvals": list(range(len(top))), "ticktext": [used[i] for i in top],
+                                   "autorange": "reversed", "showgrid": False, "zeroline": False,
+                                   "automargin": True},
+                            xaxis={"automargin": True},
+                            height=max(320, 30 * len(top) + 120),
+                            margin={"l": 10, "r": 10, "t": 50, "b": 10},
+                        )
+                        st.plotly_chart(bees, width="stretch", theme="streamlit")
+
+                        # Dependence: one feature's value against its SHAP value.
+                        feature_name = st.selectbox("Feature", [used[i] for i in top], key="shap-feature")
+                        fi = used.index(feature_name)
+                        true_class = labels.iloc[explained].to_numpy()
+                        dep = go.Figure()
+                        for c in order:
+                            mask = true_class == c
+                            if not mask.any():
+                                continue
+                            dep.add_trace(go.Scatter(
+                                x=subset.iloc[:, fi].to_numpy()[mask], y=shown[mask, fi],
+                                mode="markers", name=str(c),
+                                marker={"size": 7, "color": colors.get(c, NEUTRAL), "opacity": 0.75,
+                                        "line": {"width": 1, "color": "white"}},
+                                hovertemplate=f"{c}<br>{feature_name} %{{x:.4g}}<br>SHAP %{{y:.3g}}<extra></extra>",
+                            ))
+                        dep.add_hline(y=0, line={"color": NEUTRAL, "width": 1})
+                        dep.update_layout(
+                            title=f"{feature_name}: value against its push towards {focus}",
+                            xaxis_title=feature_name, yaxis_title=f"SHAP value for {focus}",
+                            legend_title_text=f"Actual {target_name.lower()}", height=480,
+                            xaxis={"automargin": True}, yaxis={"automargin": True},
+                            margin={"l": 10, "r": 10, "t": 50, "b": 10},
+                        )
+                        st.plotly_chart(dep, width="stretch", theme="streamlit")
+
+                        table = pd.DataFrame(importance, index=used, columns=[str(c) for c in classes])
+                        table = table[[str(c) for c in order]].assign(**{"Total": total})
+                        st.download_button(
+                            "Mean |SHAP| per feature (CSV)",
+                            table.sort_values("Total", ascending=False).to_csv(),
+                            file_name=f"shap_{target_name.lower()}_{explain_region}.csv",
+                        )
 
 # -- table --------------------------------------------------------------------
 
