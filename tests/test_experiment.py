@@ -154,6 +154,8 @@ def test_listing_a_folder() -> None:
         (root / "day2").mkdir()
         _container(root / "day2", "fish_3.ims")
         (root / "notes.txt").write_text("ignored")
+        # What macOS writes beside every file on an exFAT drive.
+        (root / "._fish_1.ims").write_bytes(b"\x00\x05\x16\x07")
 
         flat = ex.list_files(root, recursive=False)
         check([path.name for path in flat] == ["fish_1.ims", "fish_2.ims"],

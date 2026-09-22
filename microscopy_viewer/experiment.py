@@ -106,6 +106,10 @@ def list_files(folder: str | Path, recursive: bool = True) -> list[Path]:
     they are left in the list rather than filtered, because a stub among the
     samples is something to notice, and :func:`describe_file` will say what is
     wrong with it.
+
+    macOS's ``._`` companion files (AppleDouble metadata it writes beside every
+    file on exFAT and FAT drives) are skipped: they share the dataset's
+    extension but hold no image.
     """
     from .loaders import is_supported
 
@@ -116,7 +120,7 @@ def list_files(folder: str | Path, recursive: bool = True) -> list[Path]:
     found = [
         path
         for path in sorted(root.glob(pattern), key=lambda p: (str(p.parent).lower(), p.name.lower()))
-        if path.is_file() and is_supported(path)
+        if path.is_file() and is_supported(path) and not path.name.startswith("._")
     ]
     return found
 
