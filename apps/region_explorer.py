@@ -22,6 +22,10 @@ and brain region, every column a number) and offers:
   genotypes, apart from the cells' measurements — which features matter, and
   which way. Genotype is scored with whole samples held out, so a model cannot
   pass by recognising the fish.
+* **Plots**: one variable of the regions, the cells or the cell clusters as a
+  box or violin plot per genotype, with every sample as a dot, a one-way
+  ANOVA (or Welch / Kruskal-Wallis) and Tukey post-hoc pairs. Any number of
+  genotype groups.
 * **Table** of exactly the rows being plotted.
 
 In 2D, each region can be drawn as its own outline instead of a dot, taken from
@@ -53,11 +57,48 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from microscopy_viewer import analysis_plots as ap  # noqa: E402
 
-SHEET = "Region features"
-IDENTITY = ("Sample", "Genotype", "Region", "Label map")
+from explorer_common import (  # noqa: E402  shared with simple_explorer.py
+    CELL_CHANNEL_STATS,
+    CELL_HOVER,
+    CELL_IDENTITY,
+    CELL_INTENSITIES,
+    CELL_POSITION,
+    CELL_SHAPE,
+    CELL_TESTS,
+    HOVER,
+    IDENTITY,
+    INK,
+    MIXED,
+    NEUTRAL,
+    REGION_COLORS,
+    SHEET,
+    SYMBOLS,
+    TESTS,
+    anova_table,
+    cell_groups,
+    compare_groups,
+    comparison_figure,
+    genotype_of_sample,
+    hover_columns,
+    mixed_model_test,
+    mixed_pairs,
+    mixed_table,
+    default_variable,
+    numeric_columns,
+    plottable,
+    posthoc_pairs,
+    read_cells,
+    read_features,
+    stars,
+    _alpha,
+    _mixed_fit,
+)
+
 
 #: Columns that say where an outline is or which way it points, rather than
 #: what it is like. Off by default: two fish mounted differently would otherwise
@@ -70,11 +111,8 @@ SHAPE = (
 )
 INTENSITY_STATS = ("Mean", "Median", "SD", "CV", "P5", "P95", "P99", "Integrated")
 
-#: Region colours when colouring by region: the reference categorical order.
-REGION_COLORS = ap.GENOTYPE_COLORS + ap.EXTRA_COLORS
-SYMBOLS = ("circle", "square", "diamond", "cross", "x", "triangle-up", "triangle-down", "star")
 
-HOVER = ("Objects", "Region area (µm²)", "Objects per mm²")
+
 OUTLINES = "Region outlines"
 
 #: Most cell outlines drawn at once. Each is its own filled path in the browser;
@@ -92,15 +130,6 @@ MARGIN = {"l": 70, "r": 200, "t": 50, "b": 60}
 # ---------------------------------------------------------------------------
 
 
-@st.cache_data(show_spinner=False)
-def read_features(source: bytes | str) -> pd.DataFrame:
-    handle = io.BytesIO(source) if isinstance(source, bytes) else source
-    frame = pd.read_excel(handle, sheet_name=SHEET)
-    for column in ("Sample", "Region", "Label map"):
-        if column in frame:
-            frame[column] = frame[column].astype(str)
-    frame["Genotype"] = [ap.genotype_label(value) for value in frame.get("Genotype", "")]
-    return frame
 
 
 @st.cache_data(show_spinner=False)
@@ -121,35 +150,6 @@ def read_outlines(source: bytes | str) -> dict[tuple[str, str], list[np.ndarray]
     return outlines
 
 
-@st.cache_data(show_spinner="Reading cells…")
-def read_cells(source: bytes | str) -> pd.DataFrame:
-    """The Objects sheet joined with Cell shapes; empty if either is missing."""
-    try:
-        objects = pd.read_excel(io.BytesIO(source) if isinstance(source, bytes) else source,
-                                sheet_name="Objects")
-    except ValueError:
-        return pd.DataFrame()
-    try:
-        shapes = pd.read_excel(io.BytesIO(source) if isinstance(source, bytes) else source,
-                               sheet_name="Cell shapes")
-    except ValueError:
-        shapes = pd.DataFrame(columns=["Sample", "Label"])
-    for frame in (objects, shapes):
-        frame["Sample"] = frame["Sample"].astype(str)
-    shapes = shapes.drop(columns=["Genotype"], errors="ignore")
-    cells = objects.merge(shapes, on=["Sample", "Label"], how="left")
-    try:
-        channels = pd.read_excel(io.BytesIO(source) if isinstance(source, bytes) else source,
-                                 sheet_name=CELL_INTENSITIES)
-    except ValueError:  # workbooks from before every channel was measured per cell
-        channels = pd.DataFrame()
-    if not channels.empty:
-        channels["Sample"] = channels["Sample"].astype(str)
-        channels = channels.drop(columns=["Genotype"], errors="ignore")
-        cells = cells.merge(channels, on=["Sample", "Label"], how="left")
-    cells["Genotype"] = [ap.genotype_label(value) for value in cells.get("Genotype", "")]
-    cells["Region"] = cells.get("Region", "").astype(str)
-    return cells
 
 
 @st.cache_data(show_spinner="Reading cell outlines…")
@@ -165,32 +165,9 @@ def read_cell_outlines(source: bytes | str) -> dict[tuple[str, int], list[np.nda
     return flipped
 
 
-#: Sheet of every channel's intensity inside every cell.
-CELL_INTENSITIES = "Cell intensities"
-CELL_CHANNEL_STATS = (" Mean", " SD", " Max", " Integrated")
-
-#: Cell columns that say where a cell is, not what it is like.
-CELL_POSITION = ("Centroid Z (µm)", "Centroid Y (µm)", "Centroid X (µm)", "Orientation (°)")
-CELL_SHAPE = (
-    "Footprint area (µm²)", "Perimeter (µm)", "Circularity", "Solidity",
-    "Major axis (µm)", "Minor axis (µm)", "Aspect ratio", "Eccentricity",
-)
-CELL_IDENTITY = ("Sample", "Genotype", "Channel", "Region", "Label")
-CELL_HOVER = ("Volume (µm³)", "Area (µm²)", "Equivalent diameter (µm)", "Mean intensity",
-              "Circularity")
 
 
-def cell_groups(cells: pd.DataFrame) -> dict[str, list[str]]:
-    numeric = [
-        c for c in cells.columns
-        if c not in CELL_IDENTITY and pd.api.types.is_numeric_dtype(cells[c])
-    ]
-    shape = [c for c in numeric if c in CELL_SHAPE]
-    position = [c for c in numeric if c in CELL_POSITION]
-    channels = [c for c in numeric if c.endswith(CELL_CHANNEL_STATS) and c not in shape]
-    measured = [c for c in numeric if c not in shape and c not in position and c not in channels]
-    return {"Size & intensity": measured, "Channel intensities": channels,
-            "Cell shape": shape, "Position": position}
+
 
 
 @st.cache_data(show_spinner="Embedding cells…")
@@ -204,11 +181,6 @@ def embed(matrix: np.ndarray, method: str, dims: int, neighbors: int, min_dist: 
     return run_umap(matrix, neighbors, min_dist, dims, seed), [f"UMAP {i + 1}" for i in range(dims)]
 
 
-def numeric_columns(frame: pd.DataFrame) -> list[str]:
-    return [
-        column for column in frame.columns
-        if column not in IDENTITY and pd.api.types.is_numeric_dtype(frame[column])
-    ]
 
 
 def channel_columns(frame: pd.DataFrame) -> dict[str, list[str]]:
@@ -238,13 +210,34 @@ def feature_groups(frame: pd.DataFrame) -> dict[str, list[str]]:
     return groups
 
 
+# -- one variable, compared between genotypes ---------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # -- clustering ---------------------------------------------------------------
 
 CLUSTER_METHODS = ("Off", "K-means", "Gaussian mixture", "HDBSCAN")
 #: Cells HDBSCAN calls noise, and clusters past the eighth: they share grey
 #: rather than get a ninth, generated hue.
 UNCLUSTERED = "Noise / other"
-NEUTRAL = "#8a8983"
 #: Cells outside the region that was clustered: lighter, so they recede.
 NOT_CLUSTERED = "Not clustered"
 FAINT = "#c9c8c3"
@@ -264,6 +257,44 @@ def cluster_cells(matrix: np.ndarray, method: str, k: int, min_size: int, seed: 
     from sklearn.cluster import HDBSCAN
 
     return HDBSCAN(min_cluster_size=min_size).fit_predict(matrix)
+
+
+#: What each feature group brings to a clustering, for its tooltip.
+GROUP_HELP = {
+    "Size & intensity": "Volume, area, diameter and the segmented channel's intensity. "
+                        "Clusters on these mostly split big/bright from small/dim cells.",
+    "Channel intensities": "Every channel's mean, SD, max and integrated intensity per "
+                           "cell — the one to tick to group cells by marker expression.",
+    "Cell shape": "Outline shape seen from above: circularity, solidity, elongation. "
+                  "Separates round nuclei from elongated or irregular ones.",
+    "Position": "Where the cell is in the image. Off by default: fish mounted "
+                "differently would cluster by mounting.",
+}
+
+
+@st.cache_data(show_spinner="Scoring cluster counts…")
+def score_cluster_counts(matrix: np.ndarray, method: str, seed: int) -> pd.DataFrame:
+    """Silhouette (and BIC for a mixture) for 2 to 8 clusters.
+
+    On at most 3000 cells: the silhouette compares every pair of cells.
+    """
+    from sklearn.metrics import silhouette_score
+
+    rows = np.random.default_rng(seed).permutation(len(matrix))[:3000]
+    sample = matrix[rows]
+    out = []
+    for k in range(2, len(REGION_COLORS) + 1):
+        if k >= len(sample):
+            break
+        labels = cluster_cells(sample, method, k, 0, seed)
+        entry = {"Clusters": k, "Silhouette": float(silhouette_score(sample, labels))}
+        if method == "Gaussian mixture":
+            from sklearn.mixture import GaussianMixture
+
+            model = GaussianMixture(n_components=k, random_state=seed).fit(sample)
+            entry["BIC"] = float(model.bic(sample))
+        out.append(entry)
+    return pd.DataFrame(out)
 
 
 def cluster_names(labels) -> list[str]:
@@ -289,6 +320,186 @@ def cluster_order(values) -> list[str]:
 def cluster_colors(order) -> dict[str, str]:
     special = {UNCLUSTERED: NEUTRAL, NOT_CLUSTERED: FAINT}
     return {c: special.get(c) or REGION_COLORS[int(c[1:]) - 1] for c in order}
+
+
+def cluster_distribution_figure(clustered: pd.DataFrame, region: str, measure: str):
+    """Per genotype, how a region's cells split between the clusters.
+
+    One bar per genotype and cluster at the mean over that genotype's samples,
+    with each sample as a dot on it: with a handful of fish per genotype, the
+    spread between them is the thing to read the difference against.
+    """
+    order = cluster_order(clustered["Cluster"])
+    genotypes_here = ap.genotype_order(clustered["Genotype"])
+    styles = ap.genotype_styles(genotypes_here)
+    counts = pd.crosstab([clustered["Genotype"], clustered["Sample"]], clustered["Cluster"])
+    counts = counts.reindex(columns=order, fill_value=0)
+    share = measure.startswith("Share")
+    values = counts.div(counts.sum(axis=1), axis=0) * 100 if share else counts
+    unit = "% of the sample's cells" if share else "cells"
+    figure = go.Figure()
+    width = 0.8 / max(len(genotypes_here), 1)
+    for k, genotype in enumerate(genotypes_here):
+        if genotype not in values.index.get_level_values(0):
+            continue
+        per_sample = values.xs(genotype, level=0)
+        color = styles[genotype][0]
+        offset = (k - (len(genotypes_here) - 1) / 2) * width
+        figure.add_trace(go.Bar(
+            x=np.arange(len(order)) + offset, y=per_sample.mean(axis=0).to_numpy(),
+            name=genotype, width=width * 0.9, legendgroup=genotype, customdata=order,
+            marker={"color": _alpha(color, 0.55), "line": {"color": color, "width": 1.5}},
+            hovertemplate=f"{genotype} · %{{customdata}}: %{{y:.3g}} {unit} "
+                          f"(mean of {len(per_sample)})<extra></extra>",
+        ))
+        jitter = np.random.default_rng(k).uniform(-width * 0.25, width * 0.25, len(per_sample))
+        for c_index, cluster in enumerate(order):
+            figure.add_trace(go.Scatter(
+                x=c_index + offset + jitter, y=per_sample[cluster].to_numpy(), mode="markers",
+                legendgroup=genotype, showlegend=False, text=list(per_sample.index),
+                marker={"size": 8, "color": color, "line": {"color": "white", "width": 1.5}},
+                hovertemplate=f"%{{text}} · {cluster}: %{{y:.3g}} {unit}<extra>{genotype}</extra>",
+            ))
+    figure.update_layout(
+        barmode="overlay",
+        title=f"How each genotype's {region} cells split between the clusters",
+        xaxis={"title": "Cluster", "tickvals": list(range(len(order))), "ticktext": order,
+               "showgrid": False, "zeroline": False, "automargin": True},
+        yaxis={"title": unit, "automargin": True, "rangemode": "tozero"},
+        legend_title_text="Genotype", height=440, margin={"l": 10, "r": 10, "t": 50, "b": 10},
+    )
+    return figure
+
+
+@st.cache_data(show_spinner=False)
+def read_samples_sheet(source: bytes | str) -> pd.DataFrame:
+    try:
+        frame = pd.read_excel(io.BytesIO(source) if isinstance(source, bytes) else source,
+                              sheet_name="Samples")
+    except ValueError:
+        return pd.DataFrame(columns=["Sample", "File", "Saved as"])
+    frame["Sample"] = frame["Sample"].astype(str)
+    return frame
+
+
+def locate_sample(sample: str, recorded, report: Path | None) -> Path | None:
+    """The sample's ``.ims``: where the workbook says, else beside the report folder.
+
+    A report folder sits inside the experiment folder, so a drive mounted under
+    a new name still finds its files one level up.
+    """
+    candidates = [Path(recorded)] if isinstance(recorded, str) and recorded else []
+    if report is not None:
+        candidates += [report.parent / f"{sample}.ims", report.parent.parent / f"{sample}.ims"]
+    return next((c for c in candidates if c.is_file()), None)
+
+
+def write_clusters_panel(source, cells: pd.DataFrame, region: str, method: str, k: int,
+                         min_size: int, features: list[str]) -> None:
+    """The button that writes the clusters back into each sample's ``.ims``."""
+    from microscopy_viewer import analysis as an
+
+    clustered = cells[cells["Cluster"] != NOT_CLUSTERED]
+    order = cluster_order(clustered["Cluster"])
+    number = {c: i + 1 for i, c in enumerate(order)}
+    colors = cluster_colors(order)
+    sheet = read_samples_sheet(source)
+    report = Path(source).parent if isinstance(source, str) else None
+    key = f"{region} clusters"
+    with st.expander("Write the clusters into the .ims files"):
+        st.caption(
+            f"Adds a label map “{key}” to each sample: every clustered {region} cell "
+            f"keeps its outline and takes its cluster's number (C1 = 1, …"
+            + (f", {UNCLUSTERED} = {number[UNCLUSTERED]}" if UNCLUSTERED in number else "")
+            + "); every other cell is background. The viewer draws it in these same "
+            "colours. Running again replaces it; the original label map is not touched."
+        )
+        targets = []
+        for sample in list(dict.fromkeys(clustered["Sample"])):
+            row = sheet[sheet["Sample"] == sample]
+            recorded = row["File"].iloc[0] if len(row) and "File" in row else None
+            source_key = str(row["Saved as"].iloc[0]) if len(row) and "Saved as" in row else ""
+            targets.append((sample, locate_sample(sample, recorded, report), source_key))
+        lost = [s for s, path, src in targets if path is None or not src or src == "nan"]
+        if lost:
+            st.caption("Not found, or no label map recorded, for: " + ", ".join(lost))
+        ready = [(s, p, src) for s, p, src in targets if p is not None and src and src != "nan"]
+        if st.button(f"Write into {len(ready)} file(s)", key="clu-write", disabled=not ready):
+            settings = {"clustered_region": region, "cluster_method": method,
+                        "cluster_features": ", ".join(features)}
+            settings["clusters" if method != "HDBSCAN" else "smallest_cluster"] = (
+                int(k) if method != "HDBSCAN" else int(min_size))
+            results = []
+            for sample, path, source_key in ready:
+                mine = clustered[clustered["Sample"] == sample]
+                mapping = {int(lab): number[c] for lab, c in zip(mine["Label"], mine["Cluster"])}
+                try:
+                    written, placed = an.write_cluster_labels(
+                        path, source_key, mapping, key,
+                        colors={number[c]: colors[c] for c in order},
+                        names={number[c]: c for c in order}, attrs=settings,
+                    )
+                    results.append({"Sample": sample, "Written": written, "Cells": placed,
+                                    "File": str(path), "Problem": ""})
+                except Exception as exc:
+                    results.append({"Sample": sample, "Written": "", "Cells": 0,
+                                    "File": str(path), "Problem": str(exc)})
+            outcome = pd.DataFrame(results)
+            failed = outcome["Problem"].astype(bool).sum()
+            (st.warning if failed else st.success)(
+                f"Wrote “{key}” into {len(outcome) - failed} of {len(outcome)} file(s)."
+                + (" A file open in the viewer may need closing first." if failed else "")
+            )
+            st.dataframe(outcome, hide_index=True, width="stretch")
+
+
+def cluster_stack_figure(clustered: pd.DataFrame, region: str, measure: str):
+    """Every sample's mix of clusters as one stacked bar, grouped by genotype.
+
+    Each genotype's samples are followed by their mean, so the mean is read
+    next to what went into it.
+    """
+    order = cluster_order(clustered["Cluster"])
+    colors = cluster_colors(order)
+    genotypes_here = ap.genotype_order(clustered["Genotype"])
+    counts = pd.crosstab([clustered["Genotype"], clustered["Sample"]], clustered["Cluster"])
+    counts = counts.reindex(columns=order, fill_value=0)
+    share = measure.startswith("Share")
+    values = counts.div(counts.sum(axis=1), axis=0) * 100 if share else counts
+    unit = "% of the sample's cells" if share else "cells"
+    groups, bars, stacks = [], [], []
+    for genotype in genotypes_here:
+        if genotype not in values.index.get_level_values(0):
+            continue
+        per_sample = values.xs(genotype, level=0)
+        for sample, row in per_sample.iterrows():
+            groups.append(genotype)
+            bars.append(str(sample))
+            stacks.append(row)
+        groups.append(genotype)
+        # Unique per genotype: plotly places a repeated category where it
+        # first saw it.
+        bars.append(f"{genotype} mean")
+        stacks.append(per_sample.mean(axis=0))
+    table = pd.DataFrame(stacks).reset_index(drop=True)
+    figure = go.Figure()
+    for cluster in order:
+        figure.add_trace(go.Bar(
+            x=[groups, bars], y=table[cluster].to_numpy(), name=str(cluster),
+            marker={"color": colors[cluster], "line": {"color": "white", "width": 1}},
+            customdata=bars,
+            hovertemplate=f"%{{customdata}} · {cluster}: %{{y:.3g}} {unit}<extra></extra>",
+        ))
+    figure.update_layout(
+        barmode="stack", bargap=0.25,
+        title=f"Each sample's mix of {region} clusters",
+        xaxis={"automargin": True, "tickangle": 0},
+        yaxis={"title": unit, "automargin": True},
+        # Top to bottom in the legend as in the bars.
+        legend_title_text="Cluster", legend={"traceorder": "reversed"},
+        height=460, margin={"l": 10, "r": 10, "t": 50, "b": 10},
+    )
+    return figure
 
 
 def color_map(frame: pd.DataFrame, by: str) -> tuple[dict[str, str], list[str]]:
@@ -421,6 +632,8 @@ def register_region(outlines: dict, cells: dict, scale: bool, reflect: bool, war
         for s, t in atlas.transforms.items()
     }
     return atlas, atlas.template, atlas.registered, fits, mapped
+
+
 
 
 def closed(points: np.ndarray) -> np.ndarray:
@@ -648,10 +861,6 @@ def outline_figure(
     return figure, missing
 
 
-def _alpha(color: str, alpha: float) -> str:
-    color = color.lstrip("#")
-    r, g, b = (int(color[i:i + 2], 16) for i in (0, 2, 4))
-    return f"rgba({r},{g},{b},{alpha})"
 
 
 def glyph_controls(key: str, available: bool, missing_note: str = ""):
@@ -667,12 +876,6 @@ def glyph_controls(key: str, available: bool, missing_note: str = ""):
     return True, float(size), bool(true_scale)
 
 
-def hover_columns(frame: pd.DataFrame) -> dict:
-    hover = {"Sample": True, "Genotype": True, "Region": True}
-    for column in HOVER:
-        if column in frame:
-            hover[column] = ":.4g"
-    return hover
 
 
 # ---------------------------------------------------------------------------
@@ -775,8 +978,8 @@ cell_outlines = read_cell_outlines(cell_source) if cell_source is not None else 
 #: ``(sample, label) -> cluster name``, filled in by the Cells tab for the atlas.
 cluster_of: dict[tuple[str, int], str] = {}
 
-umap_tab, scatter_tab, cells_tab, atlas_tab, explain_tab, table_tab = st.tabs(
-    ["UMAP", "Scatter", "Cells", "Atlas", "Explain", "Table"]
+umap_tab, scatter_tab, cells_tab, atlas_tab, explain_tab, plots_tab, table_tab = st.tabs(
+    ["UMAP Regions", "Scatter Regions", "Cells", "Atlas", "Explain", "Plots", "Table"]
 )
 
 # -- UMAP ---------------------------------------------------------------------
@@ -1001,10 +1204,19 @@ with cells_tab:
                 st.subheader("Clusters")
                 cluster_method = st.selectbox(
                     "Clustering", CLUSTER_METHODS, key="clu-method",
-                    help="Over every cell of one region passing the filters, not only the "
-                     "sampled ones. "
-                         "Features are standardised first. The clusters colour the cells here "
-                         "and in the Atlas tab.",
+                    help="Groups the cells of one region by the features ticked below, "
+                         "standardised first; every cell passing the filters is used, not "
+                         "only the sampled ones. The clusters colour the cells here and in "
+                         "the Atlas tab.\n\n"
+                         "- **K-means**: round, similar-sized groups. The default; fast and "
+                         "stable. You choose how many.\n"
+                         "- **Gaussian mixture**: like k-means but groups may be elongated "
+                         "or of different spread — better when one feature varies much more "
+                         "within a group than another. You choose how many.\n"
+                         "- **HDBSCAN**: finds the number itself from where the cells are "
+                         "dense, and leaves cells that fit nowhere as noise. Good for spotting "
+                         "a small distinct population; results shift with the smallest "
+                         "cluster size.",
                 )
                 cluster_features: list[str] = []
                 cluster_k, cluster_min = 4, 15
@@ -1020,16 +1232,34 @@ with cells_tab:
                     )
                     for name, columns in cell_groups(cells).items():
                         if columns and st.checkbox(f"{name} ({len(columns)})",
-                                                   value=name != "Position", key=f"clu-{name}"):
+                                                   value=name != "Position", key=f"clu-{name}",
+                                                   help=GROUP_HELP.get(name)):
                             cluster_features.extend(columns)
                     if cluster_method == "HDBSCAN":
                         cluster_min = st.slider(
                             "Smallest cluster", 5, 200, 15, key="clu-min",
-                            help="HDBSCAN finds the number of clusters itself; cells in "
-                                 "no cluster are noise.",
+                            help="The fewest cells a group needs to count as a cluster; "
+                                 "HDBSCAN then finds how many there are. Smaller finds more, "
+                                 "finer clusters (and more noise); larger merges them. Start "
+                                 "near 1–2 % of the cells, and prefer a size where the "
+                                 "clusters stay put when you nudge it. Cells in no cluster "
+                                 "are grey “Noise / other”.",
                         )
                     else:
-                        cluster_k = st.slider("Clusters", 2, len(REGION_COLORS), 4, key="clu-k")
+                        cluster_k = st.slider(
+                            "Clusters", 2, len(REGION_COLORS), 4, key="clu-k",
+                            help="How many groups to split the cells into. There is no "
+                                 "right answer in the data alone — pick the fewest that "
+                                 "separate things you can name:\n\n"
+                                 "- open **Choosing the number of clusters** below for a "
+                                 "score per count (higher silhouette is better; for Gaussian "
+                                 "mixture, lower BIC);\n"
+                                 "- check **Cluster profiles**: two clusters that differ in "
+                                 "nothing you care about should be one;\n"
+                                 "- a good count gives similar clusters when you change the "
+                                 "features or the seed slightly.\n\n"
+                                 "At most eight, one colour each.",
+                        )
 
             cluster_used: list[str] = []
             if cluster_method != "Off":
@@ -1051,6 +1281,34 @@ with cells_tab:
                     clustered = cells[members]
                     cluster_of.update(zip(zip(clustered["Sample"], clustered["Label"].astype(int)),
                                           clustered["Cluster"]))
+            if cluster_method in ("K-means", "Gaussian mixture") and matrix is not None:
+                with left.expander("Choosing the number of clusters"):
+                    st.caption("Scores each count from 2 to 8 on these cells and features. "
+                               "Silhouette (−1 to 1): how much closer cells are to their own "
+                               "cluster than to the next; above ~0.25 is some structure, "
+                               "above 0.5 clear. A peak, or where it stops dropping, is a "
+                               "good candidate."
+                               + (" BIC: lower is better; look for the elbow."
+                                  if cluster_method == "Gaussian mixture" else ""))
+                    if st.checkbox("Score them", key="clu-score"):
+                        scores = score_cluster_counts(matrix, cluster_method, 0)
+                        chart = go.Figure(go.Scatter(
+                            x=scores["Clusters"], y=scores["Silhouette"], mode="lines+markers",
+                            name="Silhouette", line={"color": "#2a78d6", "width": 2},
+                            marker={"size": 8},
+                            hovertemplate="%{x} clusters: silhouette %{y:.3f}<extra></extra>",
+                        ))
+                        chart.add_vline(x=int(cluster_k), line={"color": NEUTRAL, "dash": "dot"})
+                        chart.update_layout(height=220, margin={"l": 10, "r": 10, "t": 10, "b": 10},
+                                            xaxis={"title": "clusters", "dtick": 1},
+                                            yaxis={"title": "silhouette"}, showlegend=False)
+                        st.plotly_chart(chart, width="stretch", theme="streamlit")
+                        best = int(scores.loc[scores["Silhouette"].idxmax(), "Clusters"])
+                        note = f"Best silhouette at {best}."
+                        if "BIC" in scores:
+                            low = int(scores.loc[scores["BIC"].idxmin(), "Clusters"])
+                            note += f" Lowest BIC at {low}."
+                        st.caption(note + " Dotted line: the count in use.")
             if color_cells == "Cluster" and "Cluster" not in cells:
                 color_cells = "Sample"
 
@@ -1116,6 +1374,30 @@ with cells_tab:
                     st.plotly_chart(figure, width="content" if cell_draw else "stretch",
                                     theme="streamlit")
                 if "Cluster" in cells and cluster_used:
+                    controls = st.columns(2)
+                    dist_style = controls[0].radio(
+                        "Cluster distribution", ("Grouped", "Stacked"), horizontal=True,
+                        key="clu-dist-style",
+                        help="Grouped compares one cluster between genotypes, with every "
+                             "fish as a dot. Stacked shows each fish's whole mix of clusters "
+                             "in one bar.",
+                    )
+                    dist_measure = controls[1].radio(
+                        "As", ("Share of cells (%)", "Cells"), horizontal=True, key="clu-dist",
+                    )
+                    clustered_only = cells[cells["Cluster"] != NOT_CLUSTERED]
+                    if dist_style == "Grouped":
+                        figure = cluster_distribution_figure(clustered_only, cluster_region, dist_measure)
+                        note = ("Bars: mean over each genotype's samples, each sample weighed "
+                                "the same. Dots: the samples themselves.")
+                    else:
+                        figure = cluster_stack_figure(clustered_only, cluster_region, dist_measure)
+                        note = ("One bar per sample, grouped by genotype; the last bar of "
+                                "each group is its samples averaged, each weighed the same.")
+                    st.plotly_chart(figure, width="stretch", theme="streamlit")
+                    st.caption(note)
+                    write_clusters_panel(source, cells, cluster_region, cluster_method,
+                                         cluster_k, cluster_min, cluster_used)
                     with st.expander(f"Cluster profiles ({cluster_region})", expanded=False):
                         clustered = cells[cells["Cluster"] != NOT_CLUSTERED]
                         order = cluster_order(clustered["Cluster"])
@@ -1619,6 +1901,212 @@ with explain_tab:
                             table.sort_values("Total", ascending=False).to_csv(),
                             file_name=f"shap_{target_name.lower()}_{explain_region}.csv",
                         )
+
+# -- plots --------------------------------------------------------------------
+
+with plots_tab:
+    plot_cells = read_cells(source)
+    left, right = st.columns([1, 3])
+    with left:
+        st.subheader("Plot")
+        measures = ["Regions"]
+        if not plot_cells.empty:
+            measures.append("Cells")
+        if cluster_of:
+            measures.append("Cell clusters")
+        measure = st.radio(
+            "Measure", measures, key="plot-measure",
+            help="Regions: one row per sample and region, from the Region features sheet. "
+                 "Cells: the segmented cells. Cell clusters: how much of each sample "
+                 "belongs to one cluster (clustering is set in the Cells tab).",
+        )
+        frame = pd.DataFrame()
+        dot_label = "Sample"
+        note = ""
+        per_cell = False
+        if measure == "Regions":
+            region_list = list(dict.fromkeys(rows["Region"]))
+            region = st.selectbox("Region", region_list, key="plot-region")
+            frame = rows[rows["Region"] == region]
+            numbers = plottable(frame, IDENTITY)
+            note = f"One dot per sample, {region}."
+        elif measure == "Cells":
+            pool = plot_cells[
+                plot_cells["Genotype"].isin(genotypes) & plot_cells["Sample"].isin(samples)
+            ]
+            region_list = ["(every region)"] + list(dict.fromkeys(pool["Region"]))
+            region = st.selectbox("Region", region_list, key="plot-cell-region")
+            if region != "(every region)":
+                pool = pool[pool["Region"] == region]
+            if cluster_of:
+                labelled = pool.assign(Cluster=[
+                    cluster_of.get((s, int(lab)), NOT_CLUSTERED)
+                    for s, lab in zip(pool["Sample"], pool["Label"])
+                ])
+                found = cluster_order(set(labelled["Cluster"]) - {NOT_CLUSTERED})
+                if found:
+                    which = st.selectbox("Cluster", ["(all cells)", *found], key="plot-cluster")
+                    if which != "(all cells)":
+                        pool = labelled[labelled["Cluster"] == which]
+            numbers = plottable(pool, CELL_IDENTITY)
+            level = st.radio(
+                "One dot per", ("Sample (mean of its cells)", "Cell"), key="plot-level",
+                help="What a dot is. Either way the test never treats the cells of one "
+                     "fish as independent measurements: showing every cell switches the "
+                     "test to a mixed model with the sample as a random effect, or you "
+                     "can summarise each sample first.",
+            )
+            per_cell = level == "Cell"
+            frame = pool
+            note = f"{len(pool):,} cells" + ("" if region == "(every region)" else f" in {region}")
+        else:
+            clustered_region = st.session_state.get("clu-region", "")
+            by_sample = plot_cells[
+                plot_cells["Genotype"].isin(genotypes) & plot_cells["Sample"].isin(samples)
+            ].assign(Cluster=lambda f: [cluster_of.get((s, int(lab)), NOT_CLUSTERED)
+                                        for s, lab in zip(f["Sample"], f["Label"])])
+            by_sample = by_sample[by_sample["Cluster"] != NOT_CLUSTERED]
+            found = cluster_order(by_sample["Cluster"])
+            which = st.selectbox("Cluster", found, key="plot-cluster-only")
+            as_share = st.radio("As", ("Share of the sample's cells (%)", "Cells"),
+                                key="plot-cluster-as") .startswith("Share")
+            counts = pd.crosstab(by_sample["Sample"], by_sample["Cluster"])
+            values = (counts.div(counts.sum(axis=1), axis=0) * 100) if as_share else counts
+            column = f"{which}: {'% of the sample' if as_share else 'cells'}"
+            frame = pd.DataFrame({
+                "Sample": values.index,
+                "Genotype": [genotype_of_sample(features, s) for s in values.index],
+                column: values[which].to_numpy() if which in values else np.nan,
+            })
+            numbers = [column]
+            note = f"One dot per sample, {clustered_region} cells."
+
+        variable = (st.selectbox("Variable", numbers, index=default_variable(numbers),
+                                 key="plot-variable") if numbers else None)
+        kind = st.radio("Shape", ("Box", "Violin"), horizontal=True, key="plot-kind")
+        if per_cell:
+            test = st.selectbox(
+                "Test", CELL_TESTS, key="plot-cell-test",
+                help="Cells of one fish are not independent, so a plain test over cells "
+                     "is not offered.\n\n"
+                     "- **Mixed model**: every cell is used, with a random intercept per "
+                     "sample, so fish that differ overall do not count as many independent "
+                     "measurements. Genotype is tested by likelihood ratio.\n"
+                     "- **Sample means**: each sample becomes one number first, and the "
+                     "usual test runs on those — fewer assumptions, and what most papers "
+                     "report.",
+            )
+        else:
+            test = st.selectbox(
+                "Test", TESTS, key="plot-test",
+                help="One-way ANOVA compares the group means, assuming similar spreads and "
+                     "roughly normal residuals. Welch's drops the equal-spread assumption. "
+                     "Kruskal-Wallis compares ranks and assumes neither — the safe choice for "
+                     "small or skewed groups. With two groups an ANOVA is a t-test.",
+            )
+        show_dots = st.checkbox("Show the dots", value=True, key="plot-dots")
+        bars = st.radio("Significance bars", ("Significant only", "All pairs", "Off"),
+                        key="plot-bars",
+                        help="A bar joins two groups and carries the p value of that "
+                             "comparison: the post-hoc pair when there are three groups or "
+                             "more, the test itself when there are two.")
+        bar_label = st.radio("Bars say", ("Stars", "p value"), horizontal=True, key="plot-bar-label",
+                             help="Stars: * < 0.05, ** < 0.01, *** < 0.001; ns otherwise.")
+
+    with right:
+        if not numbers or variable is None:
+            st.warning("Nothing numeric to plot here.")
+        else:
+            data = frame.copy()
+            if measure == "Cells" and not per_cell:
+                data = (data.groupby(["Sample", "Genotype"], as_index=False)[variable]
+                        .mean(numeric_only=True))
+            data = data.dropna(subset=[variable])
+            # What the test sees: every cell for the mixed model, one number per
+            # sample otherwise, never the cells as independent measurements.
+            tested = data
+            if per_cell and test != MIXED:
+                tested = (data.groupby(["Sample", "Genotype"], as_index=False)[variable]
+                          .mean(numeric_only=True))
+            dot_label = "Sample"
+            if measure == "Cells" and per_cell:
+                dot_label = "Sample"
+            order = ap.genotype_order(data["Genotype"])
+            values = {g: tested.loc[tested["Genotype"] == g, variable].to_numpy(dtype=float)
+                      for g in order}
+            if len(order) < 2 or data.empty:
+                st.warning("Needs at least two genotypes with values.")
+            else:
+                if per_cell and test == MIXED:
+                    result = mixed_model_test(tested, variable, "Genotype")
+                    pairs = mixed_pairs(tested, variable, "Genotype") if len(order) > 2 else pd.DataFrame()
+                else:
+                    plain = test.split(" · ")[-1]
+                    grouped = {g: tested.loc[tested["Genotype"] == g, variable].to_numpy(dtype=float)
+                               for g in order}
+                    result = compare_groups(grouped, plain)
+                    pairs = posthoc_pairs(grouped, plain) if len(order) > 2 else pd.DataFrame()
+                if len(order) == 2 and np.isfinite(result["p"]):
+                    # Two groups: the test itself is the only comparison there is.
+                    pairs = pd.DataFrame([{"Group 1": order[0], "Group 2": order[1],
+                                           "p": result["p"]}])
+                title = f"{variable} — {note}"
+                figure = comparison_figure(data, variable, "Genotype", kind, title,
+                                           dot_label=dot_label, pairs=pairs, show_dots=show_dots,
+                                           bars=bars, bar_label=bar_label)
+                st.plotly_chart(figure, width="stretch", theme="streamlit")
+
+                statistic = {"Kruskal-Wallis": "H", MIXED: "χ²"}.get(
+                    test.split(" · ")[-1] if " · " in test else test, "F")
+                columns = st.columns(3)
+                short = "Mixed model" if test == MIXED else test.split(" · ")[-1]
+                columns[0].metric(f"{statistic} · {short}",
+                                  "—" if not np.isfinite(result["statistic"]) else f"{result['statistic']:.3g}")
+                columns[1].metric("p", "—" if not np.isfinite(result["p"]) else f"{result['p']:.3g}",
+                                  stars(result["p"]) or None)
+                columns[2].metric(result["effect_name"],
+                                  "—" if not np.isfinite(result["effect"]) else f"{result['effect']:.3f}",
+                                  help="Share of the variation that lies between the groups.")
+                if per_cell and test != MIXED:
+                    st.caption(f"The dots are cells; the test ran on the {len(tested)} "
+                               "sample means behind them.")
+                for line in result["notes"]:
+                    st.caption(line)
+
+                table = result.get("table")
+                if table is None:
+                    table = anova_table(values, test.split(" · ")[-1], result)
+                if table is not None and not table.empty:
+                    numeric = [c for c in table.columns if c not in ("Source", "Term", "df")]
+                    st.caption("The mixed model, term by term. “Estimate” is the shift from "
+                               "the first genotype, in the variable's units."
+                               if test == MIXED else f"The {short} table.")
+                    st.dataframe(
+                        table.style.format({c: "{:.4g}" for c in numeric}, na_rep=""),
+                        hide_index=True, width="stretch",
+                    )
+
+                summary = pd.DataFrame([{
+                    "Genotype": g,
+                    "Samples": int(tested.loc[tested["Genotype"] == g, "Sample"].nunique()),
+                    "n": len(values[g]),
+                    "Mean": float(np.mean(values[g])) if len(values[g]) else np.nan,
+                    "SD": float(np.std(values[g], ddof=1)) if len(values[g]) > 1 else np.nan,
+                    "Median": float(np.median(values[g])) if len(values[g]) else np.nan,
+                } for g in order])
+                st.dataframe(summary.style.format({"Mean": "{:.4g}", "SD": "{:.4g}",
+                                                   "Median": "{:.4g}"}),
+                             hide_index=True, width="stretch")
+                if not pairs.empty and len(order) > 2:
+                    marked = pairs.assign(**{"": [stars(float(p)) for p in pairs["p"]]})
+                    method = ("Holm on the mixed model's contrasts." if test == MIXED
+                              else "Holm on Mann-Whitney." if short == "Kruskal-Wallis"
+                              else "Tukey HSD.")
+                    st.caption("Every pair, corrected for the number of comparisons — " + method)
+                    st.dataframe(marked.style.format({"p": "{:.3g}", "Difference": "{:.4g}"}),
+                                 hide_index=True, width="stretch")
+                st.download_button("These values (CSV)", data.to_csv(index=False),
+                                   file_name=f"{variable}_by_genotype.csv".replace("/", "-"))
 
 # -- table --------------------------------------------------------------------
 

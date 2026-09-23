@@ -239,6 +239,25 @@ def test_whole_workbook() -> None:
                   f"cell {stat.label}: same GFP mean as the Objects sheet ({row[gfp]} vs {stat.mean:.3f})")
         other = next(c for c in means if c != gfp)
         check(per_cell[other].notna().all(), "and the other channel is measured too")
+        import json
+
+        key, placed = an.write_cluster_labels(
+            first, "GFP labels", {1: 2, 3: 1}, "right clusters",
+            colors={1: "#2a78d6", 2: "#eb6834"}, names={1: "C1", 2: "C2"},
+            attrs={"cluster_method": "K-means"},
+        )
+        release(first)
+        clustered, written_attrs = store.load_labels(first, key)
+        release(first)
+        check(placed == 2, f"two cells placed ({placed})")
+        check(int(clustered[masks == 1].min()) == 2 and int(clustered[masks == 1].max()) == 2,
+              "cell 1 carries its cluster's number everywhere it is")
+        check(bool((clustered[masks == 3] == 1).all()), "and cell 3 its own")
+        check(bool((clustered[masks == 2] == 0).all()), "an unclustered cell becomes background")
+        check(json.loads(store._text(written_attrs["label_colors"]))["2"] == "#eb6834",
+              "the colours travel with the map")
+        check("GFP labels" in store.list_labels(first), "the original map is left as it was")
+
         quiet = an.analyse([first], an.AnalysisOptions(cell_channels=False))
         release(first)
         check(an.cell_intensities_dataframe(quiet).empty, "switched off, the sheet is empty")

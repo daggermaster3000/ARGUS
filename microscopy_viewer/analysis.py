@@ -947,6 +947,49 @@ def cell_intensities_dataframe(outcomes: Sequence[AnalysisOutcome]):
     return pd.DataFrame(rows, columns=columns)
 
 
+def write_cluster_labels(
+    path: str | Path,
+    source_key: str,
+    cluster_of: dict[int, int],
+    key: str,
+    colors: dict[int, str] | None = None,
+    names: dict[int, str] | None = None,
+    attrs: dict[str, Any] | None = None,
+) -> tuple[str, int]:
+    """Store a copy of the label map *source_key* with every cell recoloured.
+
+    *cluster_of* maps a cell's label to its cluster number (1, 2, …); cells
+    not in it become background. *colors* and *names* (cluster number -> hex
+    colour / name) are kept with the map as JSON, so the viewer draws each
+    cluster in the colour the explorer gave it. Returns the key written and how
+    many cells were placed.
+    """
+    import json
+
+    masks, source_attrs = ims_store.load_labels(path, source_key)
+    if masks is None:
+        raise ValueError(f"{Path(path).name} has no label map {source_key!r}")
+    highest = int(masks.max()) if masks.size else 0
+    lookup = np.zeros(highest + 1, dtype=np.uint16)
+    placed = 0
+    for label, cluster in cluster_of.items():
+        if 0 < int(label) <= highest:
+            lookup[int(label)] = int(cluster)
+            placed += 1
+    extra = {
+        "source_labels": source_key,
+        "label_colors": json.dumps({str(k): v for k, v in (colors or {}).items()}),
+        "label_names": json.dumps({str(k): v for k, v in (names or {}).items()}),
+        **(attrs or {}),
+    }
+    if "channel" in source_attrs:
+        extra["channel"] = ims_store._text(source_attrs["channel"])
+    written = ims_store.save_labels(
+        path, key, lookup[masks], source_attrs.get("voxel_size_um", ()), attrs=extra
+    )
+    return written, placed
+
+
 def save_cell_outlines(outcomes: Sequence[AnalysisOutcome], path: str | Path) -> int:
     """Write every cell outline to one ``.npz``. Returns how many were written.
 

@@ -737,7 +737,27 @@ class ExperimentWidget(QWidget):
         if scale:
             kwargs["scale"] = scale
         kwargs.update(world_units(self._viewer, int(masks.ndim)) or {})
+        colormap = _stored_colormap(attrs)
+        if colormap is not None:
+            kwargs["colormap"] = colormap
         return self._viewer.add_labels(np.asarray(masks), **kwargs)
+
+
+def _stored_colormap(attrs):
+    """The colours a label map was written with (a cluster map from the region
+    explorer, say), as a napari colormap; ``None`` for an ordinary label map."""
+    import json
+
+    text = ims_store._text(attrs.get("label_colors", "")) if "label_colors" in attrs else ""
+    try:
+        colors = {int(k): v for k, v in json.loads(text).items()} if text else {}
+    except (ValueError, AttributeError):
+        return None
+    if not colors:
+        return None
+    from napari.utils.colormaps import DirectLabelColormap
+
+    return DirectLabelColormap(color_dict={None: "transparent", 0: "transparent", **colors})
 
 
 def _to_pixmap(rgb: np.ndarray):

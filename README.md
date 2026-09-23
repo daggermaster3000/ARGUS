@@ -1139,6 +1139,25 @@ streamlit run apps/region_explorer.py                       # then load the .xls
 streamlit run apps/region_explorer.py -- path/to/report/    # or point it at a report folder
 ```
 
+#### Region report — the plain one
+
+`apps/simple_explorer.py` is the same workbook without the machine learning:
+every number in it is one somebody can name. Three tabs — **Compare** (one
+variable as a box or violin plot per genotype, every sample a dot, with an
+ANOVA, Welch's ANOVA or Kruskal-Wallis, the ANOVA table, Tukey pairs and
+significance bars), **Relate** (any two variables against each other, with
+Pearson and Spearman) and **Table**. Cells can be plotted one dot per cell,
+and then the test is a mixed model with the sample as a random effect — the
+cells of one fish are never counted as independent measurements. Any number of
+genotype groups.
+
+The statistics live in `apps/explorer_common.py`, which both apps import, so a
+p value is computed one way whichever app printed it.
+
+```bash
+streamlit run apps/simple_explorer.py -- path/to/report/
+```
+
 ### Exports
 
 **Export Snapshot** saves what is on the canvas at 2× oversampling, so it stays
