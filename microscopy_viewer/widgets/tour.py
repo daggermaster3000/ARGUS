@@ -21,7 +21,7 @@ The script is :mod:`microscopy_viewer.onboarding`.
 from __future__ import annotations
 
 from qtpy.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
-from qtpy.QtGui import QColor, QGuiApplication, QKeySequence, QPainter, QPen, QRegion
+from qtpy.QtGui import QColor, QKeySequence, QPainter, QPen, QRegion
 from qtpy.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -34,6 +34,9 @@ from qtpy.QtWidgets import (
 
 from .. import onboarding as ob
 from ..utils import get_logger
+from ..window_fit import fit_to_screen as _fit_to_screen
+from ..window_fit import reveal
+from ..window_fit import screen_rect as _screen_rect
 
 logger = get_logger("tour")
 
@@ -44,46 +47,6 @@ PADDING = 6
 BUBBLE_WIDTH = 340
 #: Width of the ring drawn round a control in another window.
 RING = 3
-
-
-def _screen_rect(widget) -> QRect:
-    """Available geometry (no menu bar or Dock) of the screen *widget* is mostly on."""
-    screen = None
-    try:
-        handle = widget.window().windowHandle()
-        screen = handle.screen() if handle is not None else None
-    except RuntimeError:
-        screen = None
-    if screen is None:
-        try:
-            centre = widget.mapToGlobal(widget.rect().center())
-            screen = QGuiApplication.screenAt(centre)
-        except RuntimeError:
-            screen = None
-    if screen is None:
-        screen = QGuiApplication.primaryScreen()
-    return screen.availableGeometry() if screen is not None else QRect()
-
-
-def _fit_to_screen(window) -> None:
-    """Move and shrink a top-level *window* so its frame is on its screen."""
-    if window is None or window.isFullScreen() or window.isMaximized():
-        return
-    area = _screen_rect(window)
-    if area.isEmpty():
-        return
-    frame = window.frameGeometry()
-    if area.contains(frame):
-        return
-    # The frame (title bar) is extra to the client size.
-    extra_w = frame.width() - window.width()
-    extra_h = frame.height() - window.height()
-    width = min(frame.width(), area.width())
-    height = min(frame.height(), area.height())
-    window.resize(max(width - extra_w, window.minimumWidth()), max(height - extra_h, window.minimumHeight()))
-    x = min(max(frame.x(), area.left()), area.right() + 1 - width)
-    y = min(max(frame.y(), area.top()), area.bottom() + 1 - height)
-    window.move(x, y)
 
 
 class _Ring(QWidget):
@@ -292,6 +255,11 @@ class TourOverlay(QWidget):
             if step.target:
                 logger.info("tour target %s is not available; centring the step", step.target)
             return None
+        try:
+            # Panels scroll now, so the control may be scrolled out of sight.
+            reveal(widget)
+        except RuntimeError:
+            pass
         return widget
 
     # -- geometry and drawing -------------------------------------------------

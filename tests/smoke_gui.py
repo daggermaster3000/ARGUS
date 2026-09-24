@@ -1236,6 +1236,22 @@ def main() -> int:
     app.viewer.layers.remove(reg.REGION_LAYER_NAME)
     print(flush=True)
 
+    print("window fits a laptop screen", flush=True)
+    from qtpy.QtWidgets import QScrollArea
+
+    smallest = app.viewer.window._qt_window.minimumSizeHint()
+    # A 13" MacBook Air leaves about 1280 x 740 for the window. The panels used
+    # to add up to far more, which left the window unresizable on one screen.
+    check(
+        smallest.width() <= 1280 and smallest.height() <= 720,
+        f"the window can shrink to {smallest.width()} x {smallest.height()}",
+    )
+    check(
+        all(isinstance(dock.widget(), QScrollArea) for dock in app.docks.values()),
+        "every panel scrolls instead of holding the window open",
+    )
+    print(flush=True)
+
     print("guided tour", flush=True)
     from qtpy.QtCore import QPoint, QRect
 

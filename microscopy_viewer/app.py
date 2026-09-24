@@ -111,11 +111,14 @@ class MicroscopyViewer:
         """
         from .widgets import ViewerToolbar
         from .widgets.registry import iter_panels
+        from .window_fit import scrollable
 
         self._progress("Building the toolbar…")
         self.toolbar = ViewerToolbar(self)
+        # Scrolls sideways rather than holding the window as wide as every
+        # button put end to end.
         self.viewer.window.add_dock_widget(
-            self.toolbar, name="Tools", area="top", tabify=False
+            scrollable(self.toolbar, vertical=False), name="Tools", area="top", tabify=False
         )
 
         self.panels: dict[str, object] = {}
@@ -134,9 +137,12 @@ class MicroscopyViewer:
                 # cellpose is seconds on its own, so each is named as it is built.
                 self._progress(f"Building the {spec.title} panel…")
                 widget = spec.factory(self)
+                # In a scroll area so no panel can make the window taller or
+                # wider than the screen (see :mod:`microscopy_viewer.window_fit`).
                 dock = self.viewer.window.add_dock_widget(
-                    widget, name=spec.title, area=spec.area, **spec.dock_kwargs
+                    scrollable(widget), name=spec.title, area=spec.area, **spec.dock_kwargs
                 )
+                self._add_vertical_stretch(dock, widget, spec)
             except Exception:
                 logger.exception("could not build the %r panel", spec.identifier)
                 continue
@@ -149,6 +155,118 @@ class MicroscopyViewer:
 
         self._tabify_panels(specs)
         self._metadata_dock = self.docks.get("metadata")
+        self._scroll_layer_controls()
+
+    def _scroll_layer_controls(self) -> None:
+        """Let napari's own layer-controls dock shrink too.
+
+        It holds a form per layer type, and on a laptop screen its height alone
+        plus the layer list and our panels already made the left column taller
+        than the screen.
+        """
+        from .window_fit import scrollable
+
+        try:
+            dock = self.viewer.window._qt_viewer.dockLayerControls
+            controls = dock.widget()
+            if controls is None:
+                return
+            dock.setWidget(scrollable(controls))
+            # By now the old contents' minimum is pinned on the dock itself;
+            # put back the 50 px napari gives every dock.
+            dock.setMinimumSize(50, 50)
+            dock.layout().invalidate()
+            dock.updateGeometry()
+        except Exception:  # pragma: no cover - napari API drift
+            logger.debug("could not make the layer controls scroll", exc_info=True)
+
+    @staticmethod
+    def _add_vertical_stretch(dock, widget, spec) -> None:
+        """Push a side panel's controls to the top, as napari does unwrapped.
+
+        napari adds the stretch to the widget it is given, which is now the
+        scroll area; the panel inside would otherwise spread its rows out over
+        the whole height of the dock.
+        """
+        if spec.area not in ("left", "right") or not spec.dock_kwargs.get("add_vertical_stretch", True):
+            return
+        add = getattr(dock, "_maybe_add_vertical_stretch", None)
+        if add is None:
+            return
+        try:
+            add(widget)
+        except Exception:  # pragma: no cover - napari API drift
+            logger.debug("could not add stretch to %s", spec.identifier, exc_info=True)
+
+    def fit_window_to_screen(self) -> None:
+        """Shrink and move the main window onto the screen it is on, now and later.
+
+        napari restores the size the window last had, which may have been on a
+        bigger monitor; on a laptop screen that leaves the title bar or the
+        resize corner out of reach. It is fitted again on leaving full screen and
+        on changing screen, where the same thing happens.
+        """
+        from .window_fit import keep_on_screen
+
+        try:
+            keep_on_screen(getattr(self.viewer.window, "_qt_window", None))
+        except Exception:
+            logger.debug("could not fit the window to the screen", exc_info=True)
+
+    def share_dock_space(self) -> None:
+        """Give the panels a useful share of the window on first open.
+
+        Wrapped in scroll areas they no longer insist on a size of their own, so
+        Qt would otherwise hand the experiment grid a sliver under the layer
+        list. Sizes are fractions of the window so they suit any screen.
+        """
+        from qtpy.QtCore import Qt
+
+        window = getattr(self.viewer.window, "_qt_window", None)
+        if window is None:
+            return
+        qt_viewer = getattr(self.viewer.window, "_qt_viewer", None)
+        # Every dock in a column is given its share at once: sizing one alone
+        # lets Qt take the space back from whichever neighbour it likes.
+        columns = (
+            # (dock, share of the window's height), share of its width
+            (
+                (
+                    (getattr(qt_viewer, "dockLayerControls", None), 0.25),
+                    (getattr(qt_viewer, "dockLayerList", None), 0.2),
+                    (self.docks.get("experiment"), 0.55),
+                ),
+                0.25,
+            ),
+            (
+                (
+                    (self.docks.get("metadata"), 0.25),
+                    (self.docks.get("measurements"), 0.75),
+                ),
+                0.3,
+            ),
+        )
+        height, width = window.height(), window.width()
+        timeseries = self.docks.get("timeseries")
+        panel = self.panels.get("timeseries")
+        if timeseries is not None and panel is not None and timeseries.isVisible():
+            # The transport bar: as tall as its controls and no taller, since
+            # every pixel it takes comes off the canvas.
+            try:
+                title = timeseries.height() - timeseries.widget().height()
+                window.resizeDocks([timeseries], [panel.sizeHint().height() + title], Qt.Vertical)
+            except Exception:
+                logger.debug("could not size the time series dock", exc_info=True)
+        for column, width_share in columns:
+            shown = [(dock, share) for dock, share in column if dock is not None and dock.isVisible()]
+            if not shown:
+                continue
+            docks = [dock for dock, _ in shown]
+            try:
+                window.resizeDocks(docks, [int(height * share) for _, share in shown], Qt.Vertical)
+                window.resizeDocks(docks[:1], [int(width * width_share)], Qt.Horizontal)
+            except Exception:
+                logger.debug("could not size the docks", exc_info=True)
 
     def _tabify_panels(self, specs) -> None:
         """Stack panels that asked to share a tab bar with another panel."""
@@ -392,6 +510,7 @@ def launch(
     """
     import napari
     from napari.qt import get_qapp
+    from qtpy.QtCore import QTimer
     from qtpy.QtWidgets import QApplication
 
     from .splash import start as start_splash
@@ -417,6 +536,9 @@ def launch(
         # nobody watches an empty window being filled in.
         app.viewer.window.show()
         banner.finish(getattr(app.viewer.window, "_qt_window", None))
+    app.fit_window_to_screen()
+    # Once the window has its final size, which the fit settles a moment later.
+    QTimer.singleShot(50, app.share_dock_space)
     if busy_overlay:
         from . import busy
 
@@ -431,8 +553,6 @@ def launch(
                 application.aboutToQuit.connect(app.busy_watchdog.stop)
 
     if tour:
-        from qtpy.QtCore import QTimer
-
         # After the event loop has laid the window out: the tour measures it.
         QTimer.singleShot(800, app.maybe_start_tour)
 
