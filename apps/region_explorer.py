@@ -93,6 +93,9 @@ from explorer_common import (  # noqa: E402  shared with simple_explorer.py
     plottable,
     posthoc_pairs,
     read_cells,
+    WB_AREA,
+    normalise,
+    normalise_choices,
     read_features,
     stars,
     _alpha,
@@ -108,6 +111,7 @@ SHAPE = (
     "Region area (µm²)", "Region volume (µm³)", "Perimeter (µm)", "Circularity",
     "Solidity", "Major axis (µm)", "Minor axis (µm)", "Aspect ratio",
     "Eccentricity", "Bounding height (µm)", "Bounding width (µm)",
+    "WB area (µm²)",
 )
 INTENSITY_STATS = ("Mean", "Median", "SD", "CV", "P5", "P95", "P99", "Integrated")
 
@@ -1983,6 +1987,12 @@ with plots_tab:
 
         variable = (st.selectbox("Variable", numbers, index=default_variable(numbers),
                                  key="plot-variable") if numbers else None)
+        if variable is not None and len(numbers) > 1:
+            by = st.selectbox("Normalize to", normalise_choices(numbers, variable),
+                              key="plot-normalise",
+                              help=f"Divide the variable by another, sample by sample. "
+                                   f"{WB_AREA} is the whole brain's area.")
+            frame, variable = normalise(frame, variable, by)
         kind = st.radio("Shape", ("Box", "Violin"), horizontal=True, key="plot-kind")
         if per_cell:
             test = st.selectbox(

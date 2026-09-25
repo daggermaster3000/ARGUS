@@ -1160,6 +1160,14 @@ genotype groups.
 The statistics live in `apps/explorer_common.py`, which both apps import, so a
 p value is computed one way whichever app printed it.
 
+In both apps the Compare plot has a **Normalize to** dropdown: the variable is
+divided, sample by sample, by whichever other variable you pick. The first
+choice is **WB area (µm²)**, the whole brain (WB). The whole brain is a region
+you drew and named `WB` if there is one. Otherwise it is the area inside any of
+the sample's outlines, so a nucleus drawn inside its lobe is not counted twice.
+Workbooks without the *Region outlines* sheet fall back to the sum of the
+region areas.
+
 ```bash
 streamlit run apps/simple_explorer.py -- path/to/report/
 ```

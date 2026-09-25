@@ -60,6 +60,9 @@ from explorer_common import (  # noqa: E402
     plottable,
     posthoc_pairs,
     read_cells,
+    WB_AREA,
+    normalise,
+    normalise_choices,
     read_features,
     stars,
 )
@@ -186,6 +189,12 @@ with compare_tab:
             note = f"{len(frame):,} cells" + ("" if region == "(every region)" else f" in {region}")
         variable = (st.selectbox("Variable", numbers, index=default_variable(numbers),
                                  key="variable") if numbers else None)
+        if variable is not None and len(numbers) > 1:
+            by = st.selectbox("Normalize to", normalise_choices(numbers, variable),
+                              key="normalise",
+                              help=f"Divide the variable by another, sample by sample. "
+                                   f"{WB_AREA} is the whole brain's area.")
+            frame, variable = normalise(frame, variable, by)
         kind = st.radio("Shape", ("Box", "Violin"), horizontal=True, key="kind")
         test = st.selectbox("Test", CELL_TESTS if per_cell else TESTS, key="test",
                             help="ANOVA compares means and assumes similar spreads; Welch's "

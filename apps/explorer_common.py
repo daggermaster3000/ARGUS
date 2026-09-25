@@ -44,6 +44,18 @@ REGION_COLORS = ap.GENOTYPE_COLORS + ap.EXTRA_COLORS
 SYMBOLS = ("circle", "square", "diamond", "cross", "x", "triangle-up", "triangle-down", "star")
 
 
+#: Acronym of the whole brain, the area every region is normalised to.
+WB = "WB"
+#: The whole brain's area, repeated on each of its sample's rows.
+WB_AREA = "WB area (µm²)"
+#: "Normalize to" choice that leaves the variable as measured.
+NOT_NORMALISED = "(nothing)"
+#: Sheet of region outlines, one row per vertex.
+OUTLINES_SHEET = "Region outlines"
+#: Region row of a sample that had no outlines: the whole image, not a region.
+NO_REGIONS = "(no regions stored)"
+
+
 @st.cache_data(show_spinner=False)
 def read_features(source: bytes | str) -> pd.DataFrame:
     handle = io.BytesIO(source) if isinstance(source, bytes) else source
@@ -52,7 +64,92 @@ def read_features(source: bytes | str) -> pd.DataFrame:
         if column in frame:
             frame[column] = frame[column].astype(str)
     frame["Genotype"] = [ap.genotype_label(value) for value in frame.get("Genotype", "")]
+    try:
+        outlines = pd.read_excel(io.BytesIO(source) if isinstance(source, bytes) else source,
+                                 sheet_name=OUTLINES_SHEET)
+    except ValueError:  # workbooks from before the outlines were saved
+        outlines = pd.DataFrame()
+    return add_whole_brain(frame, outlines)
+
+
+def add_whole_brain(features: pd.DataFrame, outlines: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Add each sample's whole-brain (WB) area to every one of its rows.
+
+    It is there to normalise to (see :func:`normalise`). The whole brain is, in
+    order of preference:
+
+    * a region drawn and named ``WB`` — the brain as the person outlining it saw it;
+    * the union of the sample's outlines, so nested or overlapping regions (a
+      nucleus drawn inside its lobe) are not counted twice;
+    * the sum of the region areas, for workbooks written without outlines.
+    """
+    area = "Region area (µm²)"
+    frame = features.copy()
+    if frame.empty or area not in frame or "Sample" not in frame:
+        return frame
+    drawn = frame[frame["Region"] != NO_REGIONS] if "Region" in frame else frame
+    union = _outline_union_areas(outlines) if outlines is not None and not outlines.empty else {}
+    wb_area: dict[str, float] = {}
+    for sample, rows in drawn.groupby("Sample", sort=False):
+        explicit = rows.loc[rows["Region"] == WB, area].dropna() if "Region" in rows else []
+        if len(explicit):
+            wb_area[sample] = float(explicit.iloc[0])
+        elif str(sample) in union:
+            wb_area[sample] = union[str(sample)]
+        else:
+            wb_area[sample] = float(rows[area].sum(min_count=1))
+    frame[WB_AREA] = frame["Sample"].map(wb_area).astype(float)
+    if "Region" in frame:
+        frame.loc[frame["Region"] == NO_REGIONS, WB_AREA] = np.nan
     return frame
+
+
+def normalise_choices(numbers: Sequence[str], variable: str | None) -> list[str]:
+    """What a variable can be divided by: nothing, the whole brain, or any other number."""
+    others = [c for c in numbers if c != variable]
+    first = [WB_AREA] if WB_AREA in others else []
+    return [NOT_NORMALISED, *first, *(c for c in others if c not in first)]
+
+
+def normalise(frame: pd.DataFrame, variable: str, by: str) -> tuple[pd.DataFrame, str]:
+    """*variable* divided by *by*, row by row, as a new column; returns it and its name.
+
+    A zero denominator gives no value rather than an infinite one.
+    """
+    if by == NOT_NORMALISED or by not in frame:
+        return frame, variable
+    column = f"{variable} / {by}"
+    denominator = frame[by].astype(float).where(frame[by] != 0)
+    return frame.assign(**{column: frame[variable].astype(float) / denominator}), column
+
+
+def _outline_union_areas(outlines: pd.DataFrame, resolution: int = 2000) -> dict[str, float]:
+    """Area (µm²) covered by any of each sample's outlines.
+
+    Rasterised on a grid of at most *resolution* pixels along the brain's longer
+    side, which puts the error well under a tenth of a percent for a brain.
+    """
+    from microscopy_viewer.intensity import polygon_mask
+
+    needed = {"Sample", "Region", "Part", "Vertex", "Y (µm)", "X (µm)"}
+    if not needed <= set(outlines.columns):
+        return {}
+    areas: dict[str, float] = {}
+    ordered = outlines.sort_values(["Sample", "Region", "Part", "Vertex"])
+    for sample, rows in ordered.groupby("Sample", sort=False):
+        points = rows[["Y (µm)", "X (µm)"]].to_numpy(dtype=float)
+        if len(points) < 3:
+            continue
+        origin = points.min(axis=0)
+        extent = points.max(axis=0) - origin
+        step = max(float(extent.max()) / resolution, 1e-9)
+        shape = tuple(int(np.ceil(n / step)) + 2 for n in extent)
+        covered = np.zeros(shape, dtype=bool)
+        for _, part in rows.groupby(["Region", "Part"], sort=False):
+            vertices = (part[["Y (µm)", "X (µm)"]].to_numpy(dtype=float) - origin) / step
+            covered |= polygon_mask(vertices, shape)
+        areas[str(sample)] = float(covered.sum()) * step * step
+    return areas
 
 
 @st.cache_data(show_spinner="Reading cells…")
