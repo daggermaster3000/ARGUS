@@ -87,6 +87,10 @@ class _Relay(QObject):
 class ExperimentWidget(QWidget):
     """Browse a folder of samples, put ROIs on them, segment all of them."""
 
+    #: The samples :meth:`selected_entries` returns may have changed: a new scan,
+    #: or a different selection.
+    samples_changed = Signal()
+
     def __init__(self, app, parent: QWidget | None = None):
         super().__init__(parent)
         self._app = app
@@ -160,6 +164,7 @@ class ExperimentWidget(QWidget):
         self._grid.setMovement(QListWidget.Static)
         self._grid.setWordWrap(True)
         self._grid.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._grid.itemSelectionChanged.connect(self.samples_changed)
         self._grid.itemDoubleClicked.connect(lambda _item: self.open_selected())
         outer.addWidget(self._grid)
 
@@ -349,6 +354,7 @@ class ExperimentWidget(QWidget):
 
     def _on_scan_done(self, found) -> None:
         self._entries = list(found)
+        self.samples_changed.emit()
         readable = [entry for entry in self._entries if entry.readable]
         with_rois = [entry for entry in readable if entry.n_rois]
         with_labels = [entry for entry in readable if entry.label_keys]

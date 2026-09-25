@@ -448,6 +448,9 @@ class BatchOutcome:
     #: Read out of the file name, so the workbook can be grouped without anybody
     #: typing a genotype column. Empty when the name encodes none.
     genotype: str = ""
+    #: Group columns beyond the genotype (treatment, stage, …), header → value,
+    #: set by :func:`microscopy_viewer.grouping.apply`.
+    conditions: dict = field(default_factory=dict)
     #: The regions stored in this file, read at batch time. Kept on the outcome
     #: so the export does not depend on the file still being where it was.
     region_rois: list = field(default_factory=list)

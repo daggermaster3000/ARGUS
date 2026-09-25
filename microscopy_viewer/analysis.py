@@ -1080,7 +1080,7 @@ def workbook_sheets(outcomes: Sequence[AnalysisOutcome]) -> dict[str, Any]:
     analysis adds.
     """
     features = features_dataframe(outcomes)
-    return {
+    sheets = {
         "Samples": ex.batch_dataframe(outcomes),
         "Regions": ex.regions_dataframe(outcomes),
         "Objects": ex.objects_dataframe(outcomes),
@@ -1091,3 +1091,22 @@ def workbook_sheets(outcomes: Sequence[AnalysisOutcome]) -> dict[str, Any]:
         "Cell shapes": cell_shapes_dataframe(outcomes),
         "Cell intensities": cell_intensities_dataframe(outcomes),
     }
+    return {name: with_conditions(frame, outcomes) for name, frame in sheets.items()}
+
+
+def with_conditions(frame, outcomes: Sequence[AnalysisOutcome]):
+    """*frame* with each sample's condition columns inserted after its genotype.
+
+    Added here, once, rather than in every sheet's builder: they are labels of
+    the sample, and every sheet already names the sample.
+    """
+    headers = list(dict.fromkeys(h for outcome in outcomes for h in (outcome.conditions or {})))
+    if not headers or frame is None or "Sample" not in getattr(frame, "columns", ()):
+        return frame
+    by_sample = {outcome.name: outcome.conditions or {} for outcome in outcomes}
+    frame = frame.copy()
+    at = list(frame.columns).index("Genotype" if "Genotype" in frame.columns else "Sample") + 1
+    for offset, header in enumerate(headers):
+        values = [by_sample.get(sample, {}).get(header, "") for sample in frame["Sample"]]
+        frame.insert(at + offset, header, values)
+    return frame

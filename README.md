@@ -1030,6 +1030,32 @@ regions* panel's own export, alongside the sample name.
 there — nothing needs to be open. Every file's stored label map and outlines are
 read back out of `/ARGUS` and every channel is summarised inside every outline.
 
+**Groups: genotype and conditions** decides the group columns of the workbook.
+Each row of its table is one column: where it is read (**File name**, the
+**Folder** the file is in, the **Folder above**, or the **Whole path** below the
+experiment folder) and how:
+
+| Find | Takes |
+|---|---|
+| **Genotype** | a genotype word — `wt`, `mut`, `het`, … — spelling variants folded (`WT`, `wildtype` → `wt`) |
+| **Part #** | one numbered part of the name, split at `_`; `-1` is the last. The parts of the first sample are shown under the table |
+| **One of…** | whichever of the words you list (`DMSO, drug`) is in the name |
+| **All of it** | the whole name — e.g. one folder per treatment |
+| **Regex** | what the first `(group)` of a regular expression captures |
+
+The first column is always **Genotype**, since the explorer apps group by it;
+**+ Add column** adds more (a new one reads the whole folder name). A preview
+underneath shows what the workbook will say for the selected samples, with empty
+values as `—`. The columns are remembered for next time, and the explorer apps
+can group their comparisons by any of them (see *Region explorer* below).
+
+**Sample names are made unique.** Files with the same name in different folders
+(`DMSO/fish1.ims`, `drug/fish1.ims`) get the column values that tell them apart
+added — `fish1 (DMSO)`, `fish1 (drug)` — so every row of the workbook, and every
+point in the explorer apps, traces back to one file. When no column separates
+them, the folder is added instead. The renamed samples are bold in the preview.
+The extra columns sit right after *Genotype* in every sheet.
+
 **Every run writes a report folder** into the experiment folder, named after the
 experiment and the time of the run, so a second run never overwrites the first
 (**Save report to…** writes another copy elsewhere):

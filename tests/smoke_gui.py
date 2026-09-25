@@ -111,6 +111,12 @@ def main() -> int:
     from microscopy_viewer.contrast import auto_contrast, reset_contrast
     from microscopy_viewer.exports import export_snapshot
     from microscopy_viewer.utils import MICRON
+    from microscopy_viewer import grouping
+
+    # The Analysis panel remembers its group columns; never in the real settings
+    # of whoever runs this.
+    rules_home = Path(tempfile.mkdtemp())
+    grouping.rules_file = lambda: rules_home / "group_columns.json"
 
     print("building the viewer", flush=True)
     app = MicroscopyViewer(show=False)
@@ -1179,6 +1185,17 @@ def main() -> int:
             analysis = stepper.analysis_widget
             check(analysis is not None, "analysis panel built")
             panel._grid.selectAll()
+            analysis._add_rule_row(grouping.ColumnRule("Batch", source=grouping.FOLDER,
+                                                       rule=grouping.WHOLE))
+            analysis.refresh_preview()
+            preview = analysis._preview
+            headers = [preview.horizontalHeaderItem(i).text() for i in range(preview.columnCount())]
+            check(headers == ["Sample", "Genotype", "Batch"], f"the preview shows the columns ({headers})")
+            check(
+                preview.rowCount() == 2 and preview.item(0, 2).text() == folder.name,
+                "one row per sample, the folder read into its column",
+            )
+            check(grouping.load_rules()[-1].name == "Batch", "and the columns are remembered")
             analysis.run()
             for _ in range(3000):
                 QCoreApplication.processEvents()
@@ -1214,6 +1231,12 @@ def main() -> int:
                 check(
                     {"Region features", "Region intensities", "PCA matrix"} <= set(sheets),
                     f"the analysis workbook has its extra sheets ({sorted(sheets)})",
+                )
+                samples_sheet = sheets.get("Samples")
+                check(
+                    samples_sheet is not None
+                    and list(samples_sheet.columns[:3]) == ["Sample", "Genotype", "Batch"],
+                    "the added column sits after Genotype in the workbook",
                 )
             else:
                 check(False, "the report was saved elsewhere too")
