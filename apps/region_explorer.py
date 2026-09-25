@@ -94,9 +94,13 @@ from explorer_common import (  # noqa: E402  shared with simple_explorer.py
     posthoc_pairs,
     read_cells,
     WB_AREA,
+    group_choices,
+    group_columns,
+    group_order,
     normalise,
     normalise_choices,
     read_features,
+    with_group,
     stars,
     _alpha,
     _mixed_fit,
@@ -929,6 +933,8 @@ except ValueError as exc:
     st.error(f"Could not read the “{SHEET}” sheet: {exc}")
     st.stop()
 outlines = read_outlines(source)
+#: The condition columns the analysis wrote, beside the genotype.
+conditions = group_columns(features)[1:]
 if uploaded_cells is not None:
     cell_source = uploaded_cells.getvalue()
 
@@ -1011,8 +1017,10 @@ with umap_tab:
         neighbors = st.slider("Neighbours", 2, max(2, min(100, limit)), min(15, limit))
         min_dist = st.slider("Minimum distance", 0.0, 1.0, 0.1, 0.05)
         seed = st.number_input("Seed", value=0, step=1)
-        color_by = st.selectbox("Colour by", ("Genotype", "Sample", "Region"), key="umap-color")
-        symbol_by = st.selectbox("Shape by", ("Region", "Genotype", "None"), key="umap-symbol")
+        color_by = st.selectbox("Colour by", ("Genotype", *conditions, "Sample", "Region"),
+                                key="umap-color")
+        symbol_by = st.selectbox("Shape by", ("Region", "Genotype", *conditions, "None"),
+                                 key="umap-symbol")
         if int(dims) == 2:
             as_outlines, glyph, true_scale = glyph_controls("umap", bool(outlines))
         else:
@@ -1090,8 +1098,10 @@ with scatter_tab:
         x = _pick("X", start[0], "sx")
         y = _pick("Y", start[1], "sy")
         z = _pick("Z", start[2], "sz") if mode == "3D" else None
-        color_by = st.selectbox("Colour by", ("Sample", "Genotype", "Region"), key="sc-color")
-        symbol_by = st.selectbox("Shape by", ("Genotype", "Region", "None"), key="sc-symbol")
+        color_by = st.selectbox("Colour by", ("Sample", "Genotype", *conditions, "Region"),
+                                key="sc-color")
+        symbol_by = st.selectbox("Shape by", ("Genotype", *conditions, "Region", "None"),
+                                 key="sc-symbol")
         log_x = st.checkbox("Log X")
         log_y = st.checkbox("Log Y")
         log_z = st.checkbox("Log Z") if mode == "3D" else False
@@ -1168,7 +1178,8 @@ with cells_tab:
                 view = st.radio("View", ("Embedding", "Scatter"), horizontal=True)
                 clustering = st.session_state.get("clu-method", "Off") != "Off"
                 color_cells = st.selectbox(
-                    "Colour by", ("Sample", "Genotype", "Region") + (("Cluster",) if clustering else ()),
+                    "Colour by", ("Sample", "Genotype", *[c for c in conditions if c in cells], "Region")
+                    + (("Cluster",) if clustering else ()),
                     key="cell-color",
                 )
                 numeric_cells = [
@@ -1993,6 +2004,14 @@ with plots_tab:
                               help=f"Divide the variable by another, sample by sample. "
                                    f"{WB_AREA} is the whole brain's area.")
             frame, variable = normalise(frame, variable, by)
+        choices = group_choices(features)
+        group_by = (st.selectbox("Group by", choices, key="plot-group-by",
+                                 help="What the boxes are. Conditions come from the "
+                                      "Groups box of the viewer's Analysis panel; "
+                                      "“Genotype × …” puts the genotypes side by side "
+                                      "inside each condition.")
+                    if len(choices) > 1 else "Genotype")
+        frame, group = with_group(frame, features, group_by)
         kind = st.radio("Shape", ("Box", "Violin"), horizontal=True, key="plot-kind")
         if per_cell:
             test = st.selectbox(
@@ -2029,30 +2048,30 @@ with plots_tab:
         else:
             data = frame.copy()
             if measure == "Cells" and not per_cell:
-                data = (data.groupby(["Sample", "Genotype"], as_index=False)[variable]
+                data = (data.groupby(["Sample", group], as_index=False)[variable]
                         .mean(numeric_only=True))
             data = data.dropna(subset=[variable])
             # What the test sees: every cell for the mixed model, one number per
             # sample otherwise, never the cells as independent measurements.
             tested = data
             if per_cell and test != MIXED:
-                tested = (data.groupby(["Sample", "Genotype"], as_index=False)[variable]
+                tested = (data.groupby(["Sample", group], as_index=False)[variable]
                           .mean(numeric_only=True))
             dot_label = "Sample"
             if measure == "Cells" and per_cell:
                 dot_label = "Sample"
-            order = ap.genotype_order(data["Genotype"])
-            values = {g: tested.loc[tested["Genotype"] == g, variable].to_numpy(dtype=float)
+            order = group_order(data[group])
+            values = {g: tested.loc[tested[group] == g, variable].to_numpy(dtype=float)
                       for g in order}
             if len(order) < 2 or data.empty:
-                st.warning("Needs at least two genotypes with values.")
+                st.warning("Needs at least two groups with values.")
             else:
                 if per_cell and test == MIXED:
-                    result = mixed_model_test(tested, variable, "Genotype")
-                    pairs = mixed_pairs(tested, variable, "Genotype") if len(order) > 2 else pd.DataFrame()
+                    result = mixed_model_test(tested, variable, group)
+                    pairs = mixed_pairs(tested, variable, group) if len(order) > 2 else pd.DataFrame()
                 else:
                     plain = test.split(" · ")[-1]
-                    grouped = {g: tested.loc[tested["Genotype"] == g, variable].to_numpy(dtype=float)
+                    grouped = {g: tested.loc[tested[group] == g, variable].to_numpy(dtype=float)
                                for g in order}
                     result = compare_groups(grouped, plain)
                     pairs = posthoc_pairs(grouped, plain) if len(order) > 2 else pd.DataFrame()
@@ -2061,7 +2080,7 @@ with plots_tab:
                     pairs = pd.DataFrame([{"Group 1": order[0], "Group 2": order[1],
                                            "p": result["p"]}])
                 title = f"{variable} — {note}"
-                figure = comparison_figure(data, variable, "Genotype", kind, title,
+                figure = comparison_figure(data, variable, group, kind, title,
                                            dot_label=dot_label, pairs=pairs, show_dots=show_dots,
                                            bars=bars, bar_label=bar_label)
                 st.plotly_chart(figure, width="stretch", theme="streamlit")
@@ -2089,7 +2108,7 @@ with plots_tab:
                 if table is not None and not table.empty:
                     numeric = [c for c in table.columns if c not in ("Source", "Term", "df")]
                     st.caption("The mixed model, term by term. “Estimate” is the shift from "
-                               "the first genotype, in the variable's units."
+                               "the first group, in the variable's units."
                                if test == MIXED else f"The {short} table.")
                     st.dataframe(
                         table.style.format({c: "{:.4g}" for c in numeric}, na_rep=""),
@@ -2097,8 +2116,8 @@ with plots_tab:
                     )
 
                 summary = pd.DataFrame([{
-                    "Genotype": g,
-                    "Samples": int(tested.loc[tested["Genotype"] == g, "Sample"].nunique()),
+                    group: g,
+                    "Samples": int(tested.loc[tested[group] == g, "Sample"].nunique()),
                     "n": len(values[g]),
                     "Mean": float(np.mean(values[g])) if len(values[g]) else np.nan,
                     "SD": float(np.std(values[g], ddof=1)) if len(values[g]) > 1 else np.nan,

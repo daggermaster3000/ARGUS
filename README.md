@@ -1186,7 +1186,15 @@ genotype groups.
 The statistics live in `apps/explorer_common.py`, which both apps import, so a
 p value is computed one way whichever app printed it.
 
-In both apps the Compare plot has a **Normalize to** dropdown: the variable is
+In both apps the Compare plot has a **Group by** dropdown: **Genotype**, any
+condition column the Analysis panel's Groups box wrote (a treatment, a stage, …),
+or **Genotype × condition**, which puts the genotypes side by side inside each
+condition (`wt · DMSO`, `mut · DMSO`, `wt · drug`, `mut · drug`), each genotype
+keeping its colour. The tests, significance bars and summary table follow the
+choice; samples with no value form a `(none)` group. The condition columns are
+also offered under **Colour by** and **Shape by** in the other plots.
+
+In both apps the Compare plot also has a **Normalize to** dropdown: the variable is
 divided, sample by sample, by whichever other variable you pick. The first
 choice is **WB area (µm²)**, the whole brain (WB). The whole brain is a region
 you drew and named `WB` if there is one. Otherwise it is the area inside any of

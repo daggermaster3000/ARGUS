@@ -69,7 +69,15 @@ def read_features(source: bytes | str) -> pd.DataFrame:
                                  sheet_name=OUTLINES_SHEET)
     except ValueError:  # workbooks from before the outlines were saved
         outlines = pd.DataFrame()
-    return add_whole_brain(frame, outlines)
+    return fill_groups(add_whole_brain(frame, outlines))
+
+
+def fill_groups(frame: pd.DataFrame) -> pd.DataFrame:
+    """Condition columns with their blanks named, so a plot gets a "(none)" group."""
+    for column in group_columns(frame):
+        if column != "Genotype":
+            frame[column] = frame[column].fillna(NO_VALUE).astype(str).replace({"": NO_VALUE})
+    return frame
 
 
 def add_whole_brain(features: pd.DataFrame, outlines: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -102,6 +110,83 @@ def add_whole_brain(features: pd.DataFrame, outlines: pd.DataFrame | None = None
     if "Region" in frame:
         frame.loc[frame["Region"] == NO_REGIONS, WB_AREA] = np.nan
     return frame
+
+
+#: Columns that name a row rather than group samples.
+NOT_GROUPS = {"Sample", "Region", "Label map", "Channel", "Label", "Cluster", "Part", "Vertex"}
+#: Joins the two labels of a combined group, "wt · DMSO".
+JOIN = " · "
+#: A sample with no value in a group column.
+NO_VALUE = "(none)"
+
+
+def group_columns(features: pd.DataFrame) -> list[str]:
+    """Genotype, then every condition column the analysis wrote (text, per sample)."""
+    found = ["Genotype"] if "Genotype" in features else []
+    for column in features.columns:
+        if column in NOT_GROUPS or column in found or pd.api.types.is_numeric_dtype(features[column]):
+            continue
+        # A group labels a whole sample: one value on every row of it.
+        if (features.groupby("Sample")[column].nunique(dropna=False) <= 1).all():
+            found.append(column)
+    return found
+
+
+def group_choices(features: pd.DataFrame) -> list[str]:
+    """What the samples can be grouped by: each column, and genotype × each condition."""
+    columns = group_columns(features)
+    combined = [f"Genotype × {c}" for c in columns if c != "Genotype"] if "Genotype" in columns else []
+    return columns + combined
+
+
+def with_group(frame: pd.DataFrame, features: pd.DataFrame, choice: str) -> tuple[pd.DataFrame, str]:
+    """*frame* carrying the column *choice* groups by; returns it and that column's name.
+
+    Group columns missing from *frame* (a table built per sample, say) are
+    looked up by sample in *features*. A combined choice gets a column of its
+    own, "wt · DMSO".
+    """
+    parts = [p.strip() for p in choice.split("×")]
+    frame = frame.copy()
+    for column in parts:
+        if column not in frame and column in features:
+            lookup = features.drop_duplicates("Sample").set_index("Sample")[column]
+            frame[column] = frame["Sample"].map(lookup)
+        if column in frame and column != "Genotype":
+            frame[column] = frame[column].fillna(NO_VALUE).astype(str).replace({"": NO_VALUE, "nan": NO_VALUE})
+    if len(parts) == 1:
+        return frame, parts[0]
+    frame[choice] = [JOIN.join(str(v) for v in values) for values in zip(*(frame[p] for p in parts))]
+    return frame, choice
+
+
+def group_order(values) -> list[str]:
+    """Groups in plotting order: reference groups first; combined ones condition by condition.
+
+    ``wt · DMSO, mut · DMSO, wt · drug, mut · drug`` — the genotypes side by
+    side inside each condition, which is the comparison usually wanted.
+    """
+    def ordered(labels):
+        # Samples without a value come last, like an unknown genotype.
+        order = ap.genotype_order(labels)
+        return [g for g in order if g != NO_VALUE] + [g for g in order if g == NO_VALUE]
+
+    found = [str(v) for v in dict.fromkeys(values) if pd.notna(v)]
+    if found and all(JOIN in v for v in found):
+        split = [v.split(JOIN, 1) for v in found]
+        first = ordered([a for a, _ in split])
+        second = ordered([b for _, b in split])
+        return [f"{a}{JOIN}{b}" for b in second for a in first if f"{a}{JOIN}{b}" in found]
+    return ordered(found)
+
+
+def group_colors(order: Sequence[str]) -> dict[str, str]:
+    """A colour per group; combined groups keep their genotype's colour."""
+    if order and all(JOIN in g for g in order):
+        styles = ap.genotype_styles(ap.genotype_order([g.split(JOIN, 1)[0] for g in order]))
+        return {g: styles[g.split(JOIN, 1)[0]][0] for g in order}
+    styles = ap.genotype_styles(order)
+    return {g: styles[g][0] for g in order}
 
 
 def normalise_choices(numbers: Sequence[str], variable: str | None) -> list[str]:
@@ -167,8 +252,11 @@ def read_cells(source: bytes | str) -> pd.DataFrame:
         shapes = pd.DataFrame(columns=["Sample", "Label"])
     for frame in (objects, shapes):
         frame["Sample"] = frame["Sample"].astype(str)
-    shapes = shapes.drop(columns=["Genotype"], errors="ignore")
-    cells = objects.merge(shapes, on=["Sample", "Label"], how="left")
+    keys = ["Sample", "Label"]
+    # The labels of the sample (genotype, conditions) are on every sheet; keep
+    # the Objects sheet's copy rather than merging them in as _x / _y.
+    shapes = shapes.drop(columns=[c for c in shapes.columns if c in objects and c not in keys])
+    cells = objects.merge(shapes, on=keys, how="left")
     try:
         channels = pd.read_excel(io.BytesIO(source) if isinstance(source, bytes) else source,
                                  sheet_name=CELL_INTENSITIES)
@@ -176,11 +264,11 @@ def read_cells(source: bytes | str) -> pd.DataFrame:
         channels = pd.DataFrame()
     if not channels.empty:
         channels["Sample"] = channels["Sample"].astype(str)
-        channels = channels.drop(columns=["Genotype"], errors="ignore")
-        cells = cells.merge(channels, on=["Sample", "Label"], how="left")
+        channels = channels.drop(columns=[c for c in channels.columns if c in cells and c not in keys])
+        cells = cells.merge(channels, on=keys, how="left")
     cells["Genotype"] = [ap.genotype_label(value) for value in cells.get("Genotype", "")]
     cells["Region"] = cells.get("Region", "").astype(str)
-    return cells
+    return fill_groups(cells)
 
 
 #: Sheet of every channel's intensity inside every cell.
@@ -318,7 +406,7 @@ def mixed_model_test(frame: pd.DataFrame, value: str, group: str, unit: str = "S
     groups = [g for g, rows in frame.groupby(group) if len(rows) >= 2]
     units = frame[unit].nunique()
     if len(groups) < 2 or units < 3:
-        out["notes"].append("Needs two genotypes and at least three samples.")
+        out["notes"].append("Needs two groups and at least three samples.")
         return out
     try:
         full, data, spread, centre, shaky = _mixed_fit(frame, value, group, unit, "y ~ C(g)")
@@ -337,7 +425,7 @@ def mixed_model_test(frame: pd.DataFrame, value: str, group: str, unit: str = "S
     reference = str(sorted(frame[group].astype(str).unique())[0])
     out["table"] = mixed_table(full, spread, centre, reference)
     out["notes"].append(
-        f"Mixed model on {len(data):,} cells from {units} samples: genotype as a fixed "
+        f"Mixed model on {len(data):,} cells from {units} samples: the group as a fixed "
         f"effect, sample as a random intercept, likelihood-ratio χ²({degrees}). "
         "ICC is how much of the variation is between samples rather than within them."
     )
@@ -560,10 +648,8 @@ def comparison_figure(frame: pd.DataFrame, value: str, group: str, kind: str, ti
     the one comparison when there are two groups. *bars* is "Significant only",
     "All pairs" or "Off"; *bar_label* "Stars" or "p value".
     """
-    order = ap.genotype_order(frame[group]) if group == "Genotype" else list(dict.fromkeys(frame[group]))
-    styles = ap.genotype_styles(order) if group == "Genotype" else {}
-    colors = {g: (styles[g][0] if styles else REGION_COLORS[i % len(REGION_COLORS)])
-              for i, g in enumerate(order)}
+    order = group_order(frame[group])
+    colors = group_colors(order)
     figure = go.Figure()
     for position, name in enumerate(order):
         values = frame.loc[frame[group] == name, value].astype(float).dropna()

@@ -61,9 +61,13 @@ from explorer_common import (  # noqa: E402
     posthoc_pairs,
     read_cells,
     WB_AREA,
+    group_choices,
+    group_columns,
+    group_order,
     normalise,
     normalise_choices,
     read_features,
+    with_group,
     stars,
 )
 
@@ -115,6 +119,8 @@ except ValueError as exc:
     st.error(f"Could not read the “{SHEET}” sheet: {exc}")
     st.stop()
 cells_all = read_cells(source)
+#: The condition columns the analysis wrote, beside the genotype.
+conditions = group_columns(features)[1:]
 
 with st.sidebar:
     st.header("Rows")
@@ -195,6 +201,14 @@ with compare_tab:
                               help=f"Divide the variable by another, sample by sample. "
                                    f"{WB_AREA} is the whole brain's area.")
             frame, variable = normalise(frame, variable, by)
+        choices = group_choices(features)
+        group_by = (st.selectbox("Group by", choices, key="group-by",
+                                 help="What the boxes are. Conditions come from the "
+                                      "Groups box of the viewer's Analysis panel; "
+                                      "“Genotype × …” puts the genotypes side by side "
+                                      "inside each condition.")
+                    if len(choices) > 1 else "Genotype")
+        frame, group = with_group(frame, features, group_by)
         kind = st.radio("Shape", ("Box", "Violin"), horizontal=True, key="kind")
         test = st.selectbox("Test", CELL_TESTS if per_cell else TESTS, key="test",
                             help="ANOVA compares means and assumes similar spreads; Welch's "
@@ -209,21 +223,21 @@ with compare_tab:
         else:
             data = frame.dropna(subset=[variable])
             if measure == "Cells" and not per_cell:
-                data = (data.groupby(["Sample", "Genotype"], as_index=False)[variable]
+                data = (data.groupby(["Sample", group], as_index=False)[variable]
                         .mean(numeric_only=True))
             tested = data
             if per_cell and test != MIXED:
-                tested = (data.groupby(["Sample", "Genotype"], as_index=False)[variable]
+                tested = (data.groupby(["Sample", group], as_index=False)[variable]
                           .mean(numeric_only=True))
-            order = ap.genotype_order(data["Genotype"])
-            values = {g: tested.loc[tested["Genotype"] == g, variable].to_numpy(dtype=float)
+            order = group_order(data[group])
+            values = {g: tested.loc[tested[group] == g, variable].to_numpy(dtype=float)
                       for g in order}
             if len(order) < 2 or data.empty:
-                st.warning("Needs at least two genotypes with values.")
+                st.warning("Needs at least two groups with values.")
             else:
                 if per_cell and test == MIXED:
-                    result = mixed_model_test(tested, variable, "Genotype")
-                    pairs = mixed_pairs(tested, variable, "Genotype") if len(order) > 2 else pd.DataFrame()
+                    result = mixed_model_test(tested, variable, group)
+                    pairs = mixed_pairs(tested, variable, group) if len(order) > 2 else pd.DataFrame()
                 else:
                     plain = test.split(" · ")[-1]
                     result = compare_groups(values, plain)
@@ -231,7 +245,7 @@ with compare_tab:
                 if len(order) == 2 and np.isfinite(result["p"]):
                     pairs = pd.DataFrame([{"Group 1": order[0], "Group 2": order[1],
                                            "p": result["p"]}])
-                figure = comparison_figure(data, variable, "Genotype", kind,
+                figure = comparison_figure(data, variable, group, kind,
                                            f"{variable} — {note}", pairs=pairs,
                                            bars=bars, bar_label=bar_label)
                 st.plotly_chart(figure, width="stretch", theme="streamlit")
@@ -259,8 +273,8 @@ with compare_tab:
                     st.dataframe(table.style.format({c: "{:.4g}" for c in numeric}, na_rep=""),
                                  hide_index=True, width="stretch")
                 summary = pd.DataFrame([{
-                    "Genotype": g,
-                    "Samples": int(tested.loc[tested["Genotype"] == g, "Sample"].nunique()),
+                    group: g,
+                    "Samples": int(tested.loc[tested[group] == g, "Sample"].nunique()),
                     "n": len(values[g]),
                     "Mean": float(np.mean(values[g])) if len(values[g]) else np.nan,
                     "SD": float(np.std(values[g], ddof=1)) if len(values[g]) > 1 else np.nan,
@@ -295,14 +309,14 @@ with relate_tab:
                                   key="rel-region")
             frame = rows if region == "(every region)" else rows[rows["Region"] == region]
             numbers = plottable(frame, IDENTITY)
-            colour_choices = ["Genotype", "Region", "Sample"]
+            colour_choices = ["Genotype", *conditions, "Region", "Sample"]
         else:
             region = st.selectbox("Region",
                                   ["(every region)"] + list(dict.fromkeys(cells_all["Region"])),
                                   key="rel-cell-region")
             frame = cells_all if region == "(every region)" else cells_all[cells_all["Region"] == region]
             numbers = plottable(frame, CELL_IDENTITY)
-            colour_choices = ["Genotype", "Region", "Sample"]
+            colour_choices = ["Genotype", *[c for c in conditions if c in frame], "Region", "Sample"]
             if len(frame) > 5000:
                 frame = frame.sample(n=5000, random_state=0)
                 st.caption("5,000 cells drawn at random.")
