@@ -515,11 +515,16 @@ def launch(
 
     from .splash import start as start_splash
 
+    from .dragdrop import catch_file_open_events
+
+    # napari's QApplication, made here rather than by ``napari.Viewer`` a moment
+    # later: the splash needs it, and so does catching files macOS hands over
+    # (dropped on the app icon) while the window is still being built.
+    get_qapp()
+    file_opener = catch_file_open_events()
+
     banner = None
     if splash:
-        # The splash needs a QApplication, and napari's is the one the viewer
-        # will run on: made here rather than by ``napari.Viewer`` a moment later.
-        get_qapp()
         banner = start_splash(WINDOW_TITLE)
 
     app = MicroscopyViewer(
@@ -531,6 +536,8 @@ def launch(
         if banner is not None:
             banner.pump(f"Opening {len(paths)} file(s)…")
         app.open_paths(paths)
+    if file_opener is not None:
+        file_opener.attach(app.open_paths)
     if banner is not None:
         # Shown only now, with everything on it: the point of the splash is that
         # nobody watches an empty window being filled in.

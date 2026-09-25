@@ -1252,6 +1252,42 @@ def main() -> int:
     )
     print(flush=True)
 
+    print("files handed over by macOS (dropped on the app icon)", flush=True)
+    from qtpy.QtCore import QEvent
+    from qtpy.QtWidgets import QApplication
+
+    from microscopy_viewer.dragdrop import catch_file_open_events
+
+    class FileOpen:
+        """Stands in for QFileOpenEvent, which PyQt5 will not construct."""
+
+        def __init__(self, path):
+            self._path = path
+
+        def type(self):
+            return QEvent.FileOpen
+
+        def file(self):
+            return self._path
+
+    qapp = QApplication.instance()
+    catcher = catch_file_open_events()
+    received: list[list[str]] = []
+    for path in ("/data/a.tif", "/data/b.ims", sys.argv[0]):
+        catcher.eventFilter(qapp, FileOpen(path))
+    QCoreApplication.processEvents()
+    check(received == [], "held until the viewer is ready")
+    catcher.attach(received.append)
+    for _ in range(5):
+        QCoreApplication.processEvents()
+    check(
+        received == [["/data/a.tif", "/data/b.ims"]],
+        f"then opened together, without the launcher script ({received})",
+    )
+    qapp.removeEventFilter(catcher)
+    catcher.deleteLater()
+    print(flush=True)
+
     print("guided tour", flush=True)
     from qtpy.QtCore import QPoint, QRect
 

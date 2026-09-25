@@ -44,8 +44,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Desktop and Start Menu shortcuts. Windows only, and optional even there:
-# install_shortcut.py falls back to cscript when pywin32 is absent.
+# Desktop and Start Menu shortcuts. Only Windows needs anything, and optional even
+# there: install_shortcut.py falls back to cscript when pywin32 is absent.
 shortcut = ["pywin32>=304 ; sys_platform == 'win32'"]
 
 # Atlas registration. Deliberately not a core dependency: antspyx is a large

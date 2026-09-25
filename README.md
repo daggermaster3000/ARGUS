@@ -10,9 +10,9 @@ metadata alongside the image, and lets you measure and annotate in calibrated
 micrometres — then export a snapshot for slides, a time lapse as a movie, and the
 measurements as a spreadsheet.
 
-It stays a plain Python project: no bundling, no standalone executable. Windows also
-gets a script that drops a desktop shortcut pointing at the launcher, so the viewer
-opens with a double-click.
+It stays a plain Python project: no bundling, no standalone executable. Windows and
+macOS also get a script that drops a desktop shortcut pointing at the launcher, so
+the viewer opens with a double-click.
 
 Runs on Windows, macOS and Linux. Python 3.9 or newer.
 
@@ -62,12 +62,12 @@ python -m pip install -r requirements.txt   # anything you are missing
 ```
 </details>
 
-### Windows: desktop shortcut
+### Desktop shortcut (Windows and macOS)
 
-Optional, and Windows only:
+Optional. Run it from the environment that has napari installed:
 
-```powershell
-python -m pip install ".[shortcut]"
+```bash
+python -m pip install ".[shortcut]"   # Windows only; nothing extra is needed on macOS
 python install_shortcut.py
 ```
 
@@ -75,20 +75,26 @@ python install_shortcut.py
 interpreter it wired the shortcut to, and warns about any missing package before you
 double-click.
 
+- **Windows:** a `.lnk` that runs `pythonw.exe launch_viewer.py`.
+- **macOS:** a small `Microscopy Viewer.app` that runs the same interpreter on
+  `launch_viewer.py`. Drag it into the Dock to keep it there. It is offered under
+  **Open With** for `.ims`, TIFF and Zarr files, but never made their default app.
+
 | Command | Effect |
 |---|---|
-| `python install_shortcut.py --start-menu` | also add a Start Menu entry |
-| `python install_shortcut.py --console` | launch via `python.exe` so a console stays open (debugging) |
+| `python install_shortcut.py --start-menu` | also add a Start Menu entry (macOS: `~/Applications`, so Launchpad and Spotlight find it) |
+| `python install_shortcut.py --console` | keep a console open for debugging: `python.exe` on Windows, a Terminal `.command` file on macOS |
 | `python install_shortcut.py --uninstall` | remove the shortcuts |
 
-On macOS and Linux there is no shortcut installer — launch it from a terminal, or
-make a `.desktop` entry pointing at the `microscopy-viewer` command.
+On Linux there is no shortcut installer — launch it from a terminal, or make a
+`.desktop` entry pointing at the `microscopy-viewer` command.
 
 ## Use
 
 - Run `microscopy-viewer` — with file paths after it to open them at startup.
 - **Drop image files onto the open window** to add them to the current session.
-- On Windows, **double-click** the shortcut, or **drop files onto the shortcut**.
+- **Double-click** the desktop shortcut, or **drop files onto it** (on macOS, onto
+  its Dock icon too, even while the viewer is running).
 - From a source checkout without installing: `python launch_viewer.py cells.ims`
 
 Several datasets can be open at once; each channel becomes its own layer, blended
@@ -1472,17 +1478,19 @@ python launch_viewer.py tests/sample_data/sample_4d_2ch.ims
 
 ## Troubleshooting
 
-The shortcut runs `pythonw.exe`, which has no console, so nothing is printed if
-startup fails. Two things to check:
+The shortcut runs without a console (`pythonw.exe` on Windows, the app on macOS),
+so nothing is printed if startup fails. Two things to check:
 
 - A dialog appears on a startup failure with the full traceback under **Show Details**.
-- Every run logs to `%LOCALAPPDATA%\MicroscopyViewer\microscopy_viewer.log`.
+- Every run logs to `%LOCALAPPDATA%\MicroscopyViewer\microscopy_viewer.log` on Windows,
+  `~/Library/Caches/MicroscopyViewer/microscopy_viewer.log` on macOS.
 
 To watch it work with a console instead, reinstall the shortcut with
 `python install_shortcut.py --console`, or run `python launch_viewer.py --verbose`.
 
 If the shortcut opens the wrong environment, re-run `install_shortcut.py` from the
 interpreter you want — the shortcut always points at the interpreter that created it.
+The same goes for moving the project folder.
 
 ### First launch is slow, or hangs before the window appears
 

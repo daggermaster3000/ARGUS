@@ -7,6 +7,8 @@ we can handle and leave everything else to napari.
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Callable, Sequence
 
 from qtpy.QtCore import QEvent, QObject, QTimer
@@ -77,3 +79,68 @@ def install(callback: Callable[[Sequence[str]], None]) -> FileDropFilter | None:
     app.installEventFilter(handler)
     logger.info("drag-and-drop handler installed")
     return handler
+
+
+class FileOpenCatcher(QObject):
+    """Opens files handed to the application by macOS.
+
+    Files dropped on the app icon in the Dock or Finder, or opened with *Open
+    With*, never reach the command line on macOS: they arrive as ``FileOpen``
+    events. The first ones come while the window is still being built, so they
+    are held until :meth:`attach` gives somewhere to send them.
+    """
+
+    def __init__(self, parent: QObject | None = None):
+        super().__init__(parent)
+        self._callback: Callable[[Sequence[str]], None] | None = None
+        self._pending: list[str] = []
+        # macOS also replays the command line as FileOpen events: the launcher
+        # script itself, and any paths given there, which are opened already.
+        self._from_command_line = {_normalise(arg) for arg in sys.argv}
+
+    def attach(self, callback: Callable[[Sequence[str]], None]) -> None:
+        """Start delivering to *callback*, including anything already received."""
+        self._callback = callback
+        if self._pending:
+            QTimer.singleShot(0, self._flush)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 (Qt naming)
+        if event.type() != QEvent.FileOpen:
+            return False
+        path = event.file()
+        if not path:
+            return False
+        if _normalise(path) in self._from_command_line:
+            return True
+        # One event per file: several dropped together are opened as one batch.
+        if not self._pending and self._callback is not None:
+            QTimer.singleShot(0, self._flush)
+        self._pending.append(path)
+        return True
+
+    def _flush(self) -> None:
+        if self._callback is None or not self._pending:
+            return
+        paths, self._pending = self._pending, []
+        logger.info("opening %d file(s) handed over by the system", len(paths))
+        try:
+            self._callback(paths)
+        except Exception:  # pragma: no cover - the callback reports its own errors
+            logger.exception("opening %s failed", paths)
+
+
+def _normalise(path: str) -> str:
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError):
+        return path
+
+
+def catch_file_open_events() -> FileOpenCatcher | None:
+    """Start holding macOS ``FileOpen`` events on the running :class:`QApplication`."""
+    app = QApplication.instance()
+    if app is None:
+        return None
+    catcher = FileOpenCatcher(parent=app)
+    app.installEventFilter(catcher)
+    return catcher
