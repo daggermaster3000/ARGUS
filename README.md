@@ -368,6 +368,35 @@ gives you the whole panel as tab-separated text.
 If a file carries no voxel size, the panel says so explicitly and measurements
 switch to pixels rather than silently reporting wrong micrometres.
 
+### Acquisition movie
+
+The **Acquisition movie** panel (with the other right-hand panels, or from the
+**Window** menu) films an open z-stack the way the microscope acquired it. Each
+ticked channel's maximum-intensity projection builds up plane by plane, first to
+last, and then the next channel does the same. A **Merge** panel gains each
+channel as it is acquired, and the finished merge is held at the end.
+
+- **Dataset** — any image open in the viewer, at its displayed timepoint.
+- **Channels** — tick the ones to film and drag them into the order they are
+  acquired in. Each keeps its layer's colour.
+- **Layout** — *Channels + merge* (a panel per channel beside the merge, two rows
+  past three panels) or *Merge only*.
+- **Contrast** — *Fit to the projection* (default) stretches each channel to its
+  finished projection, which is brighter than any single plane; *As displayed*
+  uses the layer's contrast.
+- **Per channel**, **Hold at end**, **Frame rate**, **Panel size** — how long each
+  sweep lasts, how long the merge stays, and the frame size. A stack deeper than
+  the frames available advances several planes per frame; a shallow one repeats
+  frames, so every channel takes the same time.
+- **Show** — the channel name with the depth reached (`z 42 / 120 · 63.0 µm`) and a
+  progress bar under the active panel, and a labelled scale bar on the merge.
+
+The stack is read once per channel, from the coarsest pyramid level that still
+fills a panel, so a whole-brain file does not have to be read at full resolution.
+**Preview** draws the last frame; **Export movie…** writes an H.264 `.mp4` (or
+`.mov`, or `.gif`) with the same encoder as the time-series export, and **Stop**
+leaves no half-written file behind.
+
 ### Measuring and annotating
 
 The **Measurements** dock drives a standard napari Shapes layer:

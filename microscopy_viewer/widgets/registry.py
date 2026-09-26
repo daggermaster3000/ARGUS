@@ -118,6 +118,11 @@ def _register_builtin_panels() -> None:
         # Takes the app: it analyses whatever the experiment panel has selected.
         return AnalysisWidget(app)
 
+    def _acquisition(app):
+        from .acquisition_widget import AcquisitionWidget
+
+        return AcquisitionWidget(app)
+
     def _timeseries(app):
         from .timeseries_widget import TimeSeriesWidget
 
@@ -218,6 +223,17 @@ def _register_builtin_panels() -> None:
             area="left",
             tabify_with="experiment",
             order=6,
+        )
+    )
+
+    register_panel(
+        PanelSpec(
+            identifier="acquisition_movie",
+            title="Acquisition movie",
+            factory=_acquisition,
+            attribute="acquisition_widget",
+            tabify_with="intensity_comparison",
+            order=70,
         )
     )
 

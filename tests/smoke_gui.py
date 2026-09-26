@@ -1259,6 +1259,27 @@ def main() -> int:
     app.viewer.layers.remove(reg.REGION_LAYER_NAME)
     print(flush=True)
 
+    print("acquisition movie panel", flush=True)
+    film = MicroscopyViewer(show=False)
+    try:
+        film.open_paths([SAMPLES / "sample_4d_2ch.ims"])
+        panel = film.acquisition_widget
+        check(panel is not None, "acquisition movie panel built")
+        check(panel._channel_list.count() == 2, "it lists the open stack's two channels")
+        panel._fps_spin.setValue(5)
+        panel._seconds_spin.setValue(1)
+        movie = Path(tempfile.mkdtemp()) / "acquisition.mp4"
+        panel.export(str(movie))
+        for _ in range(3000):
+            QCoreApplication.processEvents()
+            if panel._worker is None:
+                break
+            time.sleep(0.01)
+        check(movie.exists() and movie.stat().st_size > 0, f"and writes the movie ({panel._status.text()})")
+    finally:
+        film.viewer.close()
+    print(flush=True)
+
     print("window fits a laptop screen", flush=True)
     from qtpy.QtWidgets import QScrollArea
 
