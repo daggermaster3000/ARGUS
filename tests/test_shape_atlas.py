@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -129,3 +130,30 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_intensity_maps_average_the_cells_nearby_and_leave_empty_areas_blank():
+    square = np.array([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]])
+    rng = np.random.default_rng(0)
+    left = rng.uniform([5, 5], [45, 95], (200, 2))
+    points = {"a": left}
+    values = {"a": np.full(len(left), 0.8)}
+    grid = sa.intensity_maps(square, points, values, sigma=5.0)
+    image = grid.maps["a"]
+    column = np.searchsorted(grid.x, 25.0)
+    row = np.searchsorted(grid.y, 50.0)
+    assert image[row, column] == pytest.approx(0.8)
+    assert np.isnan(image[row, np.searchsorted(grid.x, 90.0)]), "no cells on the right"
+    # A second sample that only covers the right keeps the left of the group mean.
+    right = rng.uniform([55, 5], [95, 95], (200, 2))
+    both = sa.intensity_maps(square, {"a": left, "b": right},
+                             {"a": values["a"], "b": np.full(len(right), 0.2)}, sigma=5.0)
+    mean = both.nanmean_of(["a", "b"])
+    assert mean[row, column] == pytest.approx(0.8)
+    assert mean[row, np.searchsorted(both.x, 75.0)] == pytest.approx(0.2)
+
+
+def test_intensities_are_normalised_to_every_cell():
+    reference = np.arange(0, 101, dtype=float)
+    scaled = sa.normalise_intensity(np.array([1.0, 50.0, 99.0]), reference)
+    assert scaled == pytest.approx([0.0, 0.5, 1.0])

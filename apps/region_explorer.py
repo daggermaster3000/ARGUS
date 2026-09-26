@@ -607,6 +607,17 @@ def explain_cells(matrix: np.ndarray, target: np.ndarray, groups: np.ndarray | N
 
 # -- atlas helpers ------------------------------------------------------------
 
+
+def intensity_columns(cells: pd.DataFrame) -> list[str]:
+    """Per-cell intensities to map: each channel's mean first, then its other statistics."""
+    if cells.empty:
+        return []
+    channels = cell_groups(cells)["Channel intensities"]
+    means = [c for c in channels if c.endswith(" Mean")]
+    rest = [c for c in channels if c not in means]
+    own = ["Mean intensity"] if "Mean intensity" in cells else []
+    return [c for c in [*means, *own, *rest] if cells[c].notna().any()]
+
 #: Sequential ramp for cell density: one hue, light (few cells) to dark.
 DENSITY_SCALE = [
     [0.0, "#f4f8fd"], [0.2, "#b7d3f6"], [0.4, "#6da7ec"],
@@ -1468,10 +1479,29 @@ with atlas_tab:
                                   help="0 bends the outline exactly onto the template; higher "
                                        "values bend it less, ignoring small wiggles.")
             st.subheader("Heatmap")
+            intensity_choices = intensity_columns(cells_all)
+            map_kind = st.radio(
+                "Map", ("Cell density", "Channel intensity"), horizontal=True, key="atlas-map",
+                help="Cell density: where the cells are. Channel intensity: how bright a "
+                     "channel is inside the cells there, averaged over nearby cells.",
+            )
+            intensity_column = None
+            if map_kind == "Channel intensity":
+                if intensity_choices:
+                    intensity_column = st.selectbox(
+                        "Channel", intensity_choices, key="atlas-channel",
+                        help="Normalised to every processed cell in the workbook: 0 is the "
+                             "1st percentile of all cells, 1 the 99th, so a map means the "
+                             "same across samples, genotypes and regions.",
+                    )
+                else:
+                    st.caption("This workbook has no per-cell intensities; showing density.")
             sigma = st.slider("Smoothing radius (µm)", 2.0, 60.0, 15.0, 1.0)
-            units = st.radio("Per sample", (sa.PER_AREA, sa.SHARE),
-                             help="Share compares where the cells are regardless of how many "
-                                  "each sample has.")
+            units = sa.PER_AREA
+            if intensity_column is None:
+                units = st.radio("Per sample", (sa.PER_AREA, sa.SHARE),
+                                 help="Share compares where the cells are regardless of how many "
+                                      "each sample has.")
             st.subheader("Cells")
             draw = st.radio("Draw the cells", ("Hidden", "Dots", "Outlines"), horizontal=True,
                             key="atlas-draw")
@@ -1507,6 +1537,9 @@ with atlas_tab:
                 several = [s for s in chosen if len(outlines[(s, region)]) > 1]
                 cell_points = {}
                 cell_labels = {}
+                cell_values = {}
+                reference = (read_cells(source)[intensity_column].to_numpy(float)
+                             if intensity_column else None)
                 if not cells_all.empty:
                     inside = cells_all[cells_all["Region"] == region]
                     for s in chosen:
@@ -1517,6 +1550,9 @@ with atlas_tab:
                              -mine["Centroid Y (µm)"].to_numpy(float)]
                         )
                         cell_labels[s] = mine["Label"].astype(int).to_numpy()
+                        if intensity_column:
+                            cell_values[s] = sa.normalise_intensity(
+                                mine[intensity_column].to_numpy(float), reference)
                 try:
                     atlas, template, registered, fits, mapped = register_region(
                         shapes, cell_points, fit.startswith("Shape"), reflect, warp, smoothing
@@ -1628,22 +1664,31 @@ with atlas_tab:
 
                     ramp = (DENSITY_SCALE_GREY if draw != "Hidden" and atlas_color != "Nothing"
                             else DENSITY_SCALE)
-                    heat_points = mapped
+                    heat_points, heat_values = mapped, cell_values
                     if heat_of != "All cells":
-                        heat_points = {
-                            s: p[np.array([cluster_of.get((s, int(lab))) == heat_of
-                                           for lab in cell_labels.get(s, ())], dtype=bool)]
-                            if len(p) else p
-                            for s, p in mapped.items()
-                        }
-                    grid = sa.density_maps(template, heat_points, sigma=sigma, units=units)
-                    unit = "cells / 1000 µm²" if units == sa.PER_AREA else "% / 1000 µm²"
-                    panels = {f"{g} (n={len(by_genotype[g])})": grid.mean_of(by_genotype[g])
+                        wanted = {s: np.array([cluster_of.get((s, int(lab))) == heat_of
+                                               for lab in cell_labels.get(s, ())], dtype=bool)
+                                  for s in mapped}
+                        heat_points = {s: p[wanted[s]] if len(p) else p for s, p in mapped.items()}
+                        heat_values = {s: v[wanted[s]] for s, v in cell_values.items() if s in wanted}
+                    if intensity_column:
+                        grid = sa.intensity_maps(template, heat_points, heat_values, sigma=sigma)
+                        unit = "× all cells' range"
+                        mean_of = grid.nanmean_of
+                    else:
+                        grid = sa.density_maps(template, heat_points, sigma=sigma, units=units)
+                        unit = "cells / 1000 µm²" if units == sa.PER_AREA else "% / 1000 µm²"
+                        mean_of = grid.mean_of
+                    panels = {f"{g} (n={len(by_genotype[g])})": mean_of(by_genotype[g])
                               for g in order}
                     top = max((float(np.nanmax(v)) for v in grid.maps.values() if np.isfinite(v).any()),
                               default=0.0)
                     top_mean = max((float(np.nanmax(v)) for v in panels.values() if np.isfinite(v).any()),
                                    default=0.0)
+                    if intensity_column:
+                        # One fixed scale: 0 and 1 are the whole workbook's 1st and
+                        # 99th percentiles, whatever is on screen.
+                        top = top_mean = 1.0
                     overlay = None
                     if draw != "Hidden":
                         overlay = {f"{g} (n={len(by_genotype[g])})": overlay_for(by_genotype[g])
@@ -1654,20 +1699,29 @@ with atlas_tab:
                                        colors=overlay_colors),
                         width="stretch", theme="streamlit",
                     )
-                    st.caption(
-                        (f"Heatmap of cluster {heat_of} only. " if heat_of != "All cells" else "")
-                        + f"Mean over the samples of each genotype, each sample weighed the "
-                        f"same; smoothed over {sigma:g} µm. Densities are per µm² of the "
-                        f"template" + (", which the bending stretches or squeezes a little "
-                                       "from each sample's own area." if warp else ".")
-                    )
+                    if intensity_column:
+                        st.caption(
+                            (f"Cluster {heat_of} only. " if heat_of != "All cells" else "")
+                            + f"{intensity_column} of the cells near each point, averaged "
+                            f"within {sigma:g} µm, then over the samples of each genotype. "
+                            "Normalised to every processed cell in the workbook: 0 is the 1st "
+                            "percentile of all cells, 1 the 99th. Blank where no cells are."
+                        )
+                    else:
+                        st.caption(
+                            (f"Heatmap of cluster {heat_of} only. " if heat_of != "All cells" else "")
+                            + f"Mean over the samples of each genotype, each sample weighed the "
+                            f"same; smoothed over {sigma:g} µm. Densities are per µm² of the "
+                            f"template" + (", which the bending stretches or squeezes a little "
+                                           "from each sample's own area." if warp else ".")
+                        )
 
                     if len(order) >= 2:
                         pair = st.columns(2)
                         base = pair[0].selectbox("Compare", order, index=0, key="atlas-base")
                         other = pair[1].selectbox("with", [g for g in order if g != base],
                                                   index=0, key="atlas-other")
-                        difference = grid.mean_of(by_genotype[other]) - grid.mean_of(by_genotype[base])
+                        difference = mean_of(by_genotype[other]) - mean_of(by_genotype[base])
                         span = float(np.nanmax(np.abs(difference))) if np.isfinite(difference).any() else 1.0
                         st.plotly_chart(
                             density_figure(grid, {f"{other} − {base}": difference}, template,
@@ -1675,9 +1729,10 @@ with atlas_tab:
                                            zmax=span or 1.0, unit=unit),
                             width="stretch", theme="streamlit",
                         )
-                        st.caption(f"Red: more cells in {other} than in {base} there; "
-                                   f"blue: fewer. With few samples per genotype, read this "
-                                   f"next to the per-sample maps below.")
+                        what = "brighter" if intensity_column else "more cells"
+                        st.caption(f"Red: {what} in {other} than in {base} there; "
+                                   f"blue: {'dimmer' if intensity_column else 'fewer'}. With few "
+                                   f"samples per genotype, read this next to the per-sample maps below.")
 
                     with st.expander("Every sample"):
                         per_sample = {f"{s} ({genotype_of.get(s)})": grid.maps[s]

@@ -272,6 +272,17 @@ class DensityGrid:
             return np.full(self.inside.shape, np.nan)
         return np.mean(chosen, axis=0)
 
+    def nanmean_of(self, samples) -> np.ndarray:
+        """Like :meth:`mean_of`, but a sample with no cells somewhere does not blank it."""
+        chosen = [self.maps[s] for s in samples if s in self.maps]
+        if not chosen:
+            return np.full(self.inside.shape, np.nan)
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # a pixel no sample reaches
+            return np.nanmean(np.stack(chosen), axis=0)
+
 
 def inside_polygon(polygon: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """Grid mask of the pixel centres inside *polygon* (even-odd rule)."""
@@ -330,3 +341,77 @@ def density_maps(
             value = per_um2 * 1000.0
         maps[sample] = np.where(inside, value, np.nan)
     return DensityGrid(x, y, inside, maps)
+
+
+def _grid(template: np.ndarray, pixel: float | None, margin: float):
+    low, high = template.min(axis=0), template.max(axis=0)
+    pad = (high - low) * margin
+    low, high = low - pad, high + pad
+    if pixel is None:
+        pixel = float(max(high - low)) / 160.0
+    pixel = max(float(pixel), 1e-6)
+    edges_x = np.arange(low[0], high[0] + pixel, pixel)
+    edges_y = np.arange(low[1], high[1] + pixel, pixel)
+    x = 0.5 * (edges_x[:-1] + edges_x[1:])
+    y = 0.5 * (edges_y[:-1] + edges_y[1:])
+    return edges_x, edges_y, x, y, pixel
+
+
+def intensity_maps(
+    template: np.ndarray,
+    points: dict[str, np.ndarray],
+    values: dict[str, np.ndarray],
+    *,
+    sigma: float = 10.0,
+    pixel: float | None = None,
+    margin: float = 0.05,
+    min_cells: float = 0.25,
+) -> DensityGrid:
+    """Gaussian-weighted mean of a per-cell value over the template, per sample.
+
+    At every pixel, the cells within about *sigma* µm are averaged, nearer ones
+    counting more — the value the tissue has there, not how many cells there
+    are. Where fewer than *min_cells* cells' worth of weight reach a pixel it is
+    left NaN: no cells there says nothing about the intensity. *values* are in
+    whatever units the caller has normalised them to.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    edges_x, edges_y, x, y, pixel = _grid(template, pixel, margin)
+    inside = inside_polygon(template, x, y)
+    width = max(float(sigma), 0.0) / pixel
+    # What one cell's weight adds at its own pixel once smoothed.
+    one_cell = 1.0 / (2.0 * np.pi * width * width) if width > 0 else 1.0
+
+    maps = {}
+    for sample, where in points.items():
+        where = np.asarray(where, dtype=float).reshape(-1, 2)
+        value = np.asarray(values.get(sample, ()), dtype=float).reshape(-1)
+        keep = np.isfinite(value) if len(value) == len(where) else np.zeros(len(where), bool)
+        where, value = where[keep], value[keep]
+        counts, _, _ = np.histogram2d(where[:, 1], where[:, 0], bins=[edges_y, edges_x])
+        totals, _, _ = np.histogram2d(where[:, 1], where[:, 0], bins=[edges_y, edges_x], weights=value)
+        weight = gaussian_filter(counts, sigma=width, mode="constant")
+        total = gaussian_filter(totals, sigma=width, mode="constant")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mean = total / weight
+        enough = weight >= min_cells * one_cell
+        maps[sample] = np.where(inside & enough, mean, np.nan)
+    return DensityGrid(x, y, inside, maps)
+
+
+def normalise_intensity(values: np.ndarray, reference: np.ndarray,
+                        low_percentile: float = 1.0, high_percentile: float = 99.0) -> np.ndarray:
+    """*values* on the scale of *reference*: its 1st percentile is 0, its 99th is 1.
+
+    *reference* is every processed cell, so a map reads the same whichever
+    samples, genotypes or region it shows.
+    """
+    finite = np.asarray(reference, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return np.full(np.shape(values), np.nan)
+    low, high = np.percentile(finite, [low_percentile, high_percentile])
+    if not high > low:
+        high = low + 1.0
+    return (np.asarray(values, dtype=float) - low) / (high - low)

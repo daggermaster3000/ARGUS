@@ -1192,6 +1192,16 @@ writes. It reads the *Region features* sheet and has three tabs:
   own shape, from `cell_outlines.npz` — found automatically beside a workbook
   given as a path, or uploaded in the sidebar. At most 3 000 cell outlines are
   drawn at once; beyond that the page stops being responsive.
+- **Atlas** — one region's outline registered across samples into a mean shape,
+  with a heatmap over it. **Map → Cell density** shows where the cells are;
+  **Map → Channel intensity** shows how bright a channel is inside the cells
+  there (each channel's per-cell Mean, Max, SD or Integrated from the *Cell
+  intensities* sheet), averaged over the cells within the smoothing radius and
+  then over each genotype's samples. Intensities are normalised to every
+  processed cell in the workbook — 0 is the 1st percentile of all cells, 1 the
+  99th — so one colour means the same in every sample, genotype and region.
+  Areas with no cells nearby are left blank rather than read as dark. The
+  genotype difference map and the per-sample maps follow the choice.
 - **Table** of the rows being plotted, filtered by the region, genotype and
   sample pickers in the sidebar.
 
