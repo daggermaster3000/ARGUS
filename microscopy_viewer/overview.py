@@ -509,3 +509,128 @@ def closeups(samples: Sequence, covered: Box | None = None, window: float = _WIN
         len(out), len(boxed), sum(1 for pair in out if pair.on_overview),
     )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Overviews in a scanned folder
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FolderOverview:
+    """An overview found in an experiment folder, and the samples imaged on it.
+
+    ``fields`` are the files the picture is made of: the ``_F####`` series of a
+    mosaic, or one low-magnification image. ``samples`` are the other files whose
+    stage footprint lies inside it.
+    """
+
+    name: str
+    fields: list
+    samples: list
+    covered: Box
+
+    @property
+    def is_mosaic(self) -> bool:
+        return len(self.fields) > 1
+
+
+def _entry_is_flat(entry) -> bool:
+    """A single plane: no Z, whatever else (time) the file has."""
+    shape = tuple(getattr(entry, "shape", ()) or ())
+    return len(shape) < 3 or int(shape[-3]) <= 1
+
+
+def find_overviews(entries: Sequence) -> tuple[list, list[FolderOverview]]:
+    """Split a scanned folder into its samples and its overviews.
+
+    An overview is a single plane with a stage position that is either
+
+    * one field of an ``_F####`` series of at least :data:`MIN_TILES`, or
+    * an image whose footprint contains another file's, the way a 5x map
+      contains the 20x stacks taken from it, or
+    * named "overview".
+
+    Z-stacks are never overviews, so a 20x stack with a 40x closeup inside it
+    stays a sample. Returns ``(samples, overviews)``, samples in their order.
+    """
+    boxed = {id(e): box_from_extent(getattr(e, "stage_extent", None)) for e in entries}
+    candidates = [e for e in entries if boxed[id(e)] is not None and _entry_is_flat(e)]
+
+    series: dict[str, list] = {}
+    for entry in candidates:
+        base = field_base(getattr(entry, "name", ""))
+        if base is not None:
+            series.setdefault(base, []).append(entry)
+    groups = [(base, sorted(fields, key=lambda e: field_index(e.name)))
+              for base, fields in sorted(series.items()) if len(fields) >= MIN_TILES]
+    in_series = {id(e) for _, fields in groups for e in fields}
+
+    def contains_another(entry) -> bool:
+        box = boxed[id(entry)]
+        for other in entries:
+            other_box = boxed[id(other)]
+            if other is entry or other_box is None or id(other) in in_series:
+                continue
+            slack = _NEST_SLACK * max(other_box.width, other_box.height)
+            if box.contains(other_box, slack) and (
+                max(other_box.width, other_box.height) <= _NEST_RATIO * max(box.width, box.height)
+            ):
+                return True
+        return False
+
+    singles = [
+        e for e in candidates
+        if id(e) not in in_series
+        and ("overview" in str(getattr(e, "name", "")).lower() or contains_another(e))
+    ]
+    taken = in_series | {id(e) for e in singles}
+    samples = [e for e in entries if id(e) not in taken]
+
+    overviews = []
+    for name, fields in [*groups, *((getattr(e, "name", ""), [e]) for e in singles)]:
+        covered = union(boxed[id(f)] for f in fields)
+        on_it = []
+        for sample in samples:
+            box = boxed[id(sample)]
+            if box is not None and covered.contains(box, _NEST_SLACK * max(box.width, box.height)):
+                on_it.append(sample)
+        overviews.append(FolderOverview(name=name, fields=list(fields), samples=on_it, covered=covered))
+    if overviews:
+        logger.info("%d overview(s) in the folder: %s", len(overviews),
+                    ", ".join(f"{o.name} ({len(o.samples)} sample(s))" for o in overviews))
+    return samples, overviews
+
+
+def render_overview(overview: FolderOverview, read: Callable[[Any, int], np.ndarray | None],
+                    max_pixels: int = DEFAULT_MAX_PIXELS) -> Mosaic | None:
+    """The overview's picture with its stage frame, ready to draw samples on.
+
+    *read* returns a field's preview, RGB or grey, at about the size asked for.
+    A mosaic is stitched in grey (its fields are placed by stage position); a
+    single image keeps its colours.
+    """
+    if overview.is_mosaic:
+        per_field = max(64, int(max_pixels / max(1.0, np.sqrt(len(overview.fields)))) * 2)
+
+        def _grey(field, _size=per_field):
+            image = read(field, _size)
+            if image is None:
+                return np.zeros((1, 1), dtype=np.float32)
+            image = np.asarray(image, dtype=np.float32)
+            return image.max(axis=-1) if image.ndim == 3 else image
+
+        tiles = [Tile(box=box_from_extent(f.stage_extent), read=lambda f=f: _grey(f), name=f.name)
+                 for f in overview.fields]
+        return stitch(tiles, max_pixels=max_pixels)
+
+    field = overview.fields[0]
+    image = read(field, max_pixels)
+    if image is None:
+        return None
+    image = np.asarray(image)
+    if image.ndim == 2:
+        image = np.repeat(image[..., None], 3, axis=2)
+    box = overview.covered
+    return Mosaic(image=image.astype(np.uint8), box=box,
+                  um_per_px=box.width / max(1, image.shape[1]), tiles=1, covered=box)

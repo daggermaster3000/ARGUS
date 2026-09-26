@@ -96,6 +96,9 @@ class ExperimentWidget(QWidget):
         self._app = app
         self._viewer = app.viewer
         self._entries: list[ex.SampleEntry] = []
+        #: Overviews found by the last scan; kept out of the grid.
+        self._overviews: list = []
+        self._overview_window = None
         self._worker = None
         self._cancelled = False
         self._relay = _Relay()
@@ -185,6 +188,15 @@ class ExperimentWidget(QWidget):
                 button.setToolTip(tooltip)
             button.clicked.connect(handler)
             row.addWidget(button)
+        self._overview_button = QPushButton("Overview")
+        self._overview_button.setToolTip(
+            "The folder's overview with every sample outlined on it. Overviews — an "
+            "_F#### mosaic, or a single low-magnification image the samples were "
+            "taken from — are kept out of the sample grid."
+        )
+        self._overview_button.setEnabled(False)
+        self._overview_button.clicked.connect(self.show_overview)
+        row.addWidget(self._overview_button)
         row.addStretch(1)
         outer.addLayout(row)
         return box
@@ -353,7 +365,18 @@ class ExperimentWidget(QWidget):
             item.setIcon(QIcon(pixmap))
 
     def _on_scan_done(self, found) -> None:
-        self._entries = list(found)
+        from .. import overview as ov
+
+        samples, self._overviews = ov.find_overviews(list(found))
+        kept = {id(entry) for entry in samples}
+        # The grid was filled as files were read, one row per file in order.
+        for row in reversed(range(min(len(found), self._grid.count()))):
+            if id(found[row]) not in kept:
+                self._grid.takeItem(row)
+        self._entries = list(samples)
+        self._overview_button.setEnabled(bool(self._overviews))
+        self._overview_button.setText(
+            f"Overview ({len(self._overviews)})" if len(self._overviews) > 1 else "Overview")
         self.samples_changed.emit()
         readable = [entry for entry in self._entries if entry.readable]
         with_rois = [entry for entry in readable if entry.n_rois]
@@ -366,7 +389,52 @@ class ExperimentWidget(QWidget):
         broken = [entry for entry in self._entries if not entry.readable]
         if broken:
             summary += f" {len(broken)} could not be read."
+        if self._overviews:
+            fields = sum(len(o.fields) for o in self._overviews)
+            summary += (f" {len(self._overviews)} overview(s) ({fields} file(s)) kept out of "
+                        "the grid — shown in their own window.")
         self._log(summary)
+        if self._overviews:
+            self.show_overview()
+
+    # -- overviews ------------------------------------------------------------
+
+    def show_overview(self) -> None:
+        """Open the window with the overviews and every sample outlined on them."""
+        if not self._overviews:
+            self._status.setText("No overview in this folder.")
+            return
+        from .overview_window import OverviewWindow
+
+        if self._overview_window is not None:
+            try:
+                self._overview_window.close()
+            except RuntimeError:
+                pass
+        self._overview_window = OverviewWindow(
+            self._overviews,
+            read=lambda entry, size: ex.thumbnail(entry.path, size),
+            on_select=self.select_entry,
+            on_open=self._open_entry,
+            parent=self,
+        )
+        self._overview_window.show()
+        self._overview_window.raise_()
+
+    def select_entry(self, entry) -> None:
+        """Select *entry* in the grid, alone, and scroll to it."""
+        if entry not in self._entries:
+            return
+        row = self._entries.index(entry)
+        self._grid.clearSelection()
+        item = self._grid.item(row)
+        if item is not None:
+            item.setSelected(True)
+            self._grid.scrollToItem(item)
+
+    def _open_entry(self, entry) -> None:
+        self.select_entry(entry)
+        self.open_selected()
 
     def _clear_worker(self) -> None:
         self._worker = None

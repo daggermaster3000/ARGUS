@@ -930,6 +930,18 @@ file. Tiles say what each file carries (`2 ROI(s), 1 label map(s)`) and unreadab
 files — an aborted acquisition leaves `*_F0.ims` stubs — are listed in red with the
 reason rather than filtered out.
 
+**Overviews are recognised and kept out of the grid.** An overview is a single
+plane with a stage position that is either one field of an `_F####` mosaic, an
+image whose stage area contains other samples (the 5x map the 20x stacks were
+taken from), or a file named "overview". Z-stacks never count, so a 20x stack with
+a 40x closeup inside it stays a sample. After a scan that finds one, the
+**Overview** window opens: the mosaic stitched by stage position (or the single
+image), every sample on it outlined as a numbered, coloured box with its name.
+Wheel to zoom, drag to pan; hover a box for the file, click it to select that
+sample in the grid, double-click to open it. **Save image…** writes the picture
+with the boxes and names as a PNG for a slide. The **Overview** button under the
+grid opens it again.
+
 **ROIs and label maps go inside the `.ims` file.** Both are written into one
 top-level group, `/ARGUS`, beside Imaris's own `/DataSet` and `/DataSetInfo`.
 Nothing Imaris wrote is read back, modified or deleted, and Imaris ignores groups
@@ -1466,6 +1478,8 @@ microscopy_viewer/
   volume_cache.py           local disk cache for volumes read from slow storage
   timeseries.py             the playback clock, and local caching of a time lapse
   movie.py                  canvas frames -> .mov / .mp4 / .gif; no Qt
+  acquisition.py            the acquisition movie: a z-stack's MIP building up; no Qt
+  grouping.py               group columns from file / folder names, unique sample names; no Qt
   dragdrop.py               application-wide drop handling
   widgets/
     registry.py             the panel manifest
@@ -1478,6 +1492,8 @@ microscopy_viewer/
     segmentation_widget.py  channel, model and diameter; the object table
     slide_dialog.py         pick samples, name the stainings, write the .pptx
     movie_dialog.py         pick a range and a rate, render the frames
+    overview_window.py      the folder's overview with every sample outlined
+    acquisition_widget.py   pick a stack and its channels, preview, export the movie
   utils.py                  logging, unit conversion, geometry helpers
 tests/
   make_sample_data.py       synthetic .ims / TIFF / OME-Zarr samples

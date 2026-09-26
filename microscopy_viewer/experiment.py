@@ -78,6 +78,9 @@ class SampleEntry:
     label_keys: list[str] = field(default_factory=list)
     #: Why this file could not be read, if it could not be.
     error: str = ""
+    #: Where on the stage it was imaged, ``(x0, x1, y0, y1, z0, z1)`` in µm, when
+    #: the file says. What overviews and the samples on them are found from.
+    stage_extent: tuple | None = None
 
     @property
     def readable(self) -> bool:
@@ -143,6 +146,7 @@ def describe_file(path: str | Path) -> SampleEntry:
         entry.shape = tuple(int(n) for n in np.shape(array))
         entry.voxel_um = tuple(float(v) for v in first.scale)
         entry.channel_names = [spec.channel_name or spec.name for spec in specs]
+        entry.stage_extent = getattr(getattr(first, "metadata", None), "stage_extent", None)
     entry.n_rois = len(ims_store.load_rois(candidate))
     entry.label_keys = ims_store.list_labels(candidate)
     _release(candidate)
