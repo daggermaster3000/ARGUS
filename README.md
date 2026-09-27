@@ -368,6 +368,30 @@ gives you the whole panel as tab-separated text.
 If a file carries no voxel size, the panel says so explicitly and measurements
 switch to pixels rather than silently reporting wrong micrometres.
 
+### Cell counter
+
+**Cell counter** counts cells by hand, into a label map the analysis reads like a
+segmentation.
+
+1. Pick the **Image** to count on and press **New counter**. A Labels layer named
+   `<sample> — Manual counts` appears over it, at full resolution.
+   - **One plane over the stack (2D)**, the default: a dot shows on every plane,
+     so a cell is not counted again while scrolling through Z, and the analysis
+     measures it on the maximum projection.
+   - **Every plane (3D)**: a dot belongs to its plane. Offered for stacks up to
+     250 million voxels.
+   **Show maximum projection** adds the sample's projection, every channel, to
+   count on.
+2. Switch **Count** on. A click puts a dot on a cell, a small disc of the chosen
+   **Dot diameter** with a label of its own, so each dot is one cell and touching
+   dots stay separate. Shift-click removes a dot; dragging still pans; Ctrl+Z and
+   **Undo last** undo. The running total is shown above.
+3. **Save into sample** writes the dots into the sample's `.ims` (under `/ARGUS`,
+   beside any segmentation), closing and reopening the sample around the write.
+   In the **Analysis** panel, type the name it was saved as (`Manual counts`) as the
+   *Label map*: counts per region, densities and each dot's intensity follow.
+   **Load saved counts** carries on with a count saved earlier.
+
 ### Acquisition movie
 
 The **Acquisition movie** panel (with the other right-hand panels, or from the
@@ -1489,6 +1513,7 @@ microscopy_viewer/
   timeseries.py             the playback clock, and local caching of a time lapse
   movie.py                  canvas frames -> .mov / .mp4 / .gif; no Qt
   acquisition.py            the acquisition movie: a z-stack's MIP building up; no Qt
+  cell_counter.py           manual cell counts as a label map; no Qt
   grouping.py               group columns from file / folder names, unique sample names; no Qt
   dragdrop.py               application-wide drop handling
   widgets/
@@ -1503,6 +1528,8 @@ microscopy_viewer/
     slide_dialog.py         pick samples, name the stainings, write the .pptx
     movie_dialog.py         pick a range and a rate, render the frames
     overview_window.py      the folder's overview with every sample outlined
+    cell_counter_widget.py  click cells onto a labels layer, save it for the analysis
+    sample_files.py         close, write into and reopen a sample that is on screen
     acquisition_widget.py   pick a stack and its channels, preview, export the movie
   utils.py                  logging, unit conversion, geometry helpers
 tests/

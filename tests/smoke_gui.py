@@ -1280,6 +1280,38 @@ def main() -> int:
         film.viewer.close()
     print(flush=True)
 
+    print("cell counter", flush=True)
+    counting = MicroscopyViewer(show=False)
+    try:
+        import shutil as _shutil
+
+        from microscopy_viewer import analysis as an
+        from microscopy_viewer import ims_store
+
+        copy = Path(tempfile.mkdtemp()) / "counted.ims"
+        _shutil.copy(SAMPLES / "sample_4d_2ch.ims", copy)
+        counting.open_paths([copy])
+        counter = counting.cell_counter_widget
+        check(counter is not None, "cell counter panel built")
+        # Through the button: Qt passes it a checked flag, which once stopped it.
+        counter._new_button.click()
+        check(counter._layer is not None and counter._layer.data.shape == (128, 160),
+              f"the New counter button makes a 2D counter over the stack ({counter._status.text()})")
+        for centre in ((20, 20), (60, 80), (100, 140)):
+            counter.add_at(centre)
+        check(counter.add_at((21, 21)) == 0, "a second click on a counted cell does not count it again")
+        counter.remove_at((60, 81))
+        counter._recount()
+        check(counter._count == 2, f"two cells left after one is removed ({counter._count})")
+        counter.save()
+        check("Manual counts" in ims_store.list_labels(copy), "saved into the sample")
+        check(counter._layer in counting.viewer.layers, "and the counter stays on screen")
+        outcome = an.analyse([copy], an.AnalysisOptions(label_key="Manual counts"))[0]
+        check(outcome.ok and outcome.n_objects == 2, f"the analysis counts them ({outcome.n_objects})")
+    finally:
+        counting.viewer.close()
+    print(flush=True)
+
     print("window fits a laptop screen", flush=True)
     from qtpy.QtWidgets import QScrollArea
 

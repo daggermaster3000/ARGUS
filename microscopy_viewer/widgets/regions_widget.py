@@ -37,6 +37,7 @@ from qtpy.QtWidgets import (
 from .. import regions as rg
 from ..exports import WORKBOOK_FILTER, default_stem, export_sheets
 from ..utils import format_number, get_logger
+from .sample_files import close_sample, restore_view, view_state
 
 logger = get_logger("regions_widget")
 
@@ -529,40 +530,12 @@ class RegionsWidget(QWidget):
         return None
 
     def _close_sample(self, path) -> int:
-        """Take a file's layers off screen and release the reader's handle.
-
-        Both halves are needed before writing. Removing the layers drops the dask
-        graphs, but the reader holds its ``h5py.File`` open for the life of the
-        process, and HDF5 will not open for writing what is open for reading.
-        """
-        from ..loaders import ims as ims_reader
-
-        target = str(Path(path).resolve())
-        removed = 0
-        for layer in list(self._viewer.layers):
-            meta = layer.metadata.get("mv_metadata")
-            source = str(getattr(meta, "file_path", "") or "") if meta is not None else ""
-            if not source:
-                continue
-            try:
-                if str(Path(source).resolve()) != target:
-                    continue
-            except OSError:
-                continue
-            self._viewer.layers.remove(layer)
-            removed += 1
-        ims_reader.release(path)
-        return removed
+        """Take a file's layers off screen and release the reader's handle."""
+        return close_sample(self._viewer, path)
 
     def _view_state(self) -> dict:
         """Camera and slider position, so reopening a sample does not move the view."""
-        camera = self._viewer.camera
-        return {
-            "center": tuple(camera.center),
-            "zoom": float(camera.zoom),
-            "angles": tuple(camera.angles),
-            "step": tuple(self._viewer.dims.current_step),
-        }
+        return view_state(self._viewer)
 
     def _restore_view(self, state: dict) -> None:
         """Put the view back, and the outlines back on top of the image.
@@ -572,16 +545,7 @@ class RegionsWidget(QWidget):
         region layer are drawn over it, so the outlines would come back hidden
         underneath the image they describe.
         """
-        try:
-            camera = self._viewer.camera
-            camera.center = state["center"]
-            camera.zoom = state["zoom"]
-            camera.angles = state["angles"]
-            step = state["step"]
-            if len(step) == self._viewer.dims.ndim:
-                self._viewer.dims.current_step = step
-        except Exception:
-            logger.debug("could not restore the view", exc_info=True)
+        restore_view(self._viewer, state)
         self.raise_layer()
 
     def raise_layer(self) -> None:

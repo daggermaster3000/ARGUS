@@ -118,6 +118,12 @@ def _register_builtin_panels() -> None:
         # Takes the app: it analyses whatever the experiment panel has selected.
         return AnalysisWidget(app)
 
+    def _cell_counter(app):
+        from .cell_counter_widget import CellCounterWidget
+
+        # Takes the app: saving closes and reopens the sample through open_paths.
+        return CellCounterWidget(app)
+
     def _acquisition(app):
         from .acquisition_widget import AcquisitionWidget
 
@@ -234,6 +240,17 @@ def _register_builtin_panels() -> None:
             attribute="acquisition_widget",
             tabify_with="intensity_comparison",
             order=70,
+        )
+    )
+
+    register_panel(
+        PanelSpec(
+            identifier="cell_counter",
+            title="Cell counter",
+            factory=_cell_counter,
+            attribute="cell_counter_widget",
+            tabify_with="intensity_comparison",
+            order=55,
         )
     )
 
