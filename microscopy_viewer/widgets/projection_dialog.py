@@ -61,6 +61,8 @@ class ProjectionDialog(QDialog):
         self.setMinimumWidth(560)
 
         self._paths: list[Path] = []
+        #: Overview files the last scan left out.
+        self.skipped: list[Path] = []
         self._worker = None
         self._cancelled = False
         self.outcomes: list[pj.ProjectionOutcome] = []
@@ -74,6 +76,7 @@ class ProjectionDialog(QDialog):
         layout.addWidget(self._build_input_box())
         layout.addWidget(self._build_channel_box(), stretch=1)
         layout.addWidget(self._build_output_box())
+        self._update_structure()
 
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)
@@ -112,6 +115,17 @@ class ProjectionDialog(QDialog):
         self._recursive.setChecked(True)
         self._recursive.toggled.connect(lambda _on: self.rescan())
         outer.addWidget(self._recursive)
+
+        self._skip_overviews = QCheckBox("Skip overviews")
+        self._skip_overviews.setChecked(True)
+        self._skip_overviews.setToolTip(
+            "Leave out the overview: the fields of an _F#### mosaic and single-plane "
+            "maps the samples were taken from. They are one plane already, so a "
+            "projection would only copy them. Found as the Experiment setup panel "
+            "finds them, from each file's shape and stage position."
+        )
+        self._skip_overviews.toggled.connect(lambda _on: self.rescan())
+        outer.addWidget(self._skip_overviews)
         return box
 
     def _build_channel_box(self) -> QGroupBox:
@@ -161,6 +175,17 @@ class ProjectionDialog(QDialog):
         clear.clicked.connect(lambda: self._output_edit.clear())
         row_layout.addWidget(clear)
         form.addRow("Folder", row)
+
+        self._keep_structure = QCheckBox("Keep the subfolder structure")
+        self._keep_structure.setChecked(True)
+        self._keep_structure.setToolTip(
+            "On: each projection goes into the same subfolder of the output folder as "
+            "its stack sits in, e.g. MIP/DMSO/fish1_MIP.tif.\n"
+            "Off: every projection in the output folder itself. Files that share a "
+            "name then get their folder added, e.g. fish1_DMSO_MIP.tif."
+        )
+        self._output_edit.textChanged.connect(self._update_structure)
+        form.addRow("Layout", self._keep_structure)
 
         self._format_box = QComboBox()
         for suffix in pj.OUTPUT_FORMATS:
@@ -212,48 +237,68 @@ class ProjectionDialog(QDialog):
         if folder:
             self._output_edit.setText(folder)
 
+    def _update_structure(self, *_args) -> None:
+        # Beside each source there is no structure to keep: it is the source's own.
+        self._keep_structure.setEnabled(bool(self._output_edit.text().strip()))
+
     def rescan(self) -> None:
-        """List the folder and read the channel names out of the first few files."""
+        """List the folder, drop overviews, and read channel names from the first few files."""
         from .. import experiment as ex
 
         folder = self._input_edit.text().strip()
         if not folder:
             return
-        self._paths = ex.list_files(folder, self._recursive.isChecked())
+        paths = ex.list_files(folder, self._recursive.isChecked())
+        # Never the projections of an earlier run, when they were written inside
+        # the folder being projected.
+        output = self._output_edit.text().strip()
+        if output:
+            out = Path(output).resolve()
+            paths = [p for p in paths if out not in Path(p).resolve().parents]
+        self._paths = []
+        self.skipped = []
         self._channel_list.clear()
-        if not self._paths:
+        if not paths:
             self._status.setText(f"No readable stacks in {Path(folder).name}.")
             return
+        skip = self._skip_overviews.isChecked()
         self._status.setText(
-            f"{len(self._paths)} file(s) found. Reading channel names from the first "
-            f"{min(NAME_SAMPLE, len(self._paths))}…"
+            f"{len(paths)} file(s) found. "
+            + ("Looking for overviews and reading channel names…" if skip
+               else "Reading channel names…")
         )
 
         from napari.qt.threading import thread_worker
 
         relay = self._relay
-        sample = list(self._paths[:NAME_SAMPLE])
 
         @thread_worker
         def _read():
-            return pj.channel_names(sample, limit=NAME_SAMPLE)
+            stacks, skipped = pj.without_overviews(paths) if skip else (list(paths), [])
+            return stacks, skipped, pj.channel_names(stacks[:NAME_SAMPLE], limit=NAME_SAMPLE)
 
         worker = _read()
         worker.returned.connect(relay.channels.emit)
         worker.errored.connect(self._on_error)
         worker.start()
 
-    def _fill_channels(self, names) -> None:
+    def _fill_channels(self, found) -> None:
+        stacks, skipped, names = found
+        self._paths = list(stacks)
+        self.skipped = list(skipped)
         self._channel_list.clear()
         for name in names or ():
             item = QListWidgetItem(str(name))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
             self._channel_list.addItem(item)
-        self._status.setText(
-            f"{len(self._paths)} file(s), {self._channel_list.count()} channel(s): "
-            + ", ".join(str(name) for name in (names or ()))
-        )
+        text = (f"{len(self._paths)} stack(s), {self._channel_list.count()} channel(s): "
+                + ", ".join(str(name) for name in (names or ())))
+        if skipped:
+            shown = ", ".join(Path(p).name for p in skipped[:3])
+            text += (f". {len(skipped)} overview file(s) skipped: {shown}"
+                     + ("…" if len(skipped) > 3 else ""))
+        self._status.setText(text)
 
     def _on_all_toggled(self, checked: bool) -> None:
         self._channel_list.setEnabled(not checked)
@@ -270,7 +315,10 @@ class ProjectionDialog(QDialog):
 
     def options(self) -> pj.ProjectionOptions:
         folder = self._output_edit.text().strip()
+        source = self._input_edit.text().strip()
         return pj.ProjectionOptions(
+            input_root=Path(source) if source else None,
+            keep_structure=self._keep_structure.isChecked(),
             output_dir=Path(folder) if folder else None,
             channels=self.chosen_channels(),
             fmt=str(self._format_box.currentData() or ".tif"),
@@ -310,6 +358,10 @@ class ProjectionDialog(QDialog):
             return
 
         self._log_view.clear()
+        if self.skipped:
+            self._log_view.appendPlainText(
+                f"Skipping {len(self.skipped)} overview file(s): "
+                + ", ".join(Path(p).name for p in self.skipped))
         self._cancelled = False
         self.outcomes = []
         self._run_button.setText("Stop")

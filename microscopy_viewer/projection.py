@@ -56,6 +56,11 @@ class ProjectionOptions:
     #: Overwrite an output that is already there. Off, so a re-run after adding
     #: files to a folder costs nothing and cannot destroy an edited projection.
     overwrite: bool = False
+    #: The folder the stacks were listed from. With *keep_structure*, each
+    #: projection goes into the same subfolder under *output_dir* as its source
+    #: sits under this one.
+    input_root: Path | None = None
+    keep_structure: bool = False
 
 
 @dataclass
@@ -161,14 +166,65 @@ def project_array(array, axes: str = "") -> np.ndarray:
     return result
 
 
-def output_path(source: Path, options: ProjectionOptions) -> Path:
-    """Where one source file's projection is written."""
-    folder = Path(options.output_dir) if options.output_dir else Path(source).parent
+def output_path(source: Path, options: ProjectionOptions, stem: str | None = None) -> Path:
+    """Where one source file's projection is written.
+
+    Beside the source when there is no output folder; in the output folder's
+    copy of the source's subfolder with *keep_structure*; otherwise all in the
+    output folder, pooled. *stem* overrides the file's own name, which is how
+    two pooled files of the same name are kept apart.
+    """
+    source = Path(source)
+    if not options.output_dir:
+        folder = source.parent
+    else:
+        folder = Path(options.output_dir)
+        if options.keep_structure and options.input_root is not None:
+            try:
+                folder = folder / source.parent.resolve().relative_to(Path(options.input_root).resolve())
+            except ValueError:
+                pass  # not under the input folder: pooled like the rest
     suffix = options.fmt if options.fmt.startswith(".") else f".{options.fmt}"
-    return folder / f"{Path(source).stem}{options.suffix}{suffix}"
+    return folder / f"{stem or source.stem}{options.suffix}{suffix}"
 
 
-def project_file(path: str | Path, options: ProjectionOptions) -> ProjectionOutcome:
+def output_paths(paths: Sequence[str | Path], options: ProjectionOptions) -> dict[Path, Path]:
+    """Where every file's projection goes, with no two landing on one name.
+
+    Pooled into one folder, ``DMSO/fish1.ims`` and ``drug/fish1.ims`` would both
+    be ``fish1_MIP``, and the second would be skipped as "already there". Files
+    that would collide get their folder added: ``fish1_DMSO_MIP``,
+    ``fish1_drug_MIP``.
+    """
+    sources = [Path(p) for p in paths]
+    first = {source: output_path(source, options) for source in sources}
+    seen: dict[Path, list[Path]] = {}
+    for source, target in first.items():
+        seen.setdefault(target, []).append(source)
+    out = {}
+    for target, clashing in seen.items():
+        if len(clashing) == 1:
+            out[clashing[0]] = target
+            continue
+        for source in clashing:
+            label = _folder_label(source, options.input_root)
+            out[source] = output_path(source, options, stem=f"{source.stem}_{label}")
+    return out
+
+
+def _folder_label(source: Path, root: Path | None) -> str:
+    """The subfolders between *root* and *source*, joined, for a file name."""
+    parts: tuple[str, ...] = ()
+    if root is not None:
+        try:
+            parts = source.parent.resolve().relative_to(Path(root).resolve()).parts
+        except ValueError:
+            parts = ()
+    return "_".join(parts) or source.parent.name or "root"
+
+
+def project_file(path: str | Path, options: ProjectionOptions,
+                 target: Path | None = None) -> ProjectionOutcome:
     """Project one file and write it. Never raises; failures land on the outcome."""
     from .loaders import load_path, release
 
@@ -176,7 +232,7 @@ def project_file(path: str | Path, options: ProjectionOptions) -> ProjectionOutc
     outcome = ProjectionOutcome(path=source, name=source.stem)
     started = time.perf_counter()
     try:
-        target = output_path(source, options)
+        target = Path(target) if target is not None else output_path(source, options)
         if target.resolve() == source.resolve():
             raise ValueError(
                 "the projection would overwrite its own source; give it a suffix "
@@ -259,13 +315,14 @@ def run_batch(
 ) -> list[ProjectionOutcome]:
     """Project every file. One outcome each, and one bad file does not stop it."""
     outcomes: list[ProjectionOutcome] = []
+    targets = output_paths(paths, options)
     for index, entry in enumerate(paths, start=1):
         if should_cancel is not None and should_cancel():
             break
         source = Path(entry)
         if progress is not None:
             progress(f"{source.stem} ({index} of {len(paths)})")
-        outcome = project_file(source, options)
+        outcome = project_file(source, options, targets.get(source))
         outcomes.append(outcome)
         if progress is not None:
             if outcome.skipped:
@@ -273,9 +330,39 @@ def run_batch(
             elif outcome.error:
                 note = outcome.error
             else:
-                note = f"{len(outcome.channels)} channel(s) → {outcome.written.name}"
+                note = f"{len(outcome.channels)} channel(s) → {_shown(outcome.written, options)}"
             progress(f"{source.stem}: {note}")
     return outcomes
+
+
+def _shown(written: Path, options: ProjectionOptions) -> str:
+    """*written* as the log should say it: below the output folder, when there is one."""
+    if options.output_dir:
+        try:
+            return str(Path(written).relative_to(Path(options.output_dir)))
+        except ValueError:
+            pass
+    return Path(written).name
+
+
+def without_overviews(paths: Sequence[str | Path]) -> tuple[list[Path], list[Path]]:
+    """``(stacks, overviews)``: the files worth projecting, and the overviews among them.
+
+    An overview is already a single plane — a mosaic field or a low-magnification
+    map — so projecting it writes a copy of itself, and a mosaic of twenty-five
+    fields writes twenty-five. Found the way the Experiment setup panel finds
+    them (:func:`microscopy_viewer.overview.find_overviews`), which reads each
+    file's shape and stage position, not its pixels.
+    """
+    from . import experiment as ex
+    from . import overview as ov
+
+    entries = [ex.describe_file(p) for p in paths]
+    samples, overviews = ov.find_overviews(entries)
+    kept = {id(e) for e in samples}
+    stacks = [e.path for e in entries if id(e) in kept]
+    skipped = [f.path for overview in overviews for f in overview.fields]
+    return stacks, skipped
 
 
 def summarise(outcomes: Sequence[ProjectionOutcome]) -> str:

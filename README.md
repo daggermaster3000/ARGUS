@@ -856,8 +856,10 @@ three-channel stack that is a 16 MB output in 46 s with resident memory growing 
 
 | Setting | What it does |
 |---|---|
+| **Skip overviews** | On by default. The overview is left out: the fields of an `_F####` mosaic and single-plane maps the samples were taken from, found from each file's shape and stage position the way *Experiment setup* finds them. They are one plane already, so projecting them would only copy them. The skipped files are listed. Projections from an earlier run inside the output folder are never picked up again either. |
 | **Channels** | Read from the first few files in the folder and ticked **by name**. The channel order is not the same in every acquisition, so an index quietly means a different stain from one file to the next. A name that matches nothing in a given file is reported against that file rather than passing unnoticed. |
 | **Format** | `.tif` is ImageJ-flavoured, so Fiji opens it as a calibrated hyperstack with the channels separated rather than reading three channels as RGB. `.ims` keeps the projection in the same format as its source, carrying the channel names, colours, pixel size and **stage position** — that last one is what lets a projection still be placed on an overview mosaic. |
+| **Keep the subfolder structure** | On by default when an output folder is chosen: each projection goes into the same subfolder of the output folder as its stack sits in (`MIP/DMSO/fish1_MIP.tif`). Off pools every projection into the output folder itself; files that share a name there get their folder added (`fish1_DMSO_MIP.tif`, `fish1_drug_MIP.tif`) instead of the second being skipped as already written. |
 | **Name suffix** | Appended to each file's stem. It is what stops a projection written beside its source from landing on top of it; writing onto the source is refused outright. |
 | **Overwrite** | Off, so re-running after adding files to a folder costs nothing and cannot destroy a projection you have since edited. Existing outputs are reported as skipped. |
 
