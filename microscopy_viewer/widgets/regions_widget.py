@@ -26,6 +26,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -36,6 +37,7 @@ from qtpy.QtWidgets import (
 
 from .. import regions as rg
 from ..exports import WORKBOOK_FILTER, default_stem, export_sheets
+from ..user import account_name, credit, set_user_name, user_name
 from ..utils import format_number, get_logger
 from .sample_files import close_sample, restore_view, view_state
 
@@ -175,6 +177,19 @@ class RegionsWidget(QWidget):
         )
         note.setWordWrap(True)
         outer.addWidget(note)
+
+        who = QHBoxLayout()
+        who.addWidget(QLabel("Your name"))
+        self._name_edit = QLineEdit(user_name())
+        self._name_edit.setPlaceholderText(account_name() or "who drew these outlines")
+        self._name_edit.setToolTip(
+            "Saved with the outlines — here and from Experiment setup — and written as "
+            "“Drawn by” on every region row of the analysis workbook. Remembered."
+        )
+        self._name_edit.editingFinished.connect(
+            lambda: set_user_name(self._name_edit.text()))
+        who.addWidget(self._name_edit, stretch=1)
+        outer.addLayout(who)
 
         row = QHBoxLayout()
         save = self._save_button = QPushButton("Save to file")
@@ -667,6 +682,8 @@ class RegionsWidget(QWidget):
         """Write the outlines into the open sample's own ``.ims``."""
         from .. import ims_store
 
+        set_user_name(self._name_edit.text())
+
         regions = self.collect_regions()
         if not regions:
             self._status.setText("No outlines to save — draw one first.")
@@ -684,7 +701,8 @@ class RegionsWidget(QWidget):
             return
 
         rois = [
-            ims_store.StoredRoi(name=region.name, vertices_um=region.vertices_world)
+            ims_store.StoredRoi(name=region.name, vertices_um=region.vertices_world,
+                                attrs=credit())
             for region in regions
         ]
         # The image has to come off screen for the write and go back afterwards.

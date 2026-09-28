@@ -204,11 +204,14 @@ def load_rois(path: str | Path) -> list[StoredRoi]:
                 return []
             for key in sorted(group):
                 dataset = group[key]
+                standard = {"name", "shape_type", "units", "axes"}
                 rois.append(
                     StoredRoi(
                         name=_text(dataset.attrs.get("name", key)),
                         vertices_um=np.asarray(dataset[()], dtype=float),
                         shape_type=_text(dataset.attrs.get("shape_type", "polygon")),
+                        # Whatever else was stored with it — who drew it, say.
+                        attrs={k: _text(v) for k, v in dataset.attrs.items() if k not in standard},
                     )
                 )
     except OSError as exc:

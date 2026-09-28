@@ -884,6 +884,14 @@ with the shapes rather than living only in this panel. **Suggest names** fills a
 still-unnamed outline from `forebrain`, `midbrain`, `hindbrain`, `cerebellum left`,
 `cerebellum right`. Then pick a Labels layer and press **Count objects**.
 
+**Your name** (under *Store in the sample's file*) is saved with the outlines,
+whether they are written from this panel or from *Experiment setup*, and appears
+as **Drawn by** next to *Region* in every region sheet of the analysis workbook
+(*Regions*, *Region features*, *Region intensities*, *Region outlines*). It starts
+as the computer account's name and is remembered once typed. Outlines saved
+before names were recorded leave the column blank; re-saving outlines credits
+whoever saved them.
+
 Three decisions are worth knowing:
 
 - **Objects are counted by their centroid, not by overlap.** An object straddling a

@@ -1091,7 +1091,43 @@ def workbook_sheets(outcomes: Sequence[AnalysisOutcome]) -> dict[str, Any]:
         "Cell shapes": cell_shapes_dataframe(outcomes),
         "Cell intensities": cell_intensities_dataframe(outcomes),
     }
+    for name in REGION_SHEETS:
+        if name in sheets:
+            sheets[name] = with_drawn_by(sheets[name], outcomes)
     return {name: with_conditions(frame, outcomes) for name, frame in sheets.items()}
+
+
+#: Sheets with a row per brain region, which say who drew each one.
+REGION_SHEETS = ("Regions", "Region features", "Region intensities", "Region outlines")
+DRAWN_BY_COLUMN = "Drawn by"
+
+
+def with_drawn_by(frame, outcomes: Sequence[AnalysisOutcome]):
+    """*frame* with a "Drawn by" column after "Region": who saved each outline.
+
+    A region drawn in several parts by different people lists them all; the
+    "(all regions)" rows list everyone who drew on that sample. Outlines saved
+    before names were recorded leave it blank.
+    """
+    from .user import DRAWN_BY
+
+    if frame is None or "Sample" not in getattr(frame, "columns", ()) or "Region" not in frame.columns:
+        return frame
+    by_region: dict[tuple[str, str], list[str]] = {}
+    for outcome in outcomes:
+        for roi in outcome.region_rois or ():
+            who = str((getattr(roi, "attrs", None) or {}).get(DRAWN_BY, "") or "").strip()
+            if not who:
+                continue
+            for key in ((outcome.name, roi.name), (outcome.name, ALL_REGIONS)):
+                names = by_region.setdefault(key, [])
+                if who not in names:
+                    names.append(who)
+    frame = frame.copy()
+    values = [", ".join(by_region.get((str(sample), str(region)), []))
+              for sample, region in zip(frame["Sample"], frame["Region"])]
+    frame.insert(list(frame.columns).index("Region") + 1, DRAWN_BY_COLUMN, values)
+    return frame
 
 
 def with_conditions(frame, outcomes: Sequence[AnalysisOutcome]):

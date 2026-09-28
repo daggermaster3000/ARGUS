@@ -50,6 +50,7 @@ from qtpy.QtWidgets import (
 from .. import experiment as ex
 from .. import ims_store
 from .. import regions as rg
+from ..user import credit
 from ..utils import get_logger
 
 logger = get_logger("experiment_widget")
@@ -559,7 +560,8 @@ class ExperimentWidget(QWidget):
         clicked = box.clickedButton()
         if save is not None and clicked is save:
             rois = [
-                ims_store.StoredRoi(name=region.name, vertices_um=region.vertices_world)
+                ims_store.StoredRoi(name=region.name, vertices_um=region.vertices_world,
+                                attrs=credit())
                 for region in regions.collect_regions()
             ]
             return (Path(target), rois)
@@ -637,7 +639,8 @@ class ExperimentWidget(QWidget):
             return []
         regions = self._regions_of(layer)
         return [
-            ims_store.StoredRoi(name=region.name, vertices_um=region.vertices_world)
+            ims_store.StoredRoi(name=region.name, vertices_um=region.vertices_world,
+                                attrs=credit())
             for region in regions
         ]
 

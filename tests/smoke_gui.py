@@ -117,6 +117,11 @@ def main() -> int:
     # of whoever runs this.
     rules_home = Path(tempfile.mkdtemp())
     grouping.rules_file = lambda: rules_home / "group_columns.json"
+    # Nor the name saved with the regions.
+    from microscopy_viewer import user as _user
+
+    _user._file = lambda: rules_home / "user.json"
+    _user.set_user_name("Smoke Tester")
 
     print("building the viewer", flush=True)
     app = MicroscopyViewer(show=False)
@@ -941,6 +946,10 @@ def main() -> int:
         check(
             stored[0].name == "cerebellum left",
             f"with the names they were given ({[roi.name for roi in stored]})",
+        )
+        check(
+            stored[0].attrs.get("drawn_by") == "Smoke Tester",
+            f"and who drew them ({stored[0].attrs})",
         )
         check(
             len(store.load_rois(folder / "fish_2.ims")) == 2,
