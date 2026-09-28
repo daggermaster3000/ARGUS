@@ -1247,6 +1247,11 @@ size and compare shape alone. Outlines are sized in screen pixels, so they stay
 undistorted even when the two axes are in unrelated units — which is why an
 outline plot has a fixed size and is not drawn on log axes.
 
+**Colours** in the sidebar (both apps) lets you pick the colour of each genotype,
+condition, region, sample or cluster. The choice is used by every plot — the
+Compare boxes, scatters, UMAPs, cluster charts, the atlas — and remembered for
+next time; **Reset these colours** goes back to the defaults.
+
 Colours match the report figures: the same genotype colours, and the same
 per-sample shades.
 

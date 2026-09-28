@@ -180,13 +180,177 @@ def group_order(values) -> list[str]:
     return ordered(found)
 
 
-def group_colors(order: Sequence[str]) -> dict[str, str]:
-    """A colour per group; combined groups keep their genotype's colour."""
+def group_colors(order: Sequence[str], column: str = "Genotype") -> dict[str, str]:
+    """A colour per group of *column*, the user's choice where they made one.
+
+    Combined groups ("wt · DMSO") take their genotype's colour.
+    """
     if order and all(JOIN in g for g in order):
-        styles = ap.genotype_styles(ap.genotype_order([g.split(JOIN, 1)[0] for g in order]))
-        return {g: styles[g.split(JOIN, 1)[0]][0] for g in order}
+        genotypes = genotype_palette([g.split(JOIN, 1)[0] for g in order])
+        return {g: genotypes[g.split(JOIN, 1)[0]] for g in order}
+    styles = ap.genotype_styles(list(order))
+    return paint(column, {g: styles[g][0] for g in order})
+
+
+def genotype_palette(values) -> dict[str, str]:
+    """Genotype -> colour: the report's fixed colours, then the user's choices."""
+    order = ap.genotype_order(values)
+    return paint("Genotype", {g: c for g, (c, _m) in ap.genotype_styles(order).items()})
+
+
+def category_colors(frame: pd.DataFrame, by: str) -> tuple[dict[str, str], list[str]]:
+    """``(colours, order)`` for colouring *frame* by the column *by*.
+
+    Genotypes keep the report's colours, samples are shades of their genotype,
+    regions follow the order they were drawn in, conditions the group order the
+    Compare plot uses — and the user's picks win in every case.
+    """
+    if by == "Genotype":
+        order = ap.genotype_order(frame["Genotype"])
+        return genotype_palette(frame["Genotype"]), order
+    if by == "Sample":
+        genotype_of = dict(zip(frame["Sample"], frame["Genotype"]))
+        colors = paint("Sample", ap.sample_colors(list(dict.fromkeys(frame["Sample"])), genotype_of))
+        return colors, list(colors)
+    if by == "Region":
+        order = [str(v) for v in dict.fromkeys(frame[by])]
+        return paint("Region", {v: REGION_COLORS[i % len(REGION_COLORS)] for i, v in enumerate(order)}), order
+    order = group_order(frame[by])
+    return group_colors(order, by), order
+
+
+# -- the user's colours ---------------------------------------------------------
+
+#: Session key of the user's colours: ``kind -> value -> "#rrggbb"``.
+COLORS_KEY = "group-colors"
+
+
+def _colors_file() -> Path:
+    from microscopy_viewer.runtime import app_data_dir
+
+    return app_data_dir() / "explorer_colors.json"
+
+
+def chosen_colors() -> dict[str, dict[str, str]]:
+    """The colours the user picked, by kind ("Genotype", "Cluster", a condition…).
+
+    Loaded once per session from the file they are remembered in, so ``wt`` keeps
+    the colour chosen for it across workbooks and days.
+    """
+    if COLORS_KEY not in st.session_state:
+        import json
+
+        try:
+            stored = json.loads(_colors_file().read_text(encoding="utf-8"))
+            stored = {str(k): {str(v): str(c) for v, c in d.items()} for k, d in stored.items()}
+        except (OSError, ValueError, AttributeError):
+            stored = {}
+        st.session_state[COLORS_KEY] = stored
+    return st.session_state[COLORS_KEY]
+
+
+def _remember(colors: dict[str, dict[str, str]]) -> None:
+    import json
+
+    try:
+        target = _colors_file()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(colors, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def paint(kind: str, mapping: dict) -> dict:
+    """*mapping* (value -> colour) with the user's colours for *kind* laid over it.
+
+    Every palette in the apps goes through here, which is what makes a colour
+    picked once apply to every plot.
+    """
+    try:
+        mine = chosen_colors().get(kind, {})
+    except Exception:  # outside a Streamlit run (tests, scripts)
+        mine = {}
+    return {value: mine.get(str(value), color) for value, color in mapping.items()}
+
+
+def color_controls(kinds: dict[str, list], defaults) -> None:
+    """Sidebar pickers: one colour per value of the chosen kind.
+
+    *kinds* maps a kind to its values; *defaults(kind, values)* returns the colours
+    the apps would use without any choice, so each picker starts there.
+    """
+    kinds = {k: [str(v) for v in values] for k, values in kinds.items() if len(values)}
+    if not kinds:
+        return
+    with st.expander("Colours", expanded=False):
+        kind = st.selectbox("Colour the", list(kinds), key="colors-kind",
+                            help="Pick a colour for each group. It is used by every plot, "
+                                 "and remembered for next time.")
+        values = kinds[kind]
+        colors = chosen_colors()
+        start = defaults(kind, values)
+        mine = dict(colors.get(kind, {}))
+        changed = False
+        for value in values[:40]:
+            current = mine.get(value, start.get(value, "#888888"))
+            if not str(current).startswith("#"):
+                current = _hex(current)
+            picked = st.color_picker(value, current, key=f"color-{kind}-{value}")
+            if picked.lower() != str(start.get(value, "")).lower() or value in mine:
+                if mine.get(value) != picked:
+                    mine[value] = picked
+                    changed = True
+        if len(values) > 40:
+            st.caption(f"First 40 of {len(values)} shown.")
+        if st.button("Reset these colours", key=f"colors-reset-{kind}"):
+            mine = {}
+            changed = True
+            for value in values:
+                st.session_state.pop(f"color-{kind}-{value}", None)
+        if changed:
+            colors[kind] = mine
+            _remember(colors)
+            st.rerun()
+
+
+def default_colors(kind: str, values, features: pd.DataFrame | None = None) -> dict[str, str]:
+    """The colours *values* of *kind* get before the user picks any."""
+    values = [str(v) for v in values]
+    if kind == "Genotype":
+        return {g: c for g, (c, _m) in ap.genotype_styles(ap.genotype_order(values)).items()}
+    if kind == "Region":
+        return {v: REGION_COLORS[i % len(REGION_COLORS)] for i, v in enumerate(values)}
+    if kind == "Cluster":
+        return {v: REGION_COLORS[(int(v[1:]) - 1) % len(REGION_COLORS)] for v in values
+                if v[1:].isdigit()}
+    if kind == "Sample" and features is not None:
+        genotype_of = dict(zip(features["Sample"].astype(str), features["Genotype"]))
+        return ap.sample_colors(values, genotype_of)
+    order = group_order(values)
     styles = ap.genotype_styles(order)
     return {g: styles[g][0] for g in order}
+
+
+def sidebar_colors(features: pd.DataFrame, clusters: int = 0) -> None:
+    """The Colours expander for an app: genotype, every condition, regions, samples, clusters."""
+    kinds: dict[str, list] = {"Genotype": ap.genotype_order(features["Genotype"])}
+    for column in group_columns(features)[1:]:
+        kinds[column] = group_order(features[column])
+    kinds["Region"] = list(dict.fromkeys(features["Region"])) if "Region" in features else []
+    if clusters:
+        kinds["Cluster"] = [f"C{i}" for i in range(1, clusters + 1)]
+    kinds["Sample"] = list(dict.fromkeys(features["Sample"]))
+    color_controls(kinds, lambda kind, values: default_colors(kind, values, features))
+
+
+def _hex(color: str) -> str:
+    """A colour Streamlit's picker accepts, from a name or rgb() string."""
+    try:
+        from matplotlib.colors import to_hex
+
+        return to_hex(color)
+    except Exception:
+        return "#888888"
 
 
 def normalise_choices(numbers: Sequence[str], variable: str | None) -> list[str]:
@@ -649,7 +813,7 @@ def comparison_figure(frame: pd.DataFrame, value: str, group: str, kind: str, ti
     "All pairs" or "Off"; *bar_label* "Stars" or "p value".
     """
     order = group_order(frame[group])
-    colors = group_colors(order)
+    colors = group_colors(order, group)
     figure = go.Figure()
     for position, name in enumerate(order):
         values = frame.loc[frame[group] == name, value].astype(float).dropna()

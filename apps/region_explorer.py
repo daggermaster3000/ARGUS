@@ -94,6 +94,10 @@ from explorer_common import (  # noqa: E402  shared with simple_explorer.py
     posthoc_pairs,
     read_cells,
     WB_AREA,
+    category_colors,
+    sidebar_colors,
+    genotype_palette,
+    paint,
     group_choices,
     group_columns,
     group_order,
@@ -327,7 +331,7 @@ def cluster_order(values) -> list[str]:
 
 def cluster_colors(order) -> dict[str, str]:
     special = {UNCLUSTERED: NEUTRAL, NOT_CLUSTERED: FAINT}
-    return {c: special.get(c) or REGION_COLORS[int(c[1:]) - 1] for c in order}
+    return paint("Cluster", {c: special.get(c) or REGION_COLORS[int(c[1:]) - 1] for c in order})
 
 
 def cluster_distribution_figure(clustered: pd.DataFrame, region: str, measure: str):
@@ -339,7 +343,7 @@ def cluster_distribution_figure(clustered: pd.DataFrame, region: str, measure: s
     """
     order = cluster_order(clustered["Cluster"])
     genotypes_here = ap.genotype_order(clustered["Genotype"])
-    styles = ap.genotype_styles(genotypes_here)
+    palette = genotype_palette(genotypes_here)
     counts = pd.crosstab([clustered["Genotype"], clustered["Sample"]], clustered["Cluster"])
     counts = counts.reindex(columns=order, fill_value=0)
     share = measure.startswith("Share")
@@ -351,7 +355,7 @@ def cluster_distribution_figure(clustered: pd.DataFrame, region: str, measure: s
         if genotype not in values.index.get_level_values(0):
             continue
         per_sample = values.xs(genotype, level=0)
-        color = styles[genotype][0]
+        color = palette[genotype]
         offset = (k - (len(genotypes_here) - 1) / 2) * width
         figure.add_trace(go.Bar(
             x=np.arange(len(order)) + offset, y=per_sample.mean(axis=0).to_numpy(),
@@ -515,15 +519,7 @@ def color_map(frame: pd.DataFrame, by: str) -> tuple[dict[str, str], list[str]]:
     if by == "Cluster":
         order = cluster_order(frame["Cluster"])
         return cluster_colors(order), order
-    if by == "Genotype":
-        order = ap.genotype_order(frame["Genotype"])
-        return {g: c for g, (c, _m) in ap.genotype_styles(order).items()}, order
-    if by == "Sample":
-        genotype_of = dict(zip(frame["Sample"], frame["Genotype"]))
-        colors = ap.sample_colors(list(dict.fromkeys(frame["Sample"])), genotype_of)
-        return colors, list(colors)
-    order = list(dict.fromkeys(frame[by]))
-    return {v: REGION_COLORS[i % len(REGION_COLORS)] for i, v in enumerate(order)}, order
+    return category_colors(frame, by)
 
 
 def symbol_map(values) -> dict[str, str]:
@@ -946,6 +942,8 @@ except ValueError as exc:
 outlines = read_outlines(source)
 #: The condition columns the analysis wrote, beside the genotype.
 conditions = group_columns(features)[1:]
+with st.sidebar:
+    sidebar_colors(features, clusters=len(REGION_COLORS))
 if uploaded_cells is not None:
     cell_source = uploaded_cells.getvalue()
 
@@ -1564,13 +1562,13 @@ with atlas_tab:
                     st.caption(f"{', '.join(several)}: {region} has several parts; the largest is used.")
 
                 order = [g for g in ap.genotype_order([genotype_of.get(s) for s in chosen])]
-                styles = ap.genotype_styles(order)
+                palette = genotype_palette(order)
                 by_genotype = {g: [s for s in chosen if genotype_of.get(s) == g] for g in order}
 
                 # Registered outlines, their genotype means and the template.
                 figure = go.Figure()
                 for g in order:
-                    color = styles[g][0]
+                    color = palette[g]
                     for k, s in enumerate(by_genotype[g]):
                         line = closed(registered[s])
                         figure.add_trace(go.Scatter(
@@ -1632,7 +1630,7 @@ with atlas_tab:
                     if atlas_color == "Cluster":
                         overlay_colors = cluster_colors(clusters_found + [UNCLUSTERED, NOT_CLUSTERED])
                     else:
-                        overlay_colors = {g: c for g, (c, _m) in styles.items()}
+                        overlay_colors = dict(palette)
 
                     # Each cell's own outline, carried in with its sample's
                     # transform: all of a sample's outlines in one go.
@@ -1848,7 +1846,7 @@ with explain_tab:
                             colors = cluster_colors(order)
                         else:
                             order = ap.genotype_order(classes)
-                            colors = {g: c for g, (c, _m) in ap.genotype_styles(order).items()}
+                            colors = genotype_palette(classes)
                         index = {c: i for i, c in enumerate(classes)}
                         chance = 1.0 / len(classes)
                         st.metric(

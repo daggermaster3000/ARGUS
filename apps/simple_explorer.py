@@ -61,6 +61,8 @@ from explorer_common import (  # noqa: E402
     posthoc_pairs,
     read_cells,
     WB_AREA,
+    category_colors,
+    sidebar_colors,
     group_choices,
     group_columns,
     group_order,
@@ -73,11 +75,6 @@ from explorer_common import (  # noqa: E402
 
 #: Sizes a cell can be filtered on, first one found wins.
 SIZE_COLUMNS = ("Equivalent diameter (µm)", "Area (µm²)", "Footprint area (µm²)", "Volume (µm³)")
-
-
-def genotype_colors(values) -> tuple[dict[str, str], list[str]]:
-    order = ap.genotype_order(values)
-    return {g: c for g, (c, _m) in ap.genotype_styles(order).items()}, order
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +118,8 @@ except ValueError as exc:
 cells_all = read_cells(source)
 #: The condition columns the analysis wrote, beside the genotype.
 conditions = group_columns(features)[1:]
+with st.sidebar:
+    sidebar_colors(features)
 
 with st.sidebar:
     st.header("Rows")
@@ -332,11 +331,11 @@ with relate_tab:
             st.warning("Nothing numeric to plot here.")
         else:
             plot = frame.dropna(subset=[x, y])
-            colors, order = genotype_colors(plot["Genotype"])
+            plot = plot.assign(**{colour: plot[colour].astype(str)})
+            colors, order = category_colors(plot, colour)
             common = dict(color=colour, hover_name="Sample",
-                          hover_data={c: True for c in ("Genotype", "Region") if c in plot})
-            if colour == "Genotype":
-                common.update(color_discrete_map=colors, category_orders={"Genotype": order})
+                          hover_data={c: True for c in ("Genotype", "Region") if c in plot},
+                          color_discrete_map=colors, category_orders={colour: order})
             figure = px.scatter(plot, x=x, y=y, trendline="ols" if trend else None, **common)
             figure.update_traces(marker={"size": 9, "line": {"width": 1, "color": "white"}},
                                  selector={"mode": "markers"})
