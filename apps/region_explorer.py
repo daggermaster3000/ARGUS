@@ -95,6 +95,7 @@ from explorer_common import (  # noqa: E402  shared with simple_explorer.py
     read_cells,
     WB_AREA,
     category_colors,
+    chart,
     sidebar_colors,
     genotype_palette,
     paint,
@@ -1073,7 +1074,7 @@ with umap_tab:
                     )
                 else:
                     figure = styled(px.scatter(plot, x=axes[0], y=axes[1], **common))
-                st.plotly_chart(
+                chart(
                     figure, width="content" if as_outlines and int(dims) == 2 else "stretch",
                     theme="streamlit",
                 )
@@ -1149,7 +1150,7 @@ with scatter_tab:
                     st.caption(f"{missing} region(s) have no stored outline and are not drawn.")
             else:
                 figure = styled(px.scatter(plot, x=x, y=y, log_x=log_x, log_y=log_y, **common))
-            st.plotly_chart(
+            chart(
                 figure, width="content" if sc_outlines else "stretch", theme="streamlit"
             )
             if dropped:
@@ -1326,7 +1327,7 @@ with cells_tab:
                         chart.update_layout(height=220, margin={"l": 10, "r": 10, "t": 10, "b": 10},
                                             xaxis={"title": "clusters", "dtick": 1},
                                             yaxis={"title": "silhouette"}, showlegend=False)
-                        st.plotly_chart(chart, width="stretch", theme="streamlit")
+                        chart(chart, width="stretch", theme="streamlit")
                         best = int(scores.loc[scores["Silhouette"].idxmax(), "Clusters"])
                         note = f"Best silhouette at {best}."
                         if "BIC" in scores:
@@ -1395,7 +1396,7 @@ with cells_tab:
                         figure.update_traces(marker={"size": 6, "opacity": 0.8})
                         figure.update_layout(height=620)
                 if figure is not None:
-                    st.plotly_chart(figure, width="content" if cell_draw else "stretch",
+                    chart(figure, width="content" if cell_draw else "stretch",
                                     theme="streamlit")
                 if "Cluster" in cells and cluster_used:
                     controls = st.columns(2)
@@ -1418,7 +1419,7 @@ with cells_tab:
                         figure = cluster_stack_figure(clustered_only, cluster_region, dist_measure)
                         note = ("One bar per sample, grouped by genotype; the last bar of "
                                 "each group is its samples averaged, each weighed the same.")
-                    st.plotly_chart(figure, width="stretch", theme="streamlit")
+                    chart(figure, width="stretch", theme="streamlit")
                     st.caption(note)
                     write_clusters_panel(source, cells, cluster_region, cluster_method,
                                          cluster_k, cluster_min, cluster_used)
@@ -1598,7 +1599,7 @@ with atlas_tab:
                 equal_axes(figure, 1)
                 shape_col, fit_col = st.columns([3, 2])
                 with shape_col:
-                    st.plotly_chart(figure, width="stretch", theme="streamlit")
+                    chart(figure, width="stretch", theme="streamlit")
                 with fit_col:
                     fit_table = pd.DataFrame(
                         [{"Sample": s, "Genotype": genotype_of.get(s),
@@ -1691,7 +1692,7 @@ with atlas_tab:
                     if draw != "Hidden":
                         overlay = {f"{g} (n={len(by_genotype[g])})": overlay_for(by_genotype[g])
                                    for g in order}
-                    st.plotly_chart(
+                    chart(
                         density_figure(grid, panels, template, colorscale=ramp,
                                        zmin=0.0, zmax=top_mean or 1.0, unit=unit, cells=overlay,
                                        colors=overlay_colors),
@@ -1721,7 +1722,7 @@ with atlas_tab:
                                                   index=0, key="atlas-other")
                         difference = mean_of(by_genotype[other]) - mean_of(by_genotype[base])
                         span = float(np.nanmax(np.abs(difference))) if np.isfinite(difference).any() else 1.0
-                        st.plotly_chart(
+                        chart(
                             density_figure(grid, {f"{other} − {base}": difference}, template,
                                            colorscale=DIFFERENCE_SCALE, zmin=-span or -1.0,
                                            zmax=span or 1.0, unit=unit),
@@ -1739,7 +1740,7 @@ with atlas_tab:
                         if draw != "Hidden":
                             sample_cells = {f"{s} ({genotype_of.get(s)})": overlay_for([s])
                                             for g in order for s in by_genotype[g] if s in mapped}
-                        st.plotly_chart(
+                        chart(
                             density_figure(grid, per_sample, template, colorscale=ramp,
                                            zmin=0.0, zmax=top or 1.0, unit=unit, cells=sample_cells,
                                            colors=overlay_colors, height=480,
@@ -1894,7 +1895,7 @@ with explain_tab:
                             height=max(320, 28 * len(top) + 120),
                             margin={"l": 10, "r": 10, "t": 50, "b": 10},
                         )
-                        st.plotly_chart(figure, width="stretch", theme="streamlit")
+                        chart(figure, width="stretch", theme="streamlit")
 
                         # Beeswarm for one class: each explained cell, by feature.
                         if binary:
@@ -1934,7 +1935,7 @@ with explain_tab:
                             height=max(320, 30 * len(top) + 120),
                             margin={"l": 10, "r": 10, "t": 50, "b": 10},
                         )
-                        st.plotly_chart(bees, width="stretch", theme="streamlit")
+                        chart(bees, width="stretch", theme="streamlit")
 
                         # Dependence: one feature's value against its SHAP value.
                         feature_name = st.selectbox("Feature", [used[i] for i in top], key="shap-feature")
@@ -1960,7 +1961,7 @@ with explain_tab:
                             xaxis={"automargin": True}, yaxis={"automargin": True},
                             margin={"l": 10, "r": 10, "t": 50, "b": 10},
                         )
-                        st.plotly_chart(dep, width="stretch", theme="streamlit")
+                        chart(dep, width="stretch", theme="streamlit")
 
                         table = pd.DataFrame(importance, index=used, columns=[str(c) for c in classes])
                         table = table[[str(c) for c in order]].assign(**{"Total": total})
@@ -2136,7 +2137,7 @@ with plots_tab:
                 figure = comparison_figure(data, variable, group, kind, title,
                                            dot_label=dot_label, pairs=pairs, show_dots=show_dots,
                                            bars=bars, bar_label=bar_label)
-                st.plotly_chart(figure, width="stretch", theme="streamlit")
+                chart(figure, width="stretch", theme="streamlit")
 
                 statistic = {"Kruskal-Wallis": "H", MIXED: "χ²"}.get(
                     test.split(" · ")[-1] if " · " in test else test, "F")

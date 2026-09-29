@@ -826,11 +826,11 @@ def comparison_figure(frame: pd.DataFrame, value: str, group: str, kind: str, ti
                       legendgroup=str(name), width=0.5,
                       marker={"color": color}, line={"color": color}, showlegend=False)
         if kind == "Violin":
-            figure.add_trace(go.Violin(points=False, box_visible=True, meanline_visible=True,
-                                       fillcolor=_alpha(color, 0.35), opacity=0.9,
+            figure.add_trace(go.Violin(points=False, box_visible=False, meanline_visible=True,
+                                       fillcolor=_alpha(color, 0.6), opacity=1.0,
                                        hoverinfo="skip", **shared))
         else:
-            figure.add_trace(go.Box(boxpoints=False, fillcolor=_alpha(color, 0.35),
+            figure.add_trace(go.Box(boxpoints=False, fillcolor=_alpha(color, 0.6),
                                     hoverinfo="skip", **shared))
     if show_dots:
         for position, name in enumerate(order):
@@ -884,6 +884,41 @@ def comparison_figure(frame: pd.DataFrame, value: str, group: str, kind: str, ti
 
 
 NEUTRAL = "#8a8983"
+
+#: Outline of every mark in every plot: violins, boxes, bars, dots, shapes.
+OUTLINE = "#000000"
+
+
+def outlined(figure):
+    """*figure* with the house style: every mark outlined in black.
+
+    Violins and boxes keep their group's fill with a black edge; bars and dots get
+    a black rim; filled shapes (region and cell outlines) a thin black edge. Lines
+    that are lines — trends, templates, contours — and heatmaps are left alone.
+    Applied to every chart through :func:`chart`, so no plot can miss it.
+    """
+    for trace in figure.data:
+        kind = trace.type
+        if kind in ("violin", "box"):
+            trace.update(line={"color": OUTLINE, "width": 1.5})
+            if kind == "violin":
+                trace.update(meanline={"color": OUTLINE})
+        elif kind in ("bar", "histogram"):
+            trace.update(marker_line_color=OUTLINE, marker_line_width=1)
+        elif kind in ("scatter", "scattergl", "scatter3d"):
+            fill = getattr(trace, "fill", None)
+            if fill not in (None, "none", ""):
+                trace.update(line={"color": OUTLINE, "width": 0.8})
+            elif "markers" in (trace.mode or "markers"):
+                count = len(trace.x) if trace.x is not None else 0
+                trace.update(marker_line_color=OUTLINE,
+                             marker_line_width=0.5 if count > 2000 else 1)
+    return figure
+
+
+def chart(figure, **kwargs):
+    """``st.plotly_chart`` with the house style applied."""
+    return st.plotly_chart(outlined(figure), **kwargs)
 
 
 def genotype_of_sample(features: pd.DataFrame, sample: str) -> str:

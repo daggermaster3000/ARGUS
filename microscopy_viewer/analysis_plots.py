@@ -51,6 +51,8 @@ REFERENCE_GENOTYPES = ("wt", "ctl", "sib")
 UNKNOWN_GENOTYPE = "(unknown)"
 
 INK = "#1f1f1e"
+#: Outline of every mark in the report figures, as in the explorer apps.
+OUTLINE = "#000000"
 INK_MUTED = "#6b6a65"
 GRID = "#e4e3de"
 SURFACE = "#ffffff"
@@ -227,7 +229,7 @@ def _legend(axes, styles, order) -> None:
 
     handles = [
         Line2D([], [], linestyle="", marker=styles[g][1], markersize=6,
-               markerfacecolor=styles[g][0], markeredgecolor=SURFACE, label=g)
+               markerfacecolor=styles[g][0], markeredgecolor=OUTLINE, label=g)
         for g in order
     ]
     legend = axes.legend(
@@ -259,6 +261,7 @@ def violin_plot(features, column: str, title: str, ylabel: str, path: str | Path
     order = genotype_order(frame["Genotype"])
     styles = genotype_styles(order)
     rng = np.random.default_rng(0)
+    from matplotlib.colors import to_rgba
 
     figure = _figure(max(4.5, 1.1 * len(regions) * max(1, len(order)) ** 0.5 + 2.0), 4.2)
     axes = figure.add_subplot(1, 1, 1)
@@ -280,17 +283,18 @@ def violin_plot(features, column: str, title: str, ylabel: str, path: str | Path
                     showextrema=False, showmedians=False,
                 )
                 for patch in body["bodies"]:
-                    patch.set_facecolor(color)
-                    patch.set_alpha(0.22)
-                    patch.set_edgecolor(color)
-                    patch.set_linewidth(1.0)
+                    # Alpha on the fill only: set_alpha would fade the outline too.
+                    patch.set_facecolor(to_rgba(color, 0.6))
+                    patch.set_edgecolor(OUTLINE)
+                    patch.set_linewidth(1.2)
+                    patch.set_alpha(None)
             median = float(np.median(values))
             axes.hlines(median, center - slot * 0.3, center + slot * 0.3,
                         color=INK, linewidth=1.5, zorder=4)
             jitter = rng.uniform(-slot * 0.18, slot * 0.18, size=values.size)
             axes.scatter(
                 center + jitter, values, s=26, marker=marker, color=color,
-                edgecolors=SURFACE, linewidths=0.8, zorder=5,
+                edgecolors=OUTLINE, linewidths=0.8, zorder=5,
             )
 
     axes.set_xticks(range(len(regions)))
@@ -358,11 +362,11 @@ def cell_pca_plot(outcomes, path: str | Path) -> str:
             continue
         cx, cy = float(np.median(scores[own, 0])), float(np.median(scores[own, 1]))
         axes.scatter([cx], [cy], s=70, marker=markers[genotype_of[sample]], color=colors[sample],
-                     edgecolors=SURFACE, linewidths=1.5, zorder=6)
+                     edgecolors=OUTLINE, linewidths=1.2, zorder=6)
         centres.append((number, cx, cy))
         handles.append(Line2D(
             [], [], linestyle="", marker=markers[genotype_of[sample]], markersize=5,
-            markerfacecolor=colors[sample], markeredgecolor=SURFACE,
+            markerfacecolor=colors[sample], markeredgecolor=OUTLINE,
             label=f"{number:>2} · {sample} ({genotype_of[sample]}, n={int(own.sum())})",
         ))
 

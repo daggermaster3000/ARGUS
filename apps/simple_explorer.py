@@ -62,6 +62,7 @@ from explorer_common import (  # noqa: E402
     read_cells,
     WB_AREA,
     category_colors,
+    chart,
     sidebar_colors,
     group_choices,
     group_columns,
@@ -247,7 +248,7 @@ with compare_tab:
                 figure = comparison_figure(data, variable, group, kind,
                                            f"{variable} — {note}", pairs=pairs,
                                            bars=bars, bar_label=bar_label)
-                st.plotly_chart(figure, width="stretch", theme="streamlit")
+                chart(figure, width="stretch", theme="streamlit")
 
                 short = "Mixed model" if test == MIXED else test.split(" · ")[-1]
                 statistic = {"Kruskal-Wallis": "H", "Mixed model": "χ²"}.get(short, "F")
@@ -340,7 +341,7 @@ with relate_tab:
             figure.update_traces(marker={"size": 9, "line": {"width": 1, "color": "white"}},
                                  selector={"mode": "markers"})
             figure.update_layout(height=620, margin={"l": 10, "r": 10, "t": 30, "b": 10})
-            st.plotly_chart(figure, width="stretch", theme="streamlit")
+            chart(figure, width="stretch", theme="streamlit")
             if len(plot) > 2:
                 from scipy import stats
 

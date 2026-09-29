@@ -1247,6 +1247,11 @@ size and compare shape alone. Outlines are sized in screen pixels, so they stay
 undistorted even when the two axes are in unrelated units — which is why an
 outline plot has a fixed size and is not drawn on log axes.
 
+Every plot in both apps shares one style: violins, boxes, bars and dots are
+outlined in black over their group's colour, and violins show their shape and
+mean line without a box drawn inside. The report folder's PNG figures use the
+same black outlines.
+
 **Colours** in the sidebar (both apps) lets you pick the colour of each genotype,
 condition, region, sample or cluster. The choice is used by every plot — the
 Compare boxes, scatters, UMAPs, cluster charts, the atlas — and remembered for
