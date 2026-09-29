@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from qtpy.QtCore import QCoreApplication, Qt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -1287,6 +1289,43 @@ def main() -> int:
         check(movie.exists() and movie.stat().st_size > 0, f"and writes the movie ({panel._status.text()})")
     finally:
         film.viewer.close()
+    print(flush=True)
+
+    print("overviews stay in the sample grid, last", flush=True)
+    import h5py as _h5py
+    import make_sample_data as _msd
+
+    def _place(path, x, y, size):
+        with _h5py.File(path, "r+") as handle:
+            image = handle["DataSetInfo"]["Image"]
+            for key, value in (("ExtMin0", x), ("ExtMax0", x + size), ("ExtMin1", y), ("ExtMax1", y + size)):
+                _msd._write_attr(image, key, value)
+
+    ov_folder = Path(tempfile.mkdtemp())
+    _place(_msd.write_ims_2d(ov_folder / "a_10x.ims", shape=(1, 1, 48, 64)), 0, 0, 2000)
+    for name, x in (("b_fish1", 200), ("c_fish2", 900)):
+        _place(_msd.write_ims(ov_folder / f"{name}.ims", shape=(1, 4, 32, 32), n_channels=1), x, 300, 250)
+    scanning = MicroscopyViewer(show=False)
+    try:
+        grid_panel = scanning.experiment_widget
+        grid_panel._folder_edit.setText(str(ov_folder))
+        grid_panel.scan()
+        for _ in range(3000):
+            QCoreApplication.processEvents()
+            if grid_panel._worker is None and grid_panel._entries:
+                break
+            time.sleep(0.01)
+        names = [grid_panel._grid.item(i).text().split("\n")[0] for i in range(grid_panel._grid.count())]
+        check(names == ["b_fish1", "c_fish2", "a_10x"], f"a file taken for an overview is listed last ({names})")
+        check([e.name for e in grid_panel._entries] == names, "rows and entries stay in step")
+        check([e.name for e in grid_panel.selected_entries()] == ["b_fish1", "c_fish2"],
+              "and is left out of “all samples”")
+        grid_panel._grid.item(2).setSelected(True)
+        check([e.name for e in grid_panel.selected_entries()] == ["a_10x"], "but can be selected")
+        if grid_panel._overview_window is not None:
+            grid_panel._overview_window.close()
+    finally:
+        scanning.viewer.close()
     print(flush=True)
 
     print("cell counter", flush=True)

@@ -97,8 +97,10 @@ class ExperimentWidget(QWidget):
         self._app = app
         self._viewer = app.viewer
         self._entries: list[ex.SampleEntry] = []
-        #: Overviews found by the last scan; kept out of the grid.
+        #: Overviews found by the last scan, and the files they are made of: those
+        #: sit at the end of the grid, marked, and out of "all samples".
         self._overviews: list = []
+        self._overview_ids: set[int] = set()
         self._overview_window = None
         self._worker = None
         self._cancelled = False
@@ -271,10 +273,14 @@ class ExperimentWidget(QWidget):
         return self._cancelled
 
     def selected_entries(self) -> list[ex.SampleEntry]:
-        """The selected samples, or all of them when nothing is selected."""
+        """The selected samples, or all of them when nothing is selected.
+
+        "All of them" leaves out the files taken for overviews; selecting one —
+        a 10x image that only looked like an overview — includes it.
+        """
         rows = [self._grid.row(item) for item in self._grid.selectedItems()]
         if not rows:
-            return list(self._entries)
+            return [e for e in self._entries if id(e) not in self._overview_ids]
         return [self._entries[row] for row in sorted(rows) if row < len(self._entries)]
 
     # -- scanning -------------------------------------------------------------
@@ -299,6 +305,7 @@ class ExperimentWidget(QWidget):
             return
 
         paths = ex.list_files(folder, self._recursive.isChecked())
+        self._overviews, self._overview_ids = [], set()
         if not paths:
             self._grid.clear()
             self._entries = []
@@ -370,11 +377,20 @@ class ExperimentWidget(QWidget):
 
         samples, self._overviews = ov.find_overviews(list(found))
         kept = {id(entry) for entry in samples}
-        # The grid was filled as files were read, one row per file in order.
-        for row in reversed(range(min(len(found), self._grid.count()))):
-            if id(found[row]) not in kept:
-                self._grid.takeItem(row)
-        self._entries = list(samples)
+        # Overviews go to the end of the grid rather than out of it: the guess can
+        # be wrong — a single-plane 10x image with 20x stacks taken inside it looks
+        # exactly like an overview — and a sample that vanished could not be
+        # opened, analysed or segmented at all.
+        self._overview_ids = {id(entry) for entry in found if id(entry) not in kept}
+        rows = min(len(found), self._grid.count())
+        items = [self._grid.takeItem(0) for _ in range(rows)]
+        order = ([i for i in range(rows) if id(found[i]) in kept]
+                 + [i for i in range(rows) if id(found[i]) not in kept])
+        for i in order:
+            self._grid.addItem(items[i])
+            if id(found[i]) in self._overview_ids:
+                self._mark_overview(items[i], found[i])
+        self._entries = [found[i] for i in order] + list(found[rows:])
         self._overview_button.setEnabled(bool(self._overviews))
         self._overview_button.setText(
             f"Overview ({len(self._overviews)})" if len(self._overviews) > 1 else "Overview")
@@ -382,7 +398,8 @@ class ExperimentWidget(QWidget):
         readable = [entry for entry in self._entries if entry.readable]
         with_rois = [entry for entry in readable if entry.n_rois]
         with_labels = [entry for entry in readable if entry.label_keys]
-        summary = f"{len(readable)} sample(s) of {len(self._entries)} file(s)."
+        summary = (f"{len(readable) - len(self._overview_ids & {id(e) for e in readable})} "
+                   f"sample(s) of {len(self._entries)} file(s).")
         if with_rois:
             summary += f" {len(with_rois)} already carry ROIs."
         if with_labels:
@@ -392,13 +409,28 @@ class ExperimentWidget(QWidget):
             summary += f" {len(broken)} could not be read."
         if self._overviews:
             fields = sum(len(o.fields) for o in self._overviews)
-            summary += (f" {len(self._overviews)} overview(s) ({fields} file(s)) kept out of "
-                        "the grid — shown in their own window.")
+            summary += (f" {len(self._overviews)} overview(s) ({fields} file(s)) found: shown "
+                        "in their own window and at the end of the grid, marked “overview?”. "
+                        "They are left out of “all samples” unless selected.")
         self._log(summary)
         if self._overviews:
             self.show_overview()
 
     # -- overviews ------------------------------------------------------------
+
+    def _mark_overview(self, item, entry) -> None:
+        """Show a file taken for an overview as such, without hiding it."""
+        item.setText(f"{entry.name}\noverview?  {entry.describe()}")
+        font = item.font()
+        font.setItalic(True)
+        item.setFont(font)
+        item.setForeground(Qt.gray)
+        item.setToolTip(
+            f"{entry.path}\n{entry.describe()}\n\nTaken for an overview: a single plane "
+            "with other samples imaged inside it, a mosaic field, or named “overview”. "
+            "Left out of “all samples”; select it to open, analyse or segment it like any "
+            "other sample."
+        )
 
     def show_overview(self) -> None:
         """Open the window with the overviews and every sample outlined on them."""
@@ -745,7 +777,10 @@ class ExperimentWidget(QWidget):
                 continue
             entry.n_rois = len(ims_store.load_rois(entry.path))
             entry.label_keys = ims_store.list_labels(entry.path)
-            self._grid.item(index).setText(f"{entry.name}\n{entry.describe()}")
+            item = self._grid.item(index)
+            item.setText(f"{entry.name}\n{entry.describe()}")
+            if id(entry) in self._overview_ids:
+                self._mark_overview(item, entry)
 
     # -- stored label maps ----------------------------------------------------
 

@@ -964,11 +964,15 @@ file. Tiles say what each file carries (`2 ROI(s), 1 label map(s)`) and unreadab
 files — an aborted acquisition leaves `*_F0.ims` stubs — are listed in red with the
 reason rather than filtered out.
 
-**Overviews are recognised and kept out of the grid.** An overview is a single
+**Overviews are recognised and moved to the end of the grid.** An overview is a single
 plane with a stage position that is either one field of an `_F####` mosaic, an
 image whose stage area contains other samples (the 5x map the 20x stacks were
 taken from), or a file named "overview". Z-stacks never count, so a 20x stack with
-a 40x closeup inside it stays a sample. After a scan that finds one, the
+a 40x closeup inside it stays a sample. The guess can still be wrong — a
+single-plane 10x image with 20x stacks taken inside it looks exactly like an
+overview — so those files stay in the grid, last, in grey italics and marked
+**overview?**. They are left out of "all samples" (nothing selected), and
+included as soon as they are selected, **Select all** included. After a scan that finds one, the
 **Overview** window opens: the mosaic stitched by stage position (or the single
 image), every sample on it outlined as a numbered, coloured box with its name.
 Wheel to zoom, drag to pan; hover a box for the file, click it to select that
