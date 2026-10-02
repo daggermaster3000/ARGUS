@@ -30,6 +30,22 @@ from microscopy_viewer import analysis_plots as ap  # noqa: E402
 SHEET = "Region features"
 
 
+def start_path() -> str:
+    """The workbook to open first: from the URL, else the command line.
+
+    The desktop launcher passes a dropped workbook as ``?workbook=…``, which
+    reaches an explorer that was already running; ``streamlit run app.py -- x``
+    still works too.
+    """
+    try:
+        wanted = st.query_params.get("workbook")
+    except Exception:
+        wanted = None
+    if wanted:
+        return str(wanted)
+    return sys.argv[1] if len(sys.argv) > 1 else ""
+
+
 IDENTITY = ("Sample", "Genotype", "Region", "Label map")
 
 

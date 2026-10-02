@@ -85,6 +85,18 @@ double-click.
 | `python install_shortcut.py --start-menu` | also add a Start Menu entry (macOS: `~/Applications`, so Launchpad and Spotlight find it) |
 | `python install_shortcut.py --console` | keep a console open for debugging: `python.exe` on Windows, a Terminal `.command` file on macOS |
 | `python install_shortcut.py --uninstall` | remove the shortcuts |
+| `python install_shortcut.py --no-explorer` | the viewer's shortcut only |
+
+It also creates **Microscopy Explorer**, which opens the Streamlit region explorer
+in your browser. Double-clicking it again never starts a second server: the
+explorer always runs on port 8765, and a launch that finds it answering there just
+opens another tab on it; two launches in the same second take turns through a lock
+file. The server runs in the background with no window and keeps running after
+the tab is closed — `python launch_explorer.py --stop` ends it. On Windows, a
+workbook or report folder dropped on the shortcut opens in it, running server or
+not (`python launch_explorer.py report.xlsx` does the same anywhere);
+`--simple` opens the plain explorer instead (port 8766). The server's output goes
+to `explorer_region.log` beside the viewer's log.
 
 On Linux there is no shortcut installer — launch it from a terminal, or make a
 `.desktop` entry pointing at the `microscopy-viewer` command.

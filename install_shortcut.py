@@ -1,4 +1,4 @@
-"""Create the "Microscopy Viewer" desktop shortcut, on Windows or macOS.
+"""Create the "Microscopy Viewer" and "Microscopy Explorer" desktop shortcuts.
 
 Run once, from the Python environment that has napari installed::
 
@@ -14,17 +14,23 @@ On macOS it is a small ``Microscopy Viewer.app`` whose only job is to run that
 same interpreter on ``launch_viewer.py``. Files dropped on it (or opened with
 *Open With*) reach the viewer as ``FileOpen`` events, which it listens for.
 
+The explorer shortcut runs ``launch_explorer.py``, which starts the Streamlit
+region explorer once in the background and opens it in the browser; a second
+double-click opens another tab on the same server instead of starting a new one.
+
 Other useful forms::
 
     python install_shortcut.py --start-menu     # also add a Start Menu entry (macOS: ~/Applications)
     python install_shortcut.py --console        # keep a console for debugging
     python install_shortcut.py --uninstall      # remove the shortcuts again
+    python install_shortcut.py --no-explorer    # the viewer's shortcut only
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+from dataclasses import dataclass
 import plistlib
 import shlex
 import shutil
@@ -42,6 +48,33 @@ IS_MAC = sys.platform == "darwin"
 #: Written into the macOS app, and checked before ``--uninstall`` deletes one, so
 #: an unrelated app that happens to share the name is never removed.
 BUNDLE_ID = "local.microscopy-viewer.launcher"
+
+
+@dataclass(frozen=True)
+class Shortcut:
+    """One thing a shortcut starts: its name, launcher script and identity."""
+
+    name: str
+    launcher: Path
+    description: str
+    bundle_id: str
+    #: Name of the script inside the macOS app bundle.
+    executable: str
+    #: Whether the macOS app offers to open microscopy images (Open With, drops).
+    opens_images: bool = True
+
+
+VIEWER = Shortcut(SHORTCUT_NAME, LAUNCHER, DESCRIPTION, BUNDLE_ID, "microscopy-viewer")
+#: The Streamlit explorer. Its launcher is plain Python with no event loop, so on
+#: macOS it cannot receive files dropped on its app; it claims no document types.
+EXPLORER = Shortcut(
+    "Microscopy Explorer",
+    PROJECT_ROOT / "launch_explorer.py",
+    "Explore analysis workbooks: plots, statistics, the region atlas",
+    "local.microscopy-viewer.explorer",
+    "microscopy-explorer",
+    opens_images=False,
+)
 
 
 class InstallError(RuntimeError):
@@ -137,7 +170,8 @@ def special_folder(name: str) -> Path:
 
 
 def _write_with_pywin32(
-    link: Path, target: Path, arguments: str, workdir: Path, icon: Path | None
+    link: Path, target: Path, arguments: str, workdir: Path, icon: Path | None,
+    description: str = DESCRIPTION,
 ) -> bool:
     try:
         import win32com.client
@@ -148,7 +182,7 @@ def _write_with_pywin32(
     shortcut.TargetPath = str(target)
     shortcut.Arguments = arguments
     shortcut.WorkingDirectory = str(workdir)
-    shortcut.Description = DESCRIPTION
+    shortcut.Description = description
     if icon is not None:
         shortcut.IconLocation = f"{icon},0"
     shortcut.save()
@@ -156,7 +190,8 @@ def _write_with_pywin32(
 
 
 def _write_with_vbscript(
-    link: Path, target: Path, arguments: str, workdir: Path, icon: Path | None
+    link: Path, target: Path, arguments: str, workdir: Path, icon: Path | None,
+    description: str = DESCRIPTION,
 ) -> bool:
     """Fallback that drives the same COM object through ``cscript``.
 
@@ -169,7 +204,7 @@ Set link = shell.CreateShortcut("{link}")
 link.TargetPath = "{target}"
 link.Arguments = "{arguments.replace('"', '""')}"
 link.WorkingDirectory = "{workdir}"
-link.Description = "{DESCRIPTION}"
+link.Description = "{description}"
 {icon_line}
 link.Save
 """
@@ -190,21 +225,22 @@ link.Save
             pass
 
 
-def create_shortcut(directory: Path, name: str, console: bool) -> Path:
-    """Write ``<directory>/<name>.lnk`` pointing at the launcher."""
-    if not LAUNCHER.exists():
-        raise InstallError(f"launcher not found: {LAUNCHER}")
+def create_shortcut(directory: Path, name: str, console: bool, shortcut: Shortcut = VIEWER) -> Path:
+    """Write ``<directory>/<name>.lnk`` pointing at *shortcut*'s launcher."""
+    launcher = shortcut.launcher
+    if not launcher.exists():
+        raise InstallError(f"launcher not found: {launcher}")
 
     interpreter = find_interpreter(console)
     if not interpreter.exists():
         raise InstallError(f"interpreter not found: {interpreter}")
 
     link = directory / f"{name}.lnk"
-    arguments = f'"{LAUNCHER}"'
+    arguments = f'"{launcher}"'
     icon = ensure_icon()
 
-    if not _write_with_pywin32(link, interpreter, arguments, PROJECT_ROOT, icon):
-        _write_with_vbscript(link, interpreter, arguments, PROJECT_ROOT, icon)
+    if not _write_with_pywin32(link, interpreter, arguments, PROJECT_ROOT, icon, shortcut.description):
+        _write_with_vbscript(link, interpreter, arguments, PROJECT_ROOT, icon, shortcut.description)
 
     if not link.exists():
         raise InstallError(f"shortcut was not created at {link}")
@@ -234,7 +270,7 @@ def _document_extensions() -> list[str]:
     return [suffix.lstrip(".") for suffix in SUPPORTED_SUFFIXES]
 
 
-def _mac_launcher_script(interpreter: Path) -> str:
+def _mac_launcher_script(interpreter: Path, launcher: Path = LAUNCHER) -> str:
     """The shell script the app (or ``.command`` file) runs.
 
     Finder starts apps with a bare environment, so the interpreter is named by
@@ -257,11 +293,11 @@ for arg do
         *) set -- "$@" "$arg" ;;
     esac
 done
-exec {q(str(interpreter))} {q(str(LAUNCHER))} "$@"
+exec {q(str(interpreter))} {q(str(launcher))} "$@"
 """
 
 
-def _mac_info_plist(name: str, icon: Path | None) -> dict:
+def _mac_info_plist(name: str, icon: Path | None, shortcut: Shortcut = VIEWER) -> dict:
     try:
         sys.path.insert(0, str(PROJECT_ROOT))
         from microscopy_viewer import __version__ as version
@@ -270,8 +306,8 @@ def _mac_info_plist(name: str, icon: Path | None) -> dict:
     info = {
         "CFBundleName": name,
         "CFBundleDisplayName": name,
-        "CFBundleIdentifier": BUNDLE_ID,
-        "CFBundleExecutable": "microscopy-viewer",
+        "CFBundleIdentifier": shortcut.bundle_id,
+        "CFBundleExecutable": shortcut.executable,
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,
@@ -293,15 +329,17 @@ def _mac_info_plist(name: str, icon: Path | None) -> dict:
             },
         ],
     }
+    if not shortcut.opens_images:
+        del info["CFBundleDocumentTypes"]
     if icon is not None:
         info["CFBundleIconFile"] = icon.name
     return info
 
 
-def _is_our_app(bundle: Path) -> bool:
+def _is_our_app(bundle: Path, shortcut: Shortcut = VIEWER) -> bool:
     try:
         with open(bundle / "Contents" / "Info.plist", "rb") as handle:
-            return plistlib.load(handle).get("CFBundleIdentifier") == BUNDLE_ID
+            return plistlib.load(handle).get("CFBundleIdentifier") == shortcut.bundle_id
     except (OSError, plistlib.InvalidFileException):
         return False
 
@@ -312,17 +350,17 @@ def _mac_interpreter() -> Path:
     return Path(sys.executable)
 
 
-def create_mac_shortcut(directory: Path, name: str, console: bool) -> Path:
+def create_mac_shortcut(directory: Path, name: str, console: bool, shortcut: Shortcut = VIEWER) -> Path:
     """Write ``<directory>/<name>.app``, or ``<name>.command`` with *console*.
 
     A ``.command`` file opens in Terminal, so the log stays in view.
     """
-    if not LAUNCHER.exists():
-        raise InstallError(f"launcher not found: {LAUNCHER}")
+    if not shortcut.launcher.exists():
+        raise InstallError(f"launcher not found: {shortcut.launcher}")
     interpreter = _mac_interpreter()
     if not interpreter.exists():
         raise InstallError(f"interpreter not found: {interpreter}")
-    script = _mac_launcher_script(interpreter)
+    script = _mac_launcher_script(interpreter, shortcut.launcher)
 
     if console:
         command = directory / f"{name}.command"
@@ -332,7 +370,7 @@ def create_mac_shortcut(directory: Path, name: str, console: bool) -> Path:
 
     bundle = directory / f"{name}.app"
     if bundle.exists():
-        if not _is_our_app(bundle):
+        if not _is_our_app(bundle, shortcut):
             raise InstallError(f"{bundle} exists and was not made by this script; not replacing it")
         shutil.rmtree(bundle)
     macos = bundle / "Contents" / "MacOS"
@@ -340,7 +378,7 @@ def create_mac_shortcut(directory: Path, name: str, console: bool) -> Path:
     macos.mkdir(parents=True)
     resources.mkdir()
 
-    executable = macos / "microscopy-viewer"
+    executable = macos / shortcut.executable
     executable.write_text(script, encoding="utf-8")
     executable.chmod(0o755)
 
@@ -348,7 +386,7 @@ def create_mac_shortcut(directory: Path, name: str, console: bool) -> Path:
     if icon is not None:
         shutil.copyfile(icon, resources / icon.name)
     with open(bundle / "Contents" / "Info.plist", "wb") as handle:
-        plistlib.dump(_mac_info_plist(name, icon), handle)
+        plistlib.dump(_mac_info_plist(name, icon, shortcut), handle)
 
     # Tell Launch Services about it now, so Finder shows the icon and offers it
     # under Open With without waiting to notice the new app by itself.
@@ -361,14 +399,14 @@ def create_mac_shortcut(directory: Path, name: str, console: bool) -> Path:
     return bundle
 
 
-def remove_mac_shortcut(directory: Path, name: str) -> list[Path]:
+def remove_mac_shortcut(directory: Path, name: str, shortcut: Shortcut = VIEWER) -> list[Path]:
     removed = []
     bundle = directory / f"{name}.app"
-    if bundle.exists() and _is_our_app(bundle):
+    if bundle.exists() and _is_our_app(bundle, shortcut):
         shutil.rmtree(bundle)
         removed.append(bundle)
     command = directory / f"{name}.command"
-    if command.exists() and str(LAUNCHER) in command.read_text(encoding="utf-8", errors="replace"):
+    if command.exists() and str(shortcut.launcher) in command.read_text(encoding="utf-8", errors="replace"):
         command.unlink()
         removed.append(command)
     return removed
@@ -379,10 +417,12 @@ def remove_mac_shortcut(directory: Path, name: str) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 
-def _check_environment() -> list[str]:
+def _check_environment(explorer: bool = False) -> list[str]:
     """Warn about anything missing before the user double-clicks the shortcut."""
     problems: list[str] = []
+    extra = (("streamlit", "required for the explorer"), ("plotly", "required for the explorer")) if explorer else ()
     for module, note in (
+        *extra,
         ("napari", "required — the viewer itself"),
         ("qtpy", "required — Qt bindings wrapper"),
         ("h5py", "required for .ims files"),
@@ -412,7 +452,10 @@ def main(argv: list[str] | None = None) -> int:
         help="keep a console open: python.exe on Windows, a Terminal .command file on macOS",
     )
     parser.add_argument("--uninstall", action="store_true", help="delete the shortcuts instead of creating them")
+    parser.add_argument("--no-explorer", action="store_true",
+                        help="skip the Microscopy Explorer shortcut (the Streamlit app)")
     args = parser.parse_args(argv)
+    shortcuts = [(VIEWER, args.name)] + ([] if args.no_explorer else [(EXPLORER, EXPLORER.name)])
 
     if not IS_MAC and sys.platform != "win32":
         print("Shortcuts are made on Windows and macOS only; run `microscopy-viewer` instead.")
@@ -429,33 +472,39 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.uninstall:
         for label, directory in targets:
-            if IS_MAC:
-                removed = remove_mac_shortcut(directory, args.name)
-                for path in removed:
-                    print(f"Removed: {path}")
-                if not removed:
-                    print(f"Not present in {label}: {args.name}.app")
-            elif remove_shortcut(directory, args.name):
-                print(f"Removed: {directory / (args.name + '.lnk')}")
-            else:
-                print(f"Not present on the {label}: {args.name}.lnk")
+            for shortcut, name in shortcuts:
+                if IS_MAC:
+                    removed = remove_mac_shortcut(directory, name, shortcut)
+                    for path in removed:
+                        print(f"Removed: {path}")
+                    if not removed:
+                        print(f"Not present in {label}: {name}.app")
+                elif remove_shortcut(directory, name):
+                    print(f"Removed: {directory / (name + '.lnk')}")
+                else:
+                    print(f"Not present on the {label}: {name}.lnk")
         return 0
 
-    problems = _check_environment()
+    problems = _check_environment(explorer=not args.no_explorer)
     for problem in problems:
         print(f"warning: {problem}")
 
     for label, directory in targets:
-        if IS_MAC:
-            link = create_mac_shortcut(directory, args.name, args.console)
-        else:
-            link = create_shortcut(directory, args.name, args.console)
-        print(f"{label} shortcut created: {link}")
+        for shortcut, name in shortcuts:
+            if IS_MAC:
+                link = create_mac_shortcut(directory, name, args.console, shortcut)
+            else:
+                link = create_shortcut(directory, name, args.console, shortcut)
+            print(f"{label} shortcut created: {link}")
 
     print()
     print(f"Interpreter : {_mac_interpreter() if IS_MAC else find_interpreter(args.console)}")
-    print(f"Launcher    : {LAUNCHER}")
-    print("Double-click the shortcut to start, or drop image files onto it to open them.")
+    for shortcut, _name in shortcuts:
+        print(f"Launcher    : {shortcut.launcher}")
+    print("Double-click the viewer's shortcut to start, or drop image files onto it to open them.")
+    if not args.no_explorer:
+        print("The explorer's shortcut starts one Streamlit server in the background and "
+              "opens it in the browser; `python launch_explorer.py --stop` ends it.")
     if IS_MAC:
         print("Drag it into the Dock to keep it there.")
     if problems:

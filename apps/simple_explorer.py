@@ -64,6 +64,7 @@ from explorer_common import (  # noqa: E402
     category_colors,
     chart,
     sidebar_colors,
+    start_path,
     group_choices,
     group_columns,
     group_order,
@@ -89,7 +90,7 @@ with st.sidebar:
     st.header("Workbook")
     uploaded = st.file_uploader("Analysis workbook (.xlsx)", type=["xlsx"])
     typed = st.text_input("…or a path on this machine",
-                          value=sys.argv[1] if len(sys.argv) > 1 else "")
+                          value=start_path())
 
 source: bytes | str | None = None
 if uploaded is not None:

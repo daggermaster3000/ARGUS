@@ -68,3 +68,17 @@ def test_uninstall_removes_app_and_command(tmp_path, no_lsregister):
 
     assert set(removed) == {bundle, command}
     assert not bundle.exists() and not command.exists()
+
+
+def test_the_explorer_gets_its_own_app_that_claims_no_files(tmp_path, no_lsregister):
+    bundle = shortcut.create_mac_shortcut(tmp_path, "Microscopy Explorer", console=False,
+                                          shortcut=shortcut.EXPLORER)
+    with open(bundle / "Contents" / "Info.plist", "rb") as handle:
+        info = plistlib.load(handle)
+    assert info["CFBundleIdentifier"] == shortcut.EXPLORER.bundle_id != shortcut.BUNDLE_ID
+    assert "CFBundleDocumentTypes" not in info
+    script = (bundle / "Contents" / "MacOS" / info["CFBundleExecutable"]).read_text()
+    assert str(shortcut.EXPLORER.launcher) in script
+    # The viewer's uninstall leaves the explorer alone, and the other way round.
+    assert shortcut.remove_mac_shortcut(tmp_path, "Microscopy Explorer") == []
+    assert shortcut.remove_mac_shortcut(tmp_path, "Microscopy Explorer", shortcut.EXPLORER) == [bundle]

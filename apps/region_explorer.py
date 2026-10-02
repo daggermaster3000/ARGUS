@@ -97,6 +97,7 @@ from explorer_common import (  # noqa: E402  shared with simple_explorer.py
     category_colors,
     chart,
     sidebar_colors,
+    start_path,
     genotype_palette,
     paint,
     group_choices,
@@ -905,7 +906,7 @@ st.title("Region explorer")
 with st.sidebar:
     st.header("Workbook")
     uploaded = st.file_uploader("Analysis workbook (.xlsx)", type=["xlsx"])
-    default_path = sys.argv[1] if len(sys.argv) > 1 else ""
+    default_path = start_path()
     typed = st.text_input("…or a path on this machine", value=default_path)
     uploaded_cells = st.file_uploader(
         "Cell outlines (.npz)", type=["npz"],
