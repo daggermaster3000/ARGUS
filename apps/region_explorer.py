@@ -1047,53 +1047,58 @@ with umap_tab:
             if matrix is None:
                 st.warning("Every chosen column was empty or constant.")
             else:
-                embedding, axes, note = run_umap(matrix, int(neighbors), float(min_dist),
-                                                 int(dims), int(seed))
-                if note:
-                    st.info(note)
-                embedded_by = "UMAP" if not note else "PCA"
-                plot = rows.copy()
-                for i, axis in enumerate(axes):
-                    plot[axis] = embedding[:, i]
-                colors, order = color_map(plot, color_by)
-                symbol = None if symbol_by == "None" else symbol_by
-                common = dict(
-                    color=color_by, color_discrete_map=colors,
-                    category_orders={color_by: order},
-                    symbol=symbol,
-                    symbol_map=symbol_map(plot[symbol]) if symbol else None,
-                    hover_name="Sample", hover_data=hover_columns(plot),
-                    title=f"{embedded_by} of {len(plot)} regions on {len(used)} features",
-                )
-                missing = 0
-                if int(dims) == 3:
-                    figure = px.scatter_3d(plot, x=axes[0], y=axes[1], z=axes[2], **common)
-                    figure = styled(figure, 700)
-                    figure.update_traces(marker={"size": 5})
-                elif as_outlines:
-                    figure, missing = outline_figure(
-                        plot, axes[0], axes[1], color_by, colors, order, outlines,
-                        glyph, true_scale, common["title"],
-                    )
+                try:
+                    embedding, axes, note = run_umap(matrix, int(neighbors), float(min_dist),
+                                                     int(dims), int(seed))
+                except Exception as exc:  # neither UMAP nor PCA could place these rows
+                    st.warning(f"Embedding skipped — neither UMAP nor PCA could place these "
+                               f"{len(rows)} rows ({exc}). Compare them in the Scatter Regions tab.")
                 else:
-                    figure = styled(px.scatter(plot, x=axes[0], y=axes[1], **common))
-                chart(
-                    figure, width="content" if as_outlines and int(dims) == 2 else "stretch",
-                    theme="streamlit",
-                )
-                if missing:
-                    st.caption(f"{missing} region(s) have no stored outline and are not drawn.")
-                with st.expander(f"{len(used)} features used"):
-                    st.write(", ".join(used))
-                    if sparse:
-                        st.write(f"Dropped as too sparse: {', '.join(sparse)}")
-                    if constant:
-                        st.write(f"Dropped as constant: {', '.join(constant)}")
-                st.download_button(
-                    "Download embedding (CSV)",
-                    plot[["Sample", "Genotype", "Region", *axes]].to_csv(index=False),
-                    file_name="umap_regions.csv",
-                )
+                    if note:
+                        st.info(note)
+                    embedded_by = "UMAP" if not note else "PCA"
+                    plot = rows.copy()
+                    for i, axis in enumerate(axes):
+                        plot[axis] = embedding[:, i]
+                    colors, order = color_map(plot, color_by)
+                    symbol = None if symbol_by == "None" else symbol_by
+                    common = dict(
+                        color=color_by, color_discrete_map=colors,
+                        category_orders={color_by: order},
+                        symbol=symbol,
+                        symbol_map=symbol_map(plot[symbol]) if symbol else None,
+                        hover_name="Sample", hover_data=hover_columns(plot),
+                        title=f"{embedded_by} of {len(plot)} regions on {len(used)} features",
+                    )
+                    missing = 0
+                    if int(dims) == 3:
+                        figure = px.scatter_3d(plot, x=axes[0], y=axes[1], z=axes[2], **common)
+                        figure = styled(figure, 700)
+                        figure.update_traces(marker={"size": 5})
+                    elif as_outlines:
+                        figure, missing = outline_figure(
+                            plot, axes[0], axes[1], color_by, colors, order, outlines,
+                            glyph, true_scale, common["title"],
+                        )
+                    else:
+                        figure = styled(px.scatter(plot, x=axes[0], y=axes[1], **common))
+                    chart(
+                        figure, width="content" if as_outlines and int(dims) == 2 else "stretch",
+                        theme="streamlit",
+                    )
+                    if missing:
+                        st.caption(f"{missing} region(s) have no stored outline and are not drawn.")
+                    with st.expander(f"{len(used)} features used"):
+                        st.write(", ".join(used))
+                        if sparse:
+                            st.write(f"Dropped as too sparse: {', '.join(sparse)}")
+                        if constant:
+                            st.write(f"Dropped as constant: {', '.join(constant)}")
+                    st.download_button(
+                        "Download embedding (CSV)",
+                        plot[["Sample", "Genotype", "Region", *axes]].to_csv(index=False),
+                        file_name="umap_regions.csv",
+                    )
 
 # -- scatter ------------------------------------------------------------------
 
@@ -1367,17 +1372,29 @@ with cells_tab:
                         if matrix is None:
                             st.warning("Every chosen column was empty or constant.")
                         else:
-                            points, names, note = embed(matrix, method, int(cdims),
-                                                        int(min(cneighbors, len(subset) - 1)),
-                                                        float(cmin_dist), 0)
-                            if note:
-                                st.info(note)
-                                method = "PCA"
-                            cell_plot = subset.assign(**{n: points[:, i] for i, n in enumerate(names)})
-                            title = f"{method} of {len(cell_plot):,} cells on {len(used)} features"
-                            cx, cy = names[0], names[1]
-                            cz = names[2] if len(names) > 2 else None
-                            st.caption("Features: " + ", ".join(used))
+                            try:
+                                points, names, note = embed(matrix, method, int(cdims),
+                                                            int(min(cneighbors, len(subset) - 1)),
+                                                            float(cmin_dist), 0)
+                            except Exception as exc:  # neither UMAP nor PCA could place them
+                                fallback = list(dict.fromkeys(
+                                    [c for c in ("Equivalent diameter (µm)", "Mean intensity")
+                                     if c in numeric_cells] + numeric_cells[:2]))
+                                st.warning(f"Embedding skipped ({exc}); showing a scatter plot "
+                                           "of the cells instead.")
+                                if len(fallback) >= 2:
+                                    cx, cy = fallback[0], fallback[1]
+                                    cell_plot = subset.dropna(subset=[cx, cy])
+                                    title = f"{len(cell_plot):,} cells"
+                            else:
+                                if note:
+                                    st.info(note)
+                                    method = "PCA"
+                                cell_plot = subset.assign(**{n: points[:, i] for i, n in enumerate(names)})
+                                title = f"{method} of {len(cell_plot):,} cells on {len(used)} features"
+                                cx, cy = names[0], names[1]
+                                cz = names[2] if len(names) > 2 else None
+                                st.caption("Features: " + ", ".join(used))
                 else:
                     cell_plot = subset.dropna(subset=[c for c in (cx, cy, cz) if c])
                     title = f"{len(cell_plot):,} cells"

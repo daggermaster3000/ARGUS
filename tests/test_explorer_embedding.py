@@ -74,3 +74,41 @@ def test_the_app_runs_on_three_samples(tmp_path, dims):
     at.radio(key="umap-dims").set_value(dims).run()
 
     assert not at.exception
+
+
+def test_a_failed_embedding_is_skipped_and_the_scatter_plots_still_show(tmp_path, monkeypatch):
+    pd = pytest.importorskip("pandas")
+    from streamlit.testing.v1 import AppTest
+
+    def broken(*_args, **_kwargs):
+        raise ValueError("no way to place these rows")
+
+    monkeypatch.setattr(ec, "embed_umap", broken)
+    rng = np.random.default_rng(0)
+    workbook = tmp_path / "broken.xlsx"
+    with pd.ExcelWriter(workbook) as writer:
+        pd.DataFrame([
+            {"Sample": f"fish{i}", "Genotype": "wt", "Region": "Tel", "Label map": "",
+             "Objects": 40, "Region area (µm²)": float(rng.uniform(1e3, 1e4)),
+             "Mean intensity": float(rng.uniform(1, 9))}
+            for i in range(3)
+        ]).to_excel(writer, sheet_name=ec.SHEET, index=False)
+        pd.DataFrame([
+            {"Sample": f"fish{i % 3}", "Genotype": "wt", "Region": "Tel", "Label": i,
+             "Equivalent diameter (µm)": float(rng.uniform(3, 9)),
+             "Mean intensity": float(rng.uniform(1, 9)), "Circularity": float(rng.uniform(0, 1))}
+            for i in range(120)
+        ]).to_excel(writer, sheet_name="Objects", index=False)
+    app = Path(__file__).resolve().parents[1] / "apps" / "region_explorer.py"
+
+    at = AppTest.from_file(str(app), default_timeout=120)
+    at.query_params["workbook"] = str(workbook)
+    at.run()
+
+    assert not at.exception
+    skipped = [w.value for w in at.warning if w.value.startswith("Embedding skipped")]
+    assert len(skipped) == 2  # the Regions tab and the Cells tab
+    # Both tabs carried on: the Scatter Regions tab and the cells' fallback scatter drew.
+    titles = [chart.proto.spec for chart in at.get("plotly_chart")]
+    assert any('"120 cells"' in spec for spec in titles)
+    assert any(r.label == "Plot" for r in at.radio)  # the Scatter Regions tab drew its controls
