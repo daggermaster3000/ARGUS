@@ -73,6 +73,7 @@ from explorer_common import (  # noqa: E402  shared with simple_explorer.py
     HOVER,
     IDENTITY,
     INK,
+    MIN_EMBED_ROWS,
     MIXED,
     NEUTRAL,
     REGION_COLORS,
@@ -89,6 +90,7 @@ from explorer_common import (  # noqa: E402  shared with simple_explorer.py
     mixed_pairs,
     mixed_table,
     default_variable,
+    embed_umap,
     numeric_columns,
     plottable,
     posthoc_pairs,
@@ -191,8 +193,8 @@ def embed(matrix: np.ndarray, method: str, dims: int, neighbors: int, min_dist: 
 
         model = PCA(n_components=dims, random_state=seed)
         points = model.fit_transform(matrix)
-        return points, [f"PC{i + 1} ({r * 100:.1f}%)" for i, r in enumerate(model.explained_variance_ratio_)]
-    return run_umap(matrix, neighbors, min_dist, dims, seed), [f"UMAP {i + 1}" for i in range(dims)]
+        return points, [f"PC{i + 1} ({r * 100:.1f}%)" for i, r in enumerate(model.explained_variance_ratio_)], ""
+    return run_umap(matrix, neighbors, min_dist, dims, seed)
 
 
 
@@ -546,13 +548,9 @@ def prepare_matrix(frame: pd.DataFrame, columns: list[str], max_missing: float):
 
 
 @st.cache_data(show_spinner="Running UMAP…")
-def run_umap(matrix: np.ndarray, neighbors: int, min_dist: float, dims: int, seed: int) -> np.ndarray:
-    import umap
-
-    reducer = umap.UMAP(
-        n_neighbors=neighbors, min_dist=min_dist, n_components=dims, random_state=seed
-    )
-    return reducer.fit_transform(matrix)
+def run_umap(matrix: np.ndarray, neighbors: int, min_dist: float, dims: int, seed: int):
+    """Points, axis names and a note: PCA stands in when UMAP cannot run."""
+    return embed_umap(matrix, neighbors, min_dist, dims, seed)
 
 
 # -- SHAP ---------------------------------------------------------------------
@@ -1025,7 +1023,8 @@ with umap_tab:
         st.subheader("UMAP")
         dims = st.radio("Dimensions", (2, 3), horizontal=True, key="umap-dims")
         limit = max(2, len(rows) - 1)
-        neighbors = st.slider("Neighbours", 2, max(2, min(100, limit)), min(15, limit))
+        # A slider needs max > min; with three rows UMAP is held to 2 neighbours anyway.
+        neighbors = st.slider("Neighbours", 2, max(3, min(100, limit)), min(15, limit))
         min_dist = st.slider("Minimum distance", 0.0, 1.0, 0.1, 0.05)
         seed = st.number_input("Seed", value=0, step=1)
         color_by = st.selectbox("Colour by", ("Genotype", *conditions, "Sample", "Region"),
@@ -1039,8 +1038,8 @@ with umap_tab:
             st.caption("Outlines are drawn in 2D only.")
 
     with right:
-        if len(rows) < 4:
-            st.warning("UMAP needs at least four rows.")
+        if len(rows) < MIN_EMBED_ROWS:
+            st.warning(f"UMAP needs at least {MIN_EMBED_ROWS} rows (samples × regions).")
         elif not chosen:
             st.warning("Choose at least one feature group.")
         else:
@@ -1048,9 +1047,12 @@ with umap_tab:
             if matrix is None:
                 st.warning("Every chosen column was empty or constant.")
             else:
-                embedding = run_umap(matrix, int(neighbors), float(min_dist), int(dims), int(seed))
+                embedding, axes, note = run_umap(matrix, int(neighbors), float(min_dist),
+                                                 int(dims), int(seed))
+                if note:
+                    st.info(note)
+                embedded_by = "UMAP" if not note else "PCA"
                 plot = rows.copy()
-                axes = [f"UMAP {i + 1}" for i in range(int(dims))]
                 for i, axis in enumerate(axes):
                     plot[axis] = embedding[:, i]
                 colors, order = color_map(plot, color_by)
@@ -1061,7 +1063,7 @@ with umap_tab:
                     symbol=symbol,
                     symbol_map=symbol_map(plot[symbol]) if symbol else None,
                     hover_name="Sample", hover_data=hover_columns(plot),
-                    title=f"UMAP of {len(plot)} regions on {len(used)} features",
+                    title=f"{embedded_by} of {len(plot)} regions on {len(used)} features",
                 )
                 missing = 0
                 if int(dims) == 3:
@@ -1357,16 +1359,20 @@ with cells_tab:
                 cell_plot = None
                 if view == "Embedding":
                     cz = None
-                    if len(subset) < 4 or not chosen_cells:
-                        st.warning("Choose at least one feature group (and have four cells or more).")
+                    if len(subset) < MIN_EMBED_ROWS or not chosen_cells:
+                        st.warning("Choose at least one feature group (and have "
+                                   f"{MIN_EMBED_ROWS} cells or more).")
                     else:
                         matrix, sparse, constant, used = prepare_matrix(subset, chosen_cells, 0.5)
                         if matrix is None:
                             st.warning("Every chosen column was empty or constant.")
                         else:
-                            points, names = embed(matrix, method, int(cdims),
-                                                  int(min(cneighbors, len(subset) - 1)),
-                                                  float(cmin_dist), 0)
+                            points, names, note = embed(matrix, method, int(cdims),
+                                                        int(min(cneighbors, len(subset) - 1)),
+                                                        float(cmin_dist), 0)
+                            if note:
+                                st.info(note)
+                                method = "PCA"
                             cell_plot = subset.assign(**{n: points[:, i] for i, n in enumerate(names)})
                             title = f"{method} of {len(cell_plot):,} cells on {len(used)} features"
                             cx, cy = names[0], names[1]

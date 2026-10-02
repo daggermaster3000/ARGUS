@@ -954,3 +954,54 @@ def hover_columns(frame: pd.DataFrame) -> dict:
         if column in frame:
             hover[column] = ":.4g"
     return hover
+
+
+# -- embeddings ---------------------------------------------------------------
+
+#: Fewest rows an embedding is drawn for: two points have no shape to show.
+MIN_EMBED_ROWS = 3
+
+
+def embed_umap(matrix: np.ndarray, neighbors: int, min_dist: float, dims: int,
+               seed: int) -> tuple[np.ndarray, list[str], str]:
+    """UMAP of *matrix*, or PCA when UMAP cannot run on it.
+
+    A handful of rows — three samples, say — breaks UMAP's spectral start
+    ("k >= N"), so small sets start from random positions instead, and if UMAP
+    still fails the rows are placed by PCA. Returns the points (*dims* columns),
+    the axis names and a note saying what was done instead ("" when UMAP ran).
+    """
+    import warnings
+
+    matrix = np.asarray(matrix, dtype=float)
+    rows = len(matrix)
+    reason = ""
+    try:
+        import umap
+
+        reducer = umap.UMAP(
+            n_neighbors=max(2, min(int(neighbors), rows - 1)), min_dist=min_dist,
+            n_components=dims, random_state=seed,
+            # The spectral start needs more rows than dimensions + 1.
+            init="spectral" if rows > dims + 2 else "random",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            points = reducer.fit_transform(matrix)
+        if points.shape == (rows, dims) and np.isfinite(points).all():
+            return points, [f"UMAP {i + 1}" for i in range(dims)], ""
+        reason = "it gave no usable positions"
+    except Exception as exc:  # too few rows, or umap-learn missing
+        reason = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+    from sklearn.decomposition import PCA
+
+    # PCA gives at most as many axes as rows and features; the rest stay at 0.
+    k = max(1, min(dims, rows, matrix.shape[1]))
+    model = PCA(n_components=k, random_state=seed)
+    points = np.zeros((rows, dims))
+    points[:, :k] = model.fit_transform(matrix)
+    ratios = np.nan_to_num(model.explained_variance_ratio_)
+    names = [f"PC{i + 1} ({ratios[i] * 100:.1f}%)" if i < k else f"PC{i + 1} (none)"
+             for i in range(dims)]
+    note = f"UMAP could not run on {rows} rows ({reason}); showing PCA instead."
+    return points, names, note
