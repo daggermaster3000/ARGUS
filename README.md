@@ -91,7 +91,10 @@ It also creates **Microscopy Explorer**, which opens the Streamlit region explor
 in your browser. Double-clicking it again never starts a second server: the
 explorer always runs on port 8765, and a launch that finds it answering there just
 opens another tab on it; two launches in the same second take turns through a lock
-file. The server runs in the background with no window and keeps running after
+file. It only reuses a server it started itself, for the same app, on the code as
+it is now: one left running from before an update (a `git pull`, an edit) is
+restarted, and anything else holding the port is reported in
+`explorer_launcher.log` rather than opened as the explorer. The server runs in the background with no window and keeps running after
 the tab is closed — `python launch_explorer.py --stop` ends it. On Windows, a
 workbook or report folder dropped on the shortcut opens in it, running server or
 not (`python launch_explorer.py report.xlsx` does the same anywhere);

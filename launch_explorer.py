@@ -5,7 +5,11 @@ click while the explorer is already running should just bring it back up. So:
 
 * The explorer always listens on its own fixed port (:data:`PORTS`). If
   something answers Streamlit's health check there, no server is started: a
-  browser tab is opened to the running one.
+  browser tab is opened to the running one — but only if it is the server this
+  launcher started, for this app, on the code as it is now. A server left
+  running from before an update is restarted (Streamlit reloads the app's own
+  files, not the ``microscopy_viewer`` package it imports), and a server that is
+  not ours is reported, never opened as if it were the explorer.
 * Otherwise one server is started in the background — no console window, output
   to a log file — and the tab is opened once it answers.
 * A lock file makes two launches a split second apart take turns, so both do
@@ -110,6 +114,49 @@ class _Lock:
         self.path.unlink(missing_ok=True)
 
 
+def code_version() -> str:
+    """Fingerprint of the code a server runs: the newest change to the apps or the package."""
+    files = [*(PROJECT_ROOT / "apps").glob("*.py"),
+             *(PROJECT_ROOT / "microscopy_viewer").rglob("*.py")]
+    return str(max((f.stat().st_mtime_ns for f in files), default=0))
+
+
+def _record(app: str) -> dict:
+    """What :func:`start_server` wrote about *app*'s server; empty if nothing."""
+    try:
+        record = json.loads((_state_dir() / f"explorer_{app}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def _runs(pid: int, script: Path) -> bool:
+    """Whether process *pid* is alive and serving *script* (not a reused pid)."""
+    if os.name == "nt":
+        reply = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                               capture_output=True, text=True)
+        return str(pid) in reply.stdout
+    reply = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                           capture_output=True, text=True)
+    return reply.returncode == 0 and str(script) in reply.stdout
+
+
+def is_current(app: str) -> bool:
+    """Whether the server on *app*'s port is ours, for this app, on today's code."""
+    record = _record(app)
+    try:
+        pid = int(record["pid"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (record.get("script") == str(APPS[app])
+            and record.get("version") == code_version()
+            and _runs(pid, APPS[app]))
+
+
+class ForeignServer(RuntimeError):
+    """Something other than this launcher's explorer holds the port."""
+
+
 def _server_command(app: str) -> list[str]:
     python = Path(sys.executable)
     if python.name.lower() == "pythonw.exe":
@@ -136,7 +183,8 @@ def start_server(app: str) -> subprocess.Popen:
         kwargs["start_new_session"] = True  # outlives the launcher and its terminal
     process = subprocess.Popen(_server_command(app), **kwargs)
     (state / f"explorer_{app}.json").write_text(
-        json.dumps({"pid": process.pid, "port": PORTS[app]}), encoding="utf-8")
+        json.dumps({"pid": process.pid, "port": PORTS[app], "script": str(APPS[app]),
+                    "version": code_version()}), encoding="utf-8")
     return process
 
 
@@ -156,9 +204,25 @@ def ensure_running(app: str) -> tuple[bool, bool]:
     """``(running, started)``: make sure exactly one server for *app* is up."""
     with _Lock(_state_dir() / f"explorer_{app}.lock"):
         if is_running(app):
-            return True, False
+            if is_current(app):
+                return True, False
+            # Ours from before an update (or a pid gone stale): restart it.
+            # Anything else on the port is not stopped, and not opened either.
+            if not stop(app) or not _wait_until_stopped(app):
+                raise ForeignServer(
+                    f"port {PORTS[app]} is held by a server this launcher did not start, "
+                    f"so it may not be the {app} explorer; stop it and launch again")
         process = start_server(app)
         return wait_until_running(app, process), True
+
+
+def _wait_until_stopped(app: str, timeout: float = 15.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not is_running(app, timeout=0.5):
+            return True
+        time.sleep(0.3)
+    return False
 
 
 def stop(app: str) -> bool:
@@ -166,7 +230,11 @@ def stop(app: str) -> bool:
     record = _state_dir() / f"explorer_{app}.json"
     try:
         pid = int(json.loads(record.read_text(encoding="utf-8"))["pid"])
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not _runs(pid, APPS[app]):
+        # Gone already, or the pid now belongs to another program: leave it be.
+        record.unlink(missing_ok=True)
         return False
     try:
         if os.name == "nt":
@@ -210,13 +278,13 @@ def main(argv: list[str] | None = None) -> int:
     workbook = str(Path(args.workbook).expanduser().resolve()) if args.workbook else None
     try:
         running, started = ensure_running(app)
-    except TimeoutError as exc:
+    except (TimeoutError, ForeignServer) as exc:
         _report(str(exc))
         return 1
     if not running:
         _report(f"the {app} explorer did not start; see {_state_dir() / f'explorer_{app}.log'}")
         return 1
-    _report(("started" if started else "already running") + f": {url_of(app)}")
+    _report(("started" if started else "already running") + f": {app} explorer at {url_of(app)}")
     if not args.no_browser:
         webbrowser.open(url_of(app, workbook), new=2)
     return 0
