@@ -1285,6 +1285,11 @@ streamlit run apps/region_explorer.py                       # then load the .xls
 streamlit run apps/region_explorer.py -- path/to/report/    # or point it at a report folder
 ```
 
+On **Streamlit Community Cloud**, set the main file to `apps/region_explorer.py`
+(or `apps/simple_explorer.py`). Cloud installs `apps/requirements.txt`, the
+explorer's own short list, rather than the viewer's `requirements.txt` at the
+root — no napari or Qt on the server. Workbooks are uploaded in the sidebar.
+
 #### Region report — the plain one
 
 `apps/simple_explorer.py` is the same workbook without the machine learning:
