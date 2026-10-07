@@ -526,6 +526,102 @@ def color_map(frame: pd.DataFrame, by: str) -> tuple[dict[str, str], list[str]]:
     return category_colors(frame, by)
 
 
+#: Colour scales offered when the points are coloured by a number rather than a
+#: category. Sequential first; the last is diverging, for a variable with a
+#: meaningful middle.
+COLOR_SCALES = ("Viridis", "Magma", "Inferno", "Cividis", "Turbo", "Blues", "RdBu_r")
+
+#: Steps an outline figure's colour scale is cut into. Outlines are drawn one
+#: filled trace per colour, so a continuous scale has to be a number of them.
+SCALE_STEPS = 24
+
+
+def color_controls(label: str, categories, numbers, key: str, help: str | None = None):
+    """The colour-by choice: a category, or any numeric column as a scale.
+
+    Returns ``(column, scale)``. *scale* is ``None`` for a category and
+    otherwise ``{"name": colour scale, "clip": bool}``, which is what
+    :func:`color_args` and :func:`outline_figure` take.
+    """
+    categories = list(categories)
+    choices = categories + [c for c in numbers if c not in categories]
+    by = st.selectbox(
+        label, choices, key=key,
+        help=help or "A category gives each group its own colour. A measurement — "
+                     "everything below the categories — colours the points along a scale.",
+    )
+    if by in categories:
+        return by, None
+    name = st.selectbox("Colour scale", COLOR_SCALES, key=f"{key}-scale")
+    if st.checkbox("Reverse the scale", key=f"{key}-reverse"):
+        name = name[:-2] if name.endswith("_r") else f"{name}_r"
+    clip = st.checkbox(
+        "Clip to the 1st–99th percentile", value=True, key=f"{key}-clip",
+        help="Stops a few extreme values from using up the whole scale and leaving "
+             "everything else one colour. Values beyond the ends take the end colours.",
+    )
+    return by, {"name": name, "clip": bool(clip)}
+
+
+def color_range(values, clip: bool) -> tuple[float, float]:
+    """The values the two ends of a colour scale stand for."""
+    numbers = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(float)
+    numbers = numbers[np.isfinite(numbers)]
+    if numbers.size == 0:
+        return 0.0, 1.0
+    low, high = (np.percentile(numbers, (1, 99)) if clip
+                 else (numbers.min(), numbers.max()))
+    if high <= low:  # one value, or a clip that closed on itself
+        low, high = float(numbers.min()), float(numbers.max())
+    if high <= low:
+        high = low + 1.0
+    return float(low), float(high)
+
+
+def color_args(frame: pd.DataFrame, by: str, scale: dict | None):
+    """``(plotly express arguments, colours, order)`` for colouring by *by*.
+
+    With *scale* the column is a number and the arguments ask for a continuous
+    colour axis; *colours* and *order* are then empty.
+    """
+    if scale is None:
+        colors, order = color_map(frame, by)
+        return ({"color": by, "color_discrete_map": colors,
+                 "category_orders": {by: order}}, colors, order)
+    return ({"color": by, "color_continuous_scale": scale["name"],
+             "range_color": color_range(frame[by], scale["clip"])}, {}, [])
+
+
+def place_colorbar(figure, by: str):
+    """Keep the colour bar clear of the legend a symbol column adds."""
+    figure.update_layout(
+        coloraxis_colorbar={"title": {"text": by, "side": "right"}, "len": 0.6,
+                            "y": 0, "yanchor": "bottom", "thickness": 16},
+        legend={"y": 1, "yanchor": "top"},
+    )
+    return figure
+
+
+def scale_steps(values, scale: dict):
+    """Cut a numeric column into the colour steps an outline figure draws.
+
+    Returns ``(step of each value, colour of each step, (low, high))``. Step
+    ``-1`` is a missing value.
+    """
+    from plotly.colors import get_colorscale, sample_colorscale, unlabel_rgb
+
+    low, high = color_range(values, scale["clip"])
+    numbers = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(float)
+    position = np.clip((numbers - low) / (high - low), 0.0, 1.0)
+    steps = np.where(np.isfinite(numbers),
+                     np.minimum((np.nan_to_num(position) * SCALE_STEPS).astype(int),
+                                SCALE_STEPS - 1), -1)
+    centres = (np.arange(SCALE_STEPS) + 0.5) / SCALE_STEPS
+    colors = ["#{:02x}{:02x}{:02x}".format(*(int(round(c)) for c in unlabel_rgb(rgb)))
+              for rgb in sample_colorscale(get_colorscale(scale["name"]), list(centres))]
+    return steps, colors, (low, high)
+
+
 def symbol_map(values) -> dict[str, str]:
     order = list(dict.fromkeys(values))
     return {v: SYMBOLS[i % len(SYMBOLS)] for i, v in enumerate(order)}
@@ -783,13 +879,18 @@ def cell_key(row) -> tuple:
 
 def outline_figure(
     plot, x, y, color_by, colors, order, outlines, size, true_scale, title="",
-    key_of=region_key, ident=("Sample", "Genotype", "Region"), extra=None,
+    key_of=region_key, ident=("Sample", "Genotype", "Region"), extra=None, scale=None,
 ):
     """Each row drawn as its own outline, centred on its (x, y).
 
     *outlines* maps ``key_of(row)`` to a list of (N, 2) X/Y outlines — the
     parts of one region, or the single outline of one cell. *ident* are the
     columns named in the hover, the first in bold; *extra* the numbers after them.
+
+    With *scale* (see :func:`color_controls`) *color_by* is a number: the
+    outlines are filled along the colour scale, cut into :data:`SCALE_STEPS`
+    steps, and a colour bar replaces the legend. *colors* and *order* are then
+    not used.
 
     One filled trace per colour, outlines separated by gaps, so a few thousand
     regions stay one draw call each. Hover comes from an invisible marker at the
@@ -830,11 +931,19 @@ def outline_figure(
     if extra is None:
         extra = [c for c in hover_columns(plot) if c not in ident]
     ident = list(ident)
-    for category in order:
-        members = plot[plot[color_by] == category]
+    if scale is None:
+        groups = [(category, colors.get(category, "#8a8983"), plot[plot[color_by] == category])
+                  for category in order]
+    else:
+        if color_by not in ident and color_by not in extra:
+            extra = [*extra, color_by]
+        steps, step_colors, (low, high) = scale_steps(plot[color_by], scale)
+        groups = [(f"step {step}", step_colors[step], plot[steps == step])
+                  for step in range(SCALE_STEPS)]
+        groups.append(("no value", "#8a8983", plot[steps == -1]))
+    for category, color, members in groups:
         if members.empty:
             continue
-        color = colors.get(category, "#8a8983")
         gx: list = []
         gy: list = []
         for _, row in members.iterrows():
@@ -851,7 +960,9 @@ def outline_figure(
         figure.add_trace(go.Scatter(
             x=gx, y=gy, mode="lines", fill="toself", name=str(category),
             legendgroup=str(category), line={"color": color, "width": 1.5},
-            fillcolor=_alpha(color, 0.35), hoverinfo="skip",
+            # A scale is read off the fill, so it is drawn nearly solid.
+            fillcolor=_alpha(color, 0.35 if scale is None else 0.8), hoverinfo="skip",
+            showlegend=scale is None,
         ))
         custom = members[[*ident, *extra]].to_numpy()
         lines = "<br>".join(
@@ -863,6 +974,15 @@ def outline_figure(
             showlegend=False, marker={"size": 14, "color": color, "opacity": 0.01},
             customdata=custom,
             hovertemplate=f"<b>%{{customdata[0]}}</b><br>{lines}<extra></extra>",
+        ))
+    if scale is not None:
+        # Nothing drawn: this trace only carries the colour bar.
+        figure.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers", showlegend=False, hoverinfo="skip",
+            marker={"color": [low], "cmin": low, "cmax": high, "colorscale": scale["name"],
+                    "showscale": True,
+                    "colorbar": {"title": {"text": color_by, "side": "right"},
+                                 "thickness": 16, "x": 1.02, "xanchor": "left"}},
         ))
     missing = sum(key not in outlines for key in keys)
     figure.update_layout(
@@ -1027,8 +1147,10 @@ with umap_tab:
         neighbors = st.slider("Neighbours", 2, max(3, min(100, limit)), min(15, limit))
         min_dist = st.slider("Minimum distance", 0.0, 1.0, 0.1, 0.05)
         seed = st.number_input("Seed", value=0, step=1)
-        color_by = st.selectbox("Colour by", ("Genotype", *conditions, "Sample", "Region"),
-                                key="umap-color")
+        color_by, color_scale = color_controls(
+            "Colour by", ("Genotype", *conditions, "Sample", "Region"),
+            numeric_columns(rows), "umap-color",
+        )
         symbol_by = st.selectbox("Shape by", ("Region", "Genotype", *conditions, "None"),
                                  key="umap-symbol")
         if int(dims) == 2:
@@ -1060,11 +1182,10 @@ with umap_tab:
                     plot = rows.copy()
                     for i, axis in enumerate(axes):
                         plot[axis] = embedding[:, i]
-                    colors, order = color_map(plot, color_by)
+                    coloring, colors, order = color_args(plot, color_by, color_scale)
                     symbol = None if symbol_by == "None" else symbol_by
                     common = dict(
-                        color=color_by, color_discrete_map=colors,
-                        category_orders={color_by: order},
+                        **coloring,
                         symbol=symbol,
                         symbol_map=symbol_map(plot[symbol]) if symbol else None,
                         hover_name="Sample", hover_data=hover_columns(plot),
@@ -1078,10 +1199,12 @@ with umap_tab:
                     elif as_outlines:
                         figure, missing = outline_figure(
                             plot, axes[0], axes[1], color_by, colors, order, outlines,
-                            glyph, true_scale, common["title"],
+                            glyph, true_scale, common["title"], scale=color_scale,
                         )
                     else:
                         figure = styled(px.scatter(plot, x=axes[0], y=axes[1], **common))
+                    if color_scale and not (as_outlines and int(dims) == 2):
+                        place_colorbar(figure, color_by)
                     chart(
                         figure, width="content" if as_outlines and int(dims) == 2 else "stretch",
                         theme="streamlit",
@@ -1116,8 +1239,9 @@ with scatter_tab:
         x = _pick("X", start[0], "sx")
         y = _pick("Y", start[1], "sy")
         z = _pick("Z", start[2], "sz") if mode == "3D" else None
-        color_by = st.selectbox("Colour by", ("Sample", "Genotype", *conditions, "Region"),
-                                key="sc-color")
+        color_by, color_scale = color_controls(
+            "Colour by", ("Sample", "Genotype", *conditions, "Region"), numeric, "sc-color",
+        )
         symbol_by = st.selectbox("Shape by", ("Genotype", *conditions, "Region", "None"),
                                  key="sc-symbol")
         log_x = st.checkbox("Log X")
@@ -1136,11 +1260,10 @@ with scatter_tab:
             wanted = [c for c in (x, y, z) if c]
             plot = rows.dropna(subset=wanted)
             dropped = len(rows) - len(plot)
-            colors, order = color_map(plot, color_by)
+            coloring, colors, order = color_args(plot, color_by, color_scale)
             symbol = None if symbol_by == "None" else symbol_by
             common = dict(
-                color=color_by, color_discrete_map=colors,
-                category_orders={color_by: order},
+                **coloring,
                 symbol=symbol,
                 symbol_map=symbol_map(plot[symbol]) if symbol else None,
                 hover_name="Sample", hover_data=hover_columns(plot),
@@ -1152,12 +1275,15 @@ with scatter_tab:
                 figure.update_traces(marker={"size": 5})
             elif sc_outlines:
                 figure, missing = outline_figure(
-                    plot, x, y, color_by, colors, order, outlines, sc_glyph, sc_true
+                    plot, x, y, color_by, colors, order, outlines, sc_glyph, sc_true,
+                    scale=color_scale,
                 )
                 if missing:
                     st.caption(f"{missing} region(s) have no stored outline and are not drawn.")
             else:
                 figure = styled(px.scatter(plot, x=x, y=y, log_x=log_x, log_y=log_y, **common))
+            if color_scale and not (mode == "2D" and sc_outlines):
+                place_colorbar(figure, color_by)
             chart(
                 figure, width="content" if sc_outlines else "stretch", theme="streamlit"
             )
@@ -1195,15 +1321,15 @@ with cells_tab:
                 cell_seed = st.number_input("Sampling seed", value=0, step=1, key="cell-seed")
                 view = st.radio("View", ("Embedding", "Scatter"), horizontal=True)
                 clustering = st.session_state.get("clu-method", "Off") != "Off"
-                color_cells = st.selectbox(
-                    "Colour by", ("Sample", "Genotype", *[c for c in conditions if c in cells], "Region")
-                    + (("Cluster",) if clustering else ()),
-                    key="cell-color",
-                )
                 numeric_cells = [
                     c for c in cells.columns
                     if c not in CELL_IDENTITY and pd.api.types.is_numeric_dtype(cells[c])
                 ]
+                color_cells, cell_scale = color_controls(
+                    "Colour by", ("Sample", "Genotype", *[c for c in conditions if c in cells], "Region")
+                    + (("Cluster",) if clustering else ()),
+                    numeric_cells, "cell-color",
+                )
                 if view == "Embedding":
                     method = st.radio("Method", ("UMAP", "PCA"), horizontal=True)
                     cdims = st.radio("Dimensions", (2, 3), horizontal=True, key="cell-dims")
@@ -1354,12 +1480,10 @@ with cells_tab:
                 hover.update({c: ":.4g" for c in CELL_HOVER if c in subset})
                 extra = [c for c in CELL_HOVER if c in subset]
                 ident = [c for c in ("Sample", "Genotype", "Region", "Cluster", "Label") if c in subset]
-                colors, order = color_map(subset, color_cells)
-                common = dict(
-                    color=color_cells, color_discrete_map=colors,
-                    category_orders={color_cells: order},
-                    hover_name="Sample", hover_data=hover,
-                )
+                if cell_scale:
+                    hover.setdefault(color_cells, ":.4g")
+                coloring, colors, order = color_args(subset, color_cells, cell_scale)
+                common = dict(**coloring, hover_name="Sample", hover_data=hover)
                 figure = None
                 cell_plot = None
                 if view == "Embedding":
@@ -1408,6 +1532,7 @@ with cells_tab:
                         figure, missing = outline_figure(
                             shown, cx, cy, color_cells, colors, order, cell_outlines,
                             cell_glyph, cell_true, title, key_of=cell_key, ident=ident, extra=extra,
+                            scale=cell_scale,
                         )
                         if missing:
                             st.caption(f"{missing} cell(s) have no stored outline.")
@@ -1419,6 +1544,8 @@ with cells_tab:
                         figure = px.scatter(plot, x=cx, y=cy, title=title, render_mode="webgl", **common)
                         figure.update_traces(marker={"size": 6, "opacity": 0.8})
                         figure.update_layout(height=620)
+                    if cell_scale and not cell_draw:
+                        place_colorbar(figure, color_cells)
                 if figure is not None:
                     chart(figure, width="content" if cell_draw else "stretch",
                                     theme="streamlit")

@@ -112,3 +112,36 @@ def test_a_failed_embedding_is_skipped_and_the_scatter_plots_still_show(tmp_path
     titles = [chart.proto.spec for chart in at.get("plotly_chart")]
     assert any('"120 cells"' in spec for spec in titles)
     assert any(r.label == "Plot" for r in at.radio)  # the Scatter Regions tab drew its controls
+
+
+def test_points_can_be_coloured_by_a_measurement(tmp_path):
+    import json
+
+    pd = pytest.importorskip("pandas")
+    from streamlit.testing.v1 import AppTest
+
+    rng = np.random.default_rng(0)
+    workbook = tmp_path / "scale.xlsx"
+    pd.DataFrame([
+        {"Sample": f"fish{i}", "Genotype": "wt" if i % 2 else "mut", "Region": region,
+         "Label map": "", "Objects": int(rng.integers(10, 99)),
+         "Region area (µm²)": float(rng.uniform(1e3, 1e4)),
+         "Mean intensity": float(rng.uniform(1, 9))}
+        for i in range(6) for region in ("Tel", "CB")
+    ]).to_excel(workbook, sheet_name=ec.SHEET, index=False)
+    app = Path(__file__).resolve().parents[1] / "apps" / "region_explorer.py"
+
+    at = AppTest.from_file(str(app), default_timeout=120)
+    at.query_params["workbook"] = str(workbook)
+    at.run()
+    choice = at.selectbox(key="sc-color")
+    assert "Genotype" in choice.options and "Mean intensity" in choice.options
+    choice.set_value("Mean intensity").run()
+    at.checkbox(key="sc-color-clip").set_value(False).run()
+
+    assert not at.exception
+    axes = [json.loads(chart.proto.spec)["layout"].get("coloraxis")
+            for chart in at.get("plotly_chart")]
+    (axis,) = [a for a in axes if a]  # the scatter, and only it
+    assert axis["colorbar"]["title"]["text"] == "Mean intensity"
+    assert 1 <= axis["cmin"] < axis["cmax"] <= 9  # unclipped: the data's own range
