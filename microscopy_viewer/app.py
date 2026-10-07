@@ -241,7 +241,7 @@ class MicroscopyViewer:
             (
                 (
                     (self.docks.get("metadata"), 0.25),
-                    (self.docks.get("measurements"), 0.75),
+                    (self.docks.get("segmentation"), 0.75),
                 ),
                 0.3,
             ),
@@ -309,7 +309,6 @@ class MicroscopyViewer:
         bindings = (
             ("Control-O", self.toolbar.open_images),
             ("Control-S", self.toolbar.export_snapshot),
-            ("Control-E", self.toolbar.export_measurements),
             ("Control-P", self.toolbar.export_slide),
             ("Control-Shift-A", self.toolbar.auto_contrast),
             ("Control-D", self.toolbar.toggle_ndisplay),
@@ -392,7 +391,6 @@ class MicroscopyViewer:
             self.viewer.reset_view()
 
         self.metadata_widget.refresh()
-        self.measurements_widget.refresh_layer_list()
         if self.timeseries_widget is not None:
             self.timeseries_widget.refresh()
 

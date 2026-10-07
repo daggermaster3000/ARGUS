@@ -41,6 +41,7 @@ dependencies = [
     "pillow>=9.0",        # PNG encoding and high-quality downsampling
     "matplotlib>=3.5",    # histogram canvas and ROI rasterisation
     "scipy>=1.8",         # Mann-Whitney U for the separation metric
+    "scikit-image>=0.19", # watershed expansion of labels, fusion-region rasterising
 ]
 
 [project.optional-dependencies]

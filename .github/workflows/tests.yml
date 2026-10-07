@@ -35,7 +35,7 @@ jobs:
       - name: Install the non-GUI dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install numpy "dask[array]" h5py tifffile imageio zarr pandas openpyxl python-pptx pillow matplotlib scipy
+          python -m pip install numpy "dask[array]" h5py tifffile imageio zarr pandas openpyxl python-pptx pillow matplotlib scipy scikit-image
 
       - name: Build the sample data
         run: python tests/make_sample_data.py
@@ -66,6 +66,9 @@ jobs:
       # decimation and the object table without downloading model weights.
       - name: Segmentation engine
         run: python tests/test_segmentation.py
+
+      - name: Fusion region geometry
+        run: python tests/test_fusion.py
 
     env:
       # Windows runners default to cp1252, which cannot encode the µm and arrows

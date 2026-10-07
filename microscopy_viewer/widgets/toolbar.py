@@ -48,7 +48,6 @@ class ViewerToolbar(QWidget):
         for key, label, tooltip, handler in (
             ("open", "Open Images", "Open one or more microscopy datasets (Ctrl+O)", self.open_images),
             ("snapshot", "Export Snapshot", "Save the current view as PNG or TIFF (Ctrl+S)", self.export_snapshot),
-            ("measurements", "Export Measurements", "Write all ROI measurements to an Excel workbook (Ctrl+E)", self.export_measurements),
             ("slide", "Export Slide", "Build a PowerPoint figure: one row per dataset, one column per channel, plus the merge (Ctrl+P)", self.export_slide),
             ("mip", "Batch MIP", "Maximum-project a whole folder of stacks to TIFF or Imaris files (Ctrl+Shift+P)", self.batch_projection),
             ("movie", "Export Movie", "Write the time series as a .mov for PowerPoint (Ctrl+Shift+M)", self.export_movie),
@@ -111,9 +110,6 @@ class ViewerToolbar(QWidget):
             return
         self._app.last_directory = Path(written).parent
         self.set_status(f"Snapshot saved to {written}")
-
-    def export_measurements(self) -> None:
-        self._app.measurements_widget.export()
 
     def export_slide(self) -> None:
         """Open the slide builder: samples down the table, channels across it.

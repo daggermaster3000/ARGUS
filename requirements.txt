@@ -41,6 +41,7 @@ pillow>=9.0         # PNG encoding and high-quality downsampling for the slide
 # ROI intensity comparison panel
 matplotlib>=3.5     # histogram canvas, and ROI polygon rasterisation
 scipy>=1.8          # Mann-Whitney U for the non-parametric separation metric
+scikit-image>=0.19  # watershed expansion of labels, fusion-region rasterising
 
 # Desktop shortcut creation, Windows only and optional even there:
 # install_shortcut.py falls back to cscript when this is absent.

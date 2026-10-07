@@ -7,8 +7,7 @@ one is a single :func:`register_panel` call and nothing else has to change.
 A panel factory receives the :class:`~microscopy_viewer.app.MicroscopyViewer`
 instance and returns a ``QWidget``. Construction is lazy — the factory is only
 imported and called while the window is being built — which keeps a heavy panel
-(the intensity comparison pulls in matplotlib) off the import path of everything
-else.
+(segmentation pulls in torch) off the import path of everything else.
 """
 
 from __future__ import annotations
@@ -76,21 +75,6 @@ def _register_builtin_panels() -> None:
 
         return MetadataWidget(app.viewer)
 
-    def _measurements(app):
-        from .measurements_widget import MeasurementsWidget
-
-        return MeasurementsWidget(app.viewer)
-
-    def _intensity(app):
-        from .intensity_comparison import IntensityComparisonWidget
-
-        return IntensityComparisonWidget(app.viewer)
-
-    def _registration(app):
-        from .registration_widget import RegistrationWidget
-
-        return RegistrationWidget(app.viewer)
-
     def _segmentation(app):
         from .segmentation_widget import SegmentationWidget
 
@@ -124,10 +108,11 @@ def _register_builtin_panels() -> None:
         # Takes the app: saving closes and reopens the sample through open_paths.
         return CellCounterWidget(app)
 
-    def _acquisition(app):
-        from .acquisition_widget import AcquisitionWidget
+    def _fusion(app):
+        from .fusion_widget import FusionWidget
 
-        return AcquisitionWidget(app)
+        # Takes the app: saving into an .ims closes and reopens the sample.
+        return FusionWidget(app)
 
     def _timeseries(app):
         from .timeseries_widget import TimeSeriesWidget
@@ -147,25 +132,6 @@ def _register_builtin_panels() -> None:
     )
     register_panel(
         PanelSpec(
-            identifier="measurements",
-            title="Measurements",
-            factory=_measurements,
-            attribute="measurements_widget",
-            order=20,
-        )
-    )
-    register_panel(
-        PanelSpec(
-            identifier="intensity_comparison",
-            title="ROI intensity comparison",
-            factory=_intensity,
-            attribute="intensity_widget",
-            tabify_with="measurements",
-            order=30,
-        )
-    )
-    register_panel(
-        PanelSpec(
             identifier="timeseries",
             title="Time series",
             factory=_timeseries,
@@ -178,21 +144,11 @@ def _register_builtin_panels() -> None:
     )
     register_panel(
         PanelSpec(
-            identifier="atlas_registration",
-            title="Atlas registration",
-            factory=_registration,
-            attribute="registration_widget",
-            tabify_with="intensity_comparison",
-            order=40,
-        )
-    )
-    register_panel(
-        PanelSpec(
             identifier="segmentation",
             title="Segmentation",
             factory=_segmentation,
             attribute="segmentation_widget",
-            tabify_with="intensity_comparison",
+            # The first of the right-hand tab stack; the others tabify with it.
             order=50,
         )
     )
@@ -202,7 +158,7 @@ def _register_builtin_panels() -> None:
             title="Brain regions",
             factory=_regions,
             attribute="regions_widget",
-            tabify_with="intensity_comparison",
+            tabify_with="segmentation",
             order=60,
         )
     )
@@ -234,23 +190,22 @@ def _register_builtin_panels() -> None:
 
     register_panel(
         PanelSpec(
-            identifier="acquisition_movie",
-            title="Acquisition movie",
-            factory=_acquisition,
-            attribute="acquisition_widget",
-            tabify_with="intensity_comparison",
-            order=70,
-        )
-    )
-
-    register_panel(
-        PanelSpec(
             identifier="cell_counter",
             title="Cell counter",
             factory=_cell_counter,
             attribute="cell_counter_widget",
-            tabify_with="intensity_comparison",
+            tabify_with="segmentation",
             order=55,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="fusion_region",
+            title="Fusion region macro",
+            factory=_fusion,
+            attribute="fusion_widget",
+            tabify_with="segmentation",
+            order=57,
         )
     )
 
