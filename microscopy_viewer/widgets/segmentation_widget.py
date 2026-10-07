@@ -53,6 +53,10 @@ logger = get_logger("segmentation_widget")
 #: is distinguishable and the source stays obvious in the layer list.
 LABELS_SUFFIX = "labels"
 
+#: Suffix on the second Labels layer a run with expansion produces: the regions
+#: the intensities were read over.
+EXPANDED_SUFFIX = "expanded labels"
+
 #: Suffix on the flattened image a maximum-projection run adds beside its labels.
 PROJECTION_SUFFIX = "[MIP]"
 
@@ -106,6 +110,7 @@ class SegmentationWidget(QWidget):
     def __init__(self, viewer, parent: QWidget | None = None, app=None):
         super().__init__(parent)
         self._viewer = viewer
+        self._app = app
         #: The Batch tab, when the panel is built inside the full viewer — it
         #: needs the Experiment setup panel for its samples.
         self.batch = None
@@ -329,6 +334,24 @@ class SegmentationWidget(QWidget):
         )
         form.addRow("Maximum diameter", self._max_diameter)
 
+        self._expand = QDoubleSpinBox()
+        self._expand.setRange(0.0, 200.0)
+        self._expand.setDecimals(2)
+        self._expand.setSingleStep(0.5)
+        self._expand.setSuffix(" µm")
+        self._expand.setSpecialValueText("off")
+        self._expand.setToolTip(
+            "Grow each object outwards by up to this far, and read its intensities "
+            "over the grown region instead of the object itself." "\n"
+            "For a nuclear segmentation and a signal that is not nuclear: the nucleus "
+            "says where the cell is, the ring round it is where the signal is. A "
+            "watershed from the nuclei, so two neighbours split the gap between them "
+            "and no region ever takes a pixel of another." "\n"
+            "Sizes, diameters and centroids in the table stay those of the nucleus. "
+            "The grown regions come back as a second layer, “… expanded labels”."
+        )
+        form.addRow("Expand for intensity", self._expand)
+
         self._normalize = QCheckBox("Percentile-normalise before segmenting")
         self._normalize.setChecked(True)
         self._normalize.setToolTip(
@@ -340,6 +363,20 @@ class SegmentationWidget(QWidget):
         self._add_layer = QCheckBox("Add the labels to the viewer")
         self._add_layer.setChecked(True)
         form.addRow("Results", self._add_layer)
+
+        self._save_to_sample = QCheckBox("Save the labels with the sample")
+        self._save_to_sample.setChecked(True)
+        self._save_to_sample.setToolTip(
+            "Store the label map with the file the channel was read from, under "
+            "/ARGUS/Labels, the same place the Batch tab writes to — so the result "
+            "is still there after the sample is closed, and the Analysis panel finds "
+            "it." "\n"
+            "Inside an .ims; beside a TIFF, in “<name>.argus.h5”, since a TIFF cannot "
+            "hold it. An .ims is closed and reopened for the write." "\n"
+            "Stored as “<channel> labels”, replacing an earlier run on that channel. "
+            "With expansion on, the grown regions are stored too."
+        )
+        form.addRow("", self._save_to_sample)
 
         self._update_mode_sensitivity(self._mode_box.currentText())
         return box
@@ -553,6 +590,7 @@ class SegmentationWidget(QWidget):
             stitch_gap_um=float(self._stitch_gap.value()),
             min_diameter_um=float(self._min_diameter.value()),
             max_diameter_um=float(self._max_diameter.value()),
+            expand_um=float(self._expand.value()),
             normalize=self._normalize.isChecked(),
             use_gpu=self._use_gpu.isChecked(),
             batch_size=int(self._batch_size.value()),
@@ -658,8 +696,11 @@ class SegmentationWidget(QWidget):
             # flattened the same way or it does not line up with them. The voxel
             # size follows the masks, not the input, for the same reason.
             measured = sg.max_projection(signal) if result.projected else signal
-            stats = sg.object_table(
-                result.masks, measured, result.voxel_size_um[-result.masks.ndim:]
+            stats = sg.measure_objects(
+                result.masks,
+                measured,
+                result.voxel_size_um[-result.masks.ndim:],
+                expanded=result.expanded_masks,
             )
             projection = sg.max_projection(image) if result.projected else None
             return result, stats, projection
@@ -707,6 +748,7 @@ class SegmentationWidget(QWidget):
         if self._add_layer.isChecked():
             self._add_labels_layer(result, source_name, projection)
         self._fill_object_table(stats)
+        saved_note = self._save_result(result, source_name) if self._save_to_sample.isChecked() else ""
 
         summary = (
             f"{result.n_objects} object(s) in {result.elapsed_s:.0f} s "
@@ -717,14 +759,72 @@ class SegmentationWidget(QWidget):
         if result.mode == sg.MODE_STITCH and result.stitch_gap_planes > 1:
             summary += f", stitched over gaps up to {result.stitch_gap_planes} plane(s)"
         summary += ")."
+        if result.expanded_masks is not None:
+            summary += (
+                f" Intensities read over the objects expanded by {result.expand_um:g} µm; "
+                "sizes are the objects' own."
+            )
         if measure_name and measure_name != source_name:
             summary += f" Intensities measured on {measure_name}."
+        if saved_note:
+            summary += f" {saved_note}"
         messages = list(problems) + list(result.warnings)
         if messages:
             summary += " " + " ".join(messages[:3])
         self._status.setText(summary)
         self._update_summary(stats)
         logger.info("segmentation finished: %s", summary)
+
+    def _save_result(self, result: sg.SegmentationResult, source_name: str) -> str:
+        """Store the run's label maps with the sample. Returns a line for the status.
+
+        Never raises: the labels are already on screen and in the table, and a
+        file that could not be written is something to say, not a reason to lose
+        the run.
+        """
+        from .. import experiment as ex
+        from .. import ims_store, naming
+        from .sample_files import close_sample, restore_view, source_of, view_state
+
+        source = self._layer_named(source_name)
+        origin = source_of(source) if source is not None else ""
+        if not origin:
+            return "Not saved: this channel was not read from a file."
+        path = Path(origin)
+        ok, reason = ims_store.can_write(path)
+        if not ok:
+            return f"Not saved: {reason}"
+
+        channel = str(source.metadata.get("mv_channel_name", "") or "")
+        if not channel:
+            channel = _short_name(source).partition(" :: ")[2] or _short_name(source)
+        settings = self.settings()
+        view = view_state(self._viewer)
+        self._updating = True
+        # An .ims has to come off screen to be written into; a TIFF's sidecar
+        # does not, and this closes nothing for one.
+        reopen = close_sample(self._viewer, path)
+        try:
+            key, expanded_key = ex.store_result(
+                path, ex.default_label_key(channel), result, settings, channel,
+                naming.genotype_from_name(path.name),
+            )
+            where = ims_store.store_path(path).name
+            note = f"Saved as “{key}”" + (f" and “{expanded_key}”" if expanded_key else "")
+            note += f" in {where}."
+        except Exception as exc:
+            logger.exception("could not save the labels with %s", path)
+            note = f"Not saved: {exc}"
+        finally:
+            if reopen and hasattr(self._app, "open_paths"):
+                self._app.open_paths([path])
+                restore_view(self._viewer, view)
+            self._updating = False
+        self.refresh_layers()
+        experiment = getattr(self._app, "experiment_widget", None)
+        if experiment is not None and hasattr(experiment, "_refresh_entries"):
+            experiment._refresh_entries([path])
+        return note
 
     def _add_labels_layer(
         self,
@@ -750,6 +850,16 @@ class SegmentationWidget(QWidget):
             layer_name = f"{base} {LABELS_SUFFIX}"
             if layer_name in self._viewer.layers:
                 self._viewer.layers.remove(layer_name)
+            # The grown regions first, so the objects they were grown from sit
+            # above them in the layer list and on the canvas.
+            expanded_name = f"{base} {EXPANDED_SUFFIX}"
+            if expanded_name in self._viewer.layers:
+                self._viewer.layers.remove(expanded_name)
+            if result.expanded_masks is not None:
+                self._viewer.add_labels(
+                    result.expanded_masks, name=expanded_name, scale=scale, opacity=0.35,
+                    **_unit_kwargs(source, len(scale)),
+                )
             self._viewer.add_labels(
                 result.masks, name=layer_name, scale=scale, **_unit_kwargs(source, len(scale))
             )

@@ -442,6 +442,9 @@ class BatchOutcome:
     elapsed_s: float = 0.0
     channel_name: str = ""
     label_key: str = ""
+    #: Where the grown regions the intensities were read over are stored, when
+    #: the run expanded its objects. Empty otherwise.
+    expanded_key: str = ""
     saved: bool = False
     #: Dimensions of the label map, which decides whether sizes are areas or
     #: volumes. Carried on the outcome rather than guessed from the rows later.
@@ -534,41 +537,25 @@ def run_batch(
             signal = measure if measure is not None else image
             if result.projected and np.asarray(signal).ndim == 3:
                 signal = sg.max_projection(np.asarray(signal))
-            outcome.stats = sg.object_table(
-                result.masks, signal, result.voxel_size_um[-result.masks.ndim:]
+            outcome.stats = sg.measure_objects(
+                result.masks,
+                signal,
+                result.voxel_size_um[-result.masks.ndim:],
+                expanded=result.expanded_masks,
             )
 
             if options.save_to_file:
                 if progress is not None:
                     progress(f"{prefix}: writing into {path.name}")
-                key = options.label_key or f"{channel_name or 'channel'} labels"
-                outcome.label_key = ims_store.save_labels(
+                outcome.label_key, outcome.expanded_key = store_result(
                     path,
-                    key,
-                    result.masks,
-                    result.voxel_size_um[-result.masks.ndim:],
-                    attrs={
-                        "model": result.model,
-                        "mode": result.mode,
-                        "device": result.device,
-                        "channel": channel_name,
-                        "genotype": outcome.genotype,
-                        "diameter_um": float(settings.diameter_um),
-                        "min_diameter_um": float(settings.min_diameter_um),
-                        "max_diameter_um": float(settings.max_diameter_um),
-                    },
+                    options.label_key or default_label_key(channel_name),
+                    result,
+                    settings,
+                    channel_name,
+                    outcome.genotype,
                 )
-                # Read it back rather than trusting that the write returned. A
-                # label map is the point of the run, and "saved" being reported
-                # for something that is not in the file is the failure that
-                # costs a whole batch — it is only noticed days later, when the
-                # counts are wanted and the files are empty.
-                outcome.saved = _stored_ok(path, outcome.label_key, result.masks.shape)
-                if not outcome.saved:
-                    raise OSError(
-                        f"the labels did not survive being written into {path.name} — "
-                        f"{path.name} has no readable /ARGUS/Labels/{outcome.label_key}"
-                    )
+                outcome.saved = True
         except BatchCancelled:
             break
         except Exception as exc:
@@ -583,6 +570,111 @@ def run_batch(
                 f"{prefix}: {outcome.error or f'{outcome.n_objects} object(s)'}"
             )
     return outcomes
+
+
+def default_label_key(channel_name: str) -> str:
+    """The key a segmentation of *channel_name* is stored under when none is given."""
+    return f"{channel_name or 'channel'} labels"
+
+
+def store_result(
+    path: str | Path,
+    key: str,
+    result: Any,
+    settings: Any = None,
+    channel_name: str = "",
+    genotype: str = "",
+) -> tuple[str, str]:
+    """Write one run's label maps into *path*'s store. Returns the keys used.
+
+    ``(label_key, expanded_key)``, the second empty when the run grew nothing.
+    Raises :class:`OSError` when what was written cannot be read back — the one
+    place a run's labels are stored from, so a single segmentation and a batch
+    of thirty are verified the same way.
+    """
+    target = Path(path)
+    attrs = {
+        "model": result.model,
+        "mode": result.mode,
+        "device": result.device,
+        "channel": channel_name,
+        "genotype": genotype,
+    }
+    if settings is not None:
+        attrs.update(
+            diameter_um=float(settings.diameter_um),
+            min_diameter_um=float(settings.min_diameter_um),
+            max_diameter_um=float(settings.max_diameter_um),
+        )
+    voxel = result.voxel_size_um[-result.masks.ndim:]
+    expanded_key = ""
+    if result.expanded_masks is not None:
+        # Its own map beside the objects', and the objects' map says where:
+        # whatever measures them later reads intensities over the same regions
+        # this run did.
+        expanded_key = ims_store.save_labels(
+            target,
+            expanded_key_for(key),
+            result.expanded_masks,
+            voxel,
+            attrs={
+                **attrs,
+                EXPANDED_FROM_ATTR: ims_store.sanitise_key(key),
+                "expand_um": float(result.expand_um),
+            },
+        )
+        attrs = {**attrs, EXPANDED_KEY_ATTR: expanded_key, "expand_um": float(result.expand_um)}
+    else:
+        # A rerun without expansion must not leave the last run's regions
+        # standing beside objects they no longer match.
+        ims_store.delete_labels(target, expanded_key_for(key))
+    label_key = ims_store.save_labels(target, key, result.masks, voxel, attrs=attrs)
+
+    # Read it back rather than trusting that the write returned. A label map is
+    # the point of the run, and "saved" being reported for something that is not
+    # in the file is the failure that costs a whole batch — it is only noticed
+    # days later, when the counts are wanted and the files are empty.
+    stored = _stored_ok(target, label_key, result.masks.shape) and (
+        result.expanded_masks is None
+        or _stored_ok(target, expanded_key, result.expanded_masks.shape)
+    )
+    if not stored:
+        raise OSError(
+            f"the labels did not survive being written into {target.name} — "
+            f"{ims_store.store_path(target).name} has no readable /ARGUS/Labels/{label_key}"
+        )
+    return label_key, expanded_key
+
+
+#: Appended to an object map's key to name the map of its grown regions.
+EXPANDED_SUFFIX = " expanded"
+
+#: On the object map: the key of its grown regions. On the grown map: the key
+#: of the objects it was grown from.
+EXPANDED_KEY_ATTR = "expanded_key"
+EXPANDED_FROM_ATTR = "expanded_from"
+
+
+def expanded_key_for(key: str) -> str:
+    """The key the grown regions of the label map *key* are stored under."""
+    return ims_store.sanitise_key(f"{key}{EXPANDED_SUFFIX}")
+
+
+def load_expanded(path: str | Path, attrs: dict, shape: Sequence[int]) -> np.ndarray | None:
+    """The grown regions belonging to a stored object map, or ``None``.
+
+    Found through the object map's own attributes rather than by guessing at the
+    name, and only returned when it is on the same grid — a map that does not
+    line up label for label is worse than none.
+    """
+    if EXPANDED_KEY_ATTR not in attrs:
+        return None
+    key = ims_store._text(attrs[EXPANDED_KEY_ATTR])
+    expanded, _attrs = ims_store.load_labels(path, key)
+    if expanded is None or tuple(expanded.shape) != tuple(int(n) for n in shape):
+        logger.info("%s: no usable expanded map %r", Path(path).name, key)
+        return None
+    return expanded
 
 
 def _stored_ok(path: Path, key: str, shape: Sequence[int]) -> bool:

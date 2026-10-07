@@ -235,14 +235,71 @@ def _series_arrays(tf: tifffile.TiffFile, series) -> tuple[list[Any], bool]:
     n_levels = len(getattr(series, "levels", []) or [])
     try:
         if n_levels > 1:
-            arrays = [da.from_zarr(level.aszarr()) for level in series.levels]
+            arrays = [_lazy_array(level) for level in series.levels]
             if all(_shrinks(a.shape, b.shape) for a, b in zip(arrays[1:], arrays)):
                 return arrays, True
             return [arrays[0]], False
-        return [da.from_zarr(series.aszarr())], False
+        return [_lazy_array(series)], False
     except Exception:
-        logger.info("zarr view unavailable for %s; reading eagerly", tf.filename, exc_info=True)
+        logger.info("no lazy view of %s; reading eagerly", tf.filename, exc_info=True)
         return [np.asarray(series.asarray())], False
+
+
+def _lazy_array(series) -> Any:
+    """A dask view of *series*: through zarr when that works, else page by page."""
+    try:
+        return da.from_zarr(series.aszarr())
+    except Exception as exc:
+        stacked = _page_stack(series)
+        if stacked is None:
+            raise
+        logger.info("zarr view unavailable (%s); reading one page per chunk", exc)
+        return stacked
+
+
+def _page_stack(series) -> Any | None:
+    """*series* as a dask array with one chunk per TIFF page, or ``None``.
+
+    What stands in for the zarr view when tifffile and zarr disagree about what
+    a store is — tifffile before 2025.5.21 hands out zarr 2 stores, which zarr 3
+    refuses. Without this the only thing left is reading the whole file, and a
+    slide scan is a gigabyte that a folder listing would then read once per
+    sample just to learn its shape.
+
+    Coarser than zarr's tile-sized chunks, since a page comes back whole, but a
+    plane at a time is what the viewer asks for anyway. ``None`` when the pages
+    do not tile the series one plane each (RGB, missing planes), which goes back
+    to the caller to read eagerly.
+    """
+    import threading
+
+    import dask
+
+    try:
+        pages = list(series.pages)
+        shape = tuple(int(n) for n in series.shape)
+    except Exception:
+        return None
+    if not pages or any(page is None for page in pages):
+        return None
+    plane = tuple(int(n) for n in pages[0].shape)
+    leading = shape[: len(shape) - len(plane)]
+    if shape[len(leading):] != plane or int(np.prod(leading, dtype=np.int64)) != len(pages):
+        return None
+
+    # One file handle, many dask threads: a seek from one read must not land
+    # between another's seek and its read.
+    lock = threading.Lock()
+
+    def _load(page):
+        with lock:
+            return page.asarray()
+
+    planes = [
+        da.from_delayed(dask.delayed(_load)(page), shape=plane, dtype=series.dtype)
+        for page in pages
+    ]
+    return da.stack(planes).reshape(shape)
 
 
 def _shrinks(new: tuple[int, ...], old: tuple[int, ...]) -> bool:

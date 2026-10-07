@@ -629,8 +629,11 @@ class ExperimentWidget(QWidget):
         Both halves are needed. Removing the layers drops the dask graphs, but the
         reader keeps its ``h5py.File`` open for the lifetime of the process, and
         that alone is enough to make a write fail.
+
+        Every reader's handles, not only Imaris's: a batch gives each file's
+        handle back as it finishes with it, TIFF included.
         """
-        from ..loaders import ims as ims_reader
+        from ..loaders import release
 
         wanted = {str(Path(path).resolve()) for path in paths}
         removed = 0
@@ -645,7 +648,7 @@ class ExperimentWidget(QWidget):
             if resolved in wanted:
                 self._viewer.layers.remove(layer)
                 removed += 1
-        released = sum(ims_reader.release(path) for path in wanted)
+        released = sum(release(path) for path in wanted)
         if removed or released:
             self._log(f"Closed {removed} layer(s) and released {released} file handle(s).")
         return removed
@@ -806,7 +809,7 @@ class ExperimentWidget(QWidget):
         if not keys:
             self._log(
                 f"{entry.name} carries no stored label maps. Run the batch with "
-                "“Write the labels into each .ims file” ticked."
+                "“Write the labels into each file” ticked."
             )
             return
 

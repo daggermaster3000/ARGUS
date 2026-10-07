@@ -25,6 +25,14 @@ reading — in the same process as much as across processes. :func:`writable`
 releases the reader's handle before opening for write, which invalidates any
 layer still backed by that file, so the caller has to take those off screen
 first. :func:`can_write` says in advance whether that is going to be necessary.
+
+**Sources that are not HDF5.** A TIFF or OME-TIFF has nowhere to put any of
+this: rewriting a gigabyte of somebody's acquisition to append a label map is
+exactly the risk the paragraph above declines to take with ``Scene8``. Those get
+a sidecar instead — ``<file name>.argus.h5`` beside the image, holding the same
+``/ARGUS`` group — and :func:`store_path` is the one place that decides which of
+the two a path means. The sidecar has to travel with the image, which is the
+orphaning problem the first paragraph describes; it is the price of the format.
 """
 
 from __future__ import annotations
@@ -52,6 +60,12 @@ FORMAT_VERSION = 1
 #: Suffixes worth trying to open. An ``.h5`` written by something else is still
 #: a perfectly good container for this.
 HDF5_SUFFIXES = (".ims", ".imaris", ".h5", ".hdf5")
+
+#: Appended to the whole file name of a source that is not HDF5, so
+#: ``fish.ome.tiff`` keeps its results in ``fish.ome.tiff.argus.h5``. The whole
+#: name rather than the stem: ``fish.tif`` and ``fish.ims`` in one folder would
+#: otherwise share a sidecar.
+SIDECAR_SUFFIX = ".argus.h5"
 
 
 @dataclass
@@ -88,6 +102,37 @@ def is_container(path: str | Path) -> bool:
         return False
 
 
+def uses_sidecar(path: str | Path) -> bool:
+    """Whether results for *path* go beside it rather than inside it.
+
+    True for an image this program reads that is not HDF5. Anything else — a
+    text file, a spreadsheet — gets no sidecar and is refused as before.
+    """
+    from .loaders import is_supported
+
+    candidate = Path(path)
+    return candidate.suffix.lower() not in HDF5_SUFFIXES and is_supported(candidate)
+
+
+def store_path(path: str | Path) -> Path:
+    """The HDF5 file holding the ``/ARGUS`` group for *path*.
+
+    The file itself when it is HDF5, its sidecar otherwise. The sidecar need not
+    exist yet: reading from one that does not is "nothing stored", and writing
+    creates it.
+    """
+    candidate = Path(path)
+    if not uses_sidecar(candidate):
+        return candidate
+    return candidate.with_name(candidate.name + SIDECAR_SUFFIX)
+
+
+def _readable_store(path: str | Path) -> Path | None:
+    """The store for *path* when there is one to read, else ``None``."""
+    store = store_path(path)
+    return store if is_container(store) else None
+
+
 def can_write(path: str | Path) -> tuple[bool, str]:
     """``(ok, reason)`` — whether a write would succeed right now.
 
@@ -95,6 +140,8 @@ def can_write(path: str | Path) -> tuple[bool, str]:
     batch of thirty files.
     """
     candidate = Path(path)
+    if uses_sidecar(candidate):
+        return _can_write_sidecar(candidate)
     if not is_container(candidate):
         return False, f"{candidate.name} is not an HDF5/Imaris file."
     try:
@@ -102,6 +149,28 @@ def can_write(path: str | Path) -> tuple[bool, str]:
             return False, f"{candidate.name} is read-only."
     except OSError as exc:
         return False, f"{candidate.name}: {exc}"
+    return True, ""
+
+
+def _can_write_sidecar(source: Path) -> tuple[bool, str]:
+    """:func:`can_write` for a source whose results go in a sidecar.
+
+    The image itself may be read-only — it is never touched. What has to be
+    writable is the sidecar, or the folder when there is no sidecar yet.
+    """
+    import os
+
+    if not source.exists():
+        return False, f"{source.name} does not exist."
+    store = store_path(source)
+    if store.exists():
+        if not is_container(store):
+            return False, f"{store.name} exists and is not an HDF5 file."
+        if not os.access(store, os.W_OK):
+            return False, f"{store.name} is read-only."
+        return True, ""
+    if not os.access(store.parent, os.W_OK):
+        return False, f"cannot create {store.name}: the folder is read-only."
     return True, ""
 
 
@@ -119,6 +188,16 @@ def writable(path: str | Path, release_reader: bool = True) -> Iterator[Any]:
     from .loaders import ims as ims_reader
 
     target = Path(path)
+    if uses_sidecar(target):
+        # Nothing to release: no reader holds the sidecar, and the image it sits
+        # beside is not opened here at all, so its layers stay valid.
+        handle = h5py.File(str(store_path(target)), "a")
+        try:
+            yield handle
+        finally:
+            handle.close()
+        return
+
     if release_reader:
         released = ims_reader.release(target)
         if released:
@@ -186,7 +265,7 @@ def save_rois(path: str | Path, rois: Sequence[StoredRoi], replace: bool = True)
                     dataset.attrs[str(attribute)] = value
                 except Exception:
                     dataset.attrs[str(attribute)] = str(value)
-    logger.info("wrote %d ROI(s) into %s", len(entries), Path(path).name)
+    logger.info("wrote %d ROI(s) into %s", len(entries), store_path(path).name)
     return len(entries)
 
 
@@ -194,11 +273,12 @@ def load_rois(path: str | Path) -> list[StoredRoi]:
     """Read back what :func:`save_rois` wrote. Empty when there is nothing."""
     import h5py
 
-    if not is_container(path):
+    store = _readable_store(path)
+    if store is None:
         return []
     rois: list[StoredRoi] = []
     try:
-        with h5py.File(str(path), "r") as handle:
+        with h5py.File(str(store), "r") as handle:
             group = handle.get(ROI_GROUP)
             if group is None:
                 return []
@@ -269,8 +349,19 @@ def save_labels(
                 dataset.attrs[str(attribute)] = value
             except Exception:
                 dataset.attrs[str(attribute)] = str(value)
-    logger.info("wrote labels %r (%s) into %s", safe, labels.shape, Path(path).name)
+    logger.info("wrote labels %r (%s) into %s", safe, labels.shape, store_path(path).name)
     return safe
+
+
+def delete_labels(path: str | Path, key: str) -> bool:
+    """Remove one stored label map. Returns whether there was one to remove."""
+    safe = sanitise_key(key)
+    if safe not in list_labels(path):
+        return False
+    with writable(path) as handle:
+        del handle[LABEL_GROUP][safe]
+    logger.info("removed labels %r from %s", safe, store_path(path).name)
+    return True
 
 
 def _compact(labels: np.ndarray) -> np.ndarray:
@@ -302,10 +393,11 @@ def label_shape(path: str | Path, key: str) -> tuple[int, ...]:
     """
     import h5py
 
-    if not is_container(path):
+    store = _readable_store(path)
+    if store is None:
         return ()
     try:
-        with h5py.File(str(path), "r") as handle:
+        with h5py.File(str(store), "r") as handle:
             group = handle.get(LABEL_GROUP)
             if group is None or key not in group:
                 return ()
@@ -334,10 +426,11 @@ def list_labels(path: str | Path) -> list[str]:
     """Names of the label maps stored in the file."""
     import h5py
 
-    if not is_container(path):
+    store = _readable_store(path)
+    if store is None:
         return []
     try:
-        with h5py.File(str(path), "r") as handle:
+        with h5py.File(str(store), "r") as handle:
             group = handle.get(LABEL_GROUP)
             return sorted(group) if group is not None else []
     except OSError:
@@ -348,10 +441,11 @@ def load_labels(path: str | Path, key: str) -> tuple[np.ndarray | None, dict[str
     """Read one stored label map back, with its attributes."""
     import h5py
 
-    if not is_container(path):
+    store = _readable_store(path)
+    if store is None:
         return None, {}
     try:
-        with h5py.File(str(path), "r") as handle:
+        with h5py.File(str(store), "r") as handle:
             group = handle.get(LABEL_GROUP)
             if group is None or key not in group:
                 return None, {}

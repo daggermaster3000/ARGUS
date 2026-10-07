@@ -590,8 +590,15 @@ def analyse_sample(
                     outcome.channel_name = names[index]
             elif wanted is not None:
                 outcome.warnings.append(f"no channel matching {wanted!r} to measure objects on")
-            say("measuring objects")
-            outcome.stats = sg.object_table(masks, signal, voxel)
+            # A run that grew its objects read their intensities over the grown
+            # regions; measuring the bare objects here would quietly disagree
+            # with the numbers that run reported.
+            expanded = ex.load_expanded(target, attrs, masks.shape)
+            if expanded is not None:
+                say("measuring objects (intensities over the expanded regions)")
+            else:
+                say("measuring objects")
+            outcome.stats = sg.measure_objects(masks, signal, voxel, expanded=expanded)
             outcome.n_objects = len(outcome.stats)
             del signal
             if options.cell_outlines and outcome.n_objects:
@@ -614,9 +621,11 @@ def analyse_sample(
                             "its per-cell intensities were not measured"
                         )
                         continue
-                    outcome.cell_intensities[names[index]] = object_intensities(masks, array)
+                    outcome.cell_intensities[names[index]] = object_intensities(
+                        masks if expanded is None else expanded, array
+                    )
                     del array
-            del masks
+            del masks, expanded
 
         # -- regions ------------------------------------------------------------
         outcome.shapes = [region_shape(region, outcome.depth_um) for region in regions]

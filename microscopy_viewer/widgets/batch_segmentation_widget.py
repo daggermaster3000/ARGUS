@@ -104,13 +104,15 @@ class BatchSegmentationTab(QWidget):
         )
         form.addRow("Restrict", self._restrict)
 
-        self._save_labels = QCheckBox("Write the labels into each .ims file")
+        self._save_labels = QCheckBox("Write the labels into each file")
         self._save_labels.setChecked(True)
         self._save_labels.setToolTip(
             "Stored under /ARGUS/Labels inside the file, beside the image data rather "
             "than in a sidecar, so the result travels with the sample.\n"
             "Imaris ignores the group and opens the file normally — but it does not show "
-            "these as its own Surfaces either."
+            "these as its own Surfaces either.\n"
+            "A TIFF cannot hold them, so its labels go in a sidecar beside it — "
+            "“<name>.argus.h5” — which has to be moved along with the image."
         )
         form.addRow("Results", self._save_labels)
         layout.addLayout(form)

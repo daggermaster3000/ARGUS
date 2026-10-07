@@ -217,6 +217,11 @@ class SegmentationSettings:
     #: Override the Z/XY ratio instead of taking it from the voxel size. Rarely
     #: wanted; it exists because a badly written file can carry a wrong Z step.
     anisotropy: float | None = None
+    #: How far, in **µm**, each object is grown outwards to make the region its
+    #: intensities are read from — a nucleus widened into the cytoplasm round it.
+    #: Sizes, diameters and centroids stay those of the object as segmented. Zero
+    #: turns it off and intensities are read over the object itself.
+    expand_um: float = 0.0
 
     def resolved_model(self) -> str:
         """What to hand the backend: a path if one is set, else the model name."""
@@ -249,6 +254,11 @@ class SegmentationResult:
     projected: bool = False
     #: Objects removed after segmentation by the maximum-diameter filter.
     dropped_oversize: int = 0
+    #: The same objects grown by :attr:`SegmentationSettings.expand_um`, label
+    #: for label, on the same grid — the regions intensities are read over.
+    #: ``None`` when no expansion was asked for.
+    expanded_masks: np.ndarray | None = None
+    expand_um: float = 0.0
     #: Planes the stitch was allowed to reach across. 1 is neighbours only.
     stitch_gap_planes: int = 1
     #: Diameter actually used by Cellpose, in XY pixels of the analysed volume.
@@ -1332,6 +1342,41 @@ def filter_by_diameter(
     return lookup[labels], dropped
 
 
+def expand_labels(
+    masks: np.ndarray,
+    voxel_size_um: Sequence[float],
+    distance_um: float,
+) -> np.ndarray:
+    """Grow every object outwards by up to *distance_um*, keeping its label.
+
+    A seeded watershed over the distance from the nearest object: each object
+    floods outwards from its own outline, two neighbours meet on the line
+    equidistant from both, and nothing is claimed further out than
+    *distance_um*. An object therefore always contains itself, never takes a
+    pixel of another, and in a dense field ends up with its share of the gap
+    rather than a full ring.
+
+    The distance is in µm against the voxel size, so on a stack whose planes are
+    4 µm apart a 3 µm expansion stays in its plane instead of jumping one — a
+    count of pixels would not know the difference.
+    """
+    labels = np.asarray(masks)
+    if distance_um <= 0 or not labels.any():
+        return labels.copy()
+
+    from scipy import ndimage
+    from skimage.segmentation import watershed
+
+    voxel = tuple(float(v) for v in tuple(voxel_size_um)[-labels.ndim:])
+    if len(voxel) < labels.ndim:
+        voxel = (1.0,) * (labels.ndim - len(voxel)) + voxel
+    distance = ndimage.distance_transform_edt(labels == 0, sampling=voxel).astype(
+        np.float32, copy=False
+    )
+    grown = watershed(distance, markers=labels, mask=distance <= float(distance_um))
+    return grown.astype(labels.dtype, copy=False)
+
+
 def segment_volume(
     image: np.ndarray,
     voxel_size_um: Sequence[float] = (1.0, 1.0, 1.0),
@@ -1449,6 +1494,13 @@ def segment_volume(
             logger.info("maximum diameter %.2f µm dropped %d object(s)",
                         settings.max_diameter_um, dropped)
 
+    # After the ceiling, so nothing is grown from an object that was dropped.
+    expanded = None
+    if settings.expand_um > 0 and masks.any():
+        if progress is not None:
+            progress(f"expanding the objects by {settings.expand_um:g} µm")
+        expanded = expand_labels(masks, voxel, settings.expand_um)
+
     estimated = info.get("estimated_diameter_px")
     if diameter_px is None and estimated:
         diameter_px = float(estimated)
@@ -1460,6 +1512,8 @@ def segment_volume(
         masks=masks,
         n_objects=int(masks.max()) if masks.size else 0,
         dropped_oversize=dropped,
+        expanded_masks=expanded,
+        expand_um=float(settings.expand_um) if expanded is not None else 0.0,
         stitch_gap_planes=gap_planes,
         voxel_size_um=padded_voxel,  # type: ignore[arg-type]
         model=settings.resolved_model(),
@@ -1568,6 +1622,42 @@ def object_table(
             )
         )
     return stats
+
+
+def measure_objects(
+    masks: np.ndarray,
+    signal: np.ndarray | None = None,
+    voxel_size_um: Sequence[float] = (1.0, 1.0, 1.0),
+    expanded: np.ndarray | None = None,
+) -> list[ObjectStat]:
+    """:func:`object_table`, with intensities read over *expanded* when given.
+
+    One row per object in *masks*, and everything about its shape — voxels,
+    volume, diameter, centroid — is that object's. Only the intensity columns
+    come from the grown region carrying the same label, so a nucleus keeps the
+    nucleus's size and reports the signal of the cell round it.
+    """
+    stats = object_table(masks, signal, voxel_size_um)
+    if expanded is None or signal is None:
+        return stats
+    wide = {stat.label: stat for stat in object_table(expanded, signal, voxel_size_um)}
+    measured: list[ObjectStat] = []
+    for stat in stats:
+        region = wide.get(stat.label)
+        if region is None:
+            measured.append(stat)
+            continue
+        measured.append(
+            replace(
+                stat,
+                mean=region.mean,
+                median=region.median,
+                std=region.std,
+                maximum=region.maximum,
+                integrated=region.integrated,
+            )
+        )
+    return measured
 
 
 def _medians(ids: np.ndarray, values: np.ndarray, highest: int) -> np.ndarray:

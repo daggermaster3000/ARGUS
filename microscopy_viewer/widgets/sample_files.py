@@ -27,8 +27,15 @@ def close_sample(viewer, path) -> int:
     Both halves are needed before writing. Removing the layers drops the dask
     graphs, but the reader holds its ``h5py.File`` open for the life of the
     process, and HDF5 will not open for writing what is open for reading.
+
+    A sample whose results go in a sidecar (a TIFF) is left exactly as it is:
+    the write never opens the image, so there is nothing to close or reopen.
     """
+    from .. import ims_store
     from ..loaders import ims as ims_reader
+
+    if ims_store.uses_sidecar(path):
+        return 0
 
     target = str(Path(path).resolve())
     removed = 0

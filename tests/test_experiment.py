@@ -140,6 +140,84 @@ def test_a_file_that_is_not_a_container() -> None:
         check(store.can_write(missing)[0] is False, "so is a file that is not there")
 
 
+def test_a_tiff_keeps_its_results_in_a_sidecar() -> None:
+    print("a TIFF's results go beside it")
+    import tifffile
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "organoid_s1.ome.tiff"
+        pixels = np.arange(2 * 8 * 8, dtype=np.uint16).reshape(2, 8, 8)
+        tifffile.imwrite(str(path), pixels)
+        before = path.read_bytes()
+        sidecar = root / "organoid_s1.ome.tiff.argus.h5"
+
+        check(store.uses_sidecar(path), "a TIFF is stored beside, not inside")
+        check(store.store_path(path) == sidecar, f"under its whole name ({store.store_path(path).name})")
+        check(store.can_write(path) == (True, ""), "and can be written before the sidecar exists")
+        check(store.load_rois(path) == [] and store.list_labels(path) == [],
+              "nothing stored reads as nothing, without creating the sidecar")
+        check(not sidecar.exists(), "which is still not there")
+
+        square = np.array([[1.0, 1.0], [1.0, 6.0], [6.0, 6.0], [6.0, 1.0]])
+        check(store.save_rois(path, [store.StoredRoi("organoid", square)]) == 1, "ROIs are written")
+        masks = np.zeros((8, 8), dtype=np.int32)
+        masks[1:4, 1:4] = 1
+        key = store.save_labels(path, "AF405 labels", masks, (0.325, 0.325), {"channel": "AF405"})
+
+        check(sidecar.is_file(), "into the sidecar")
+        check(path.read_bytes() == before, "and the image is byte-for-byte untouched")
+        check([roi.name for roi in store.load_rois(path)] == ["organoid"], "the ROIs read back by the image's path")
+        loaded, attrs = store.load_labels(path, key)
+        check(np.array_equal(loaded, masks), "and so do the labels")
+        check(store.label_shape(path, key) == (8, 8), "with their shape")
+        check(store.summary(path) == "1 ROI(s), 1 label map(s)", f"summary reads right ({store.summary(path)})")
+
+        listed = [found.name for found in ex.list_files(root)]
+        check(listed == [path.name], f"the sidecar is not listed as a sample ({listed})")
+
+        # A second write goes into the same sidecar rather than replacing it.
+        store.save_labels(path, "manual", masks, (0.325, 0.325))
+        check(store.list_labels(path) == ["AF405 labels", "manual"], "a second label map joins the first")
+        check(len(store.load_rois(path)) == 1, "and the ROIs are still there")
+
+        # The same stem in another format must not share the store.
+        twin = _container(root, "organoid_s1.ome.ims")
+        check(store.store_path(twin) == twin and store.load_rois(twin) == [],
+              "an .ims of the same name keeps its own")
+
+
+def test_the_batch_writes_a_tiff_s_labels_beside_it() -> None:
+    print("batch over a TIFF")
+    import tifffile
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "organoid_s1.ome.tif"
+        pixels = np.zeros((2, 3, 16, 16), dtype=np.uint16)
+        pixels[1, :, 4:10, 4:10] = 900
+        tifffile.imwrite(str(path), pixels, ome=True, metadata={"axes": "CZYX"})
+
+        entry = ex.describe_file(path)
+        check(entry.readable and entry.n_channels == 2 and entry.shape == (3, 16, 16),
+              f"the TIFF is described ({entry.describe()})")
+
+        seg.register_backend(_StubBackend())
+        settings = seg.SegmentationSettings(backend="stub-batch", use_gpu=False)
+        try:
+            outcomes = ex.run_batch([path], ex.BatchOptions(channel=1, settings=settings))
+        finally:
+            seg._BACKENDS.pop("stub-batch", None)
+        outcome = outcomes[0]
+        check(outcome.ok, f"the run succeeds ({outcome.error or 'no error'})")
+        check(outcome.saved and outcome.label_key in store.list_labels(path),
+              f"and the labels are stored and verified ({outcome.label_key})")
+        check((root / "organoid_s1.ome.tif.argus.h5").is_file(), "in the sidecar")
+        from microscopy_viewer import loaders
+
+        check(not loaders.is_open(path), "with the TIFF's read handle given back")
+
+
 # ---------------------------------------------------------------------------
 # Listing and previewing
 # ---------------------------------------------------------------------------
@@ -569,11 +647,85 @@ def test_labels_are_stored_in_the_narrowest_type_that_holds_them() -> None:
         check(store.label_shape(path, "labels") == (2, 8, 8), "and the shape can be read alone")
         check(store.label_shape(path, "absent") == (), "a missing map has no shape")
 
+def test_an_expanded_run_stores_two_maps() -> None:
+    print("storing the expanded regions")
+    from microscopy_viewer import analysis
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = _container(Path(directory))
+        masks = np.zeros((8, 8), dtype=np.int32)
+        masks[3:5, 3:5] = 1
+        grown = seg.expand_labels(masks, (1.0, 1.0), 2.0)
+
+        def result(expanded):
+            return seg.SegmentationResult(
+                masks=masks, n_objects=1, voxel_size_um=(1.0, 1.0, 1.0), model="m",
+                mode=seg.MODE_MIP, device="cpu", expanded_masks=expanded,
+                expand_um=2.0 if expanded is not None else 0.0,
+            )
+
+        key, expanded_key = ex.store_result(path, "dapi labels", result(grown), None, "dapi")
+        check((key, expanded_key) == ("dapi labels", "dapi labels expanded"),
+              f"two maps, the second named after the first ({key!r}, {expanded_key!r})")
+        check(store.list_labels(path) == ["dapi labels", "dapi labels expanded"], "both are in the file")
+        check(analysis.pick_label_key(store.list_labels(path)) == "dapi labels",
+              "and the objects, not their regions, are what is picked by default")
+
+        stored, attrs = store.load_labels(path, key)
+        check(np.array_equal(stored, masks), "the objects are stored as segmented")
+        found = ex.load_expanded(path, attrs, masks.shape)
+        check(found is not None and np.array_equal(found, grown), "and lead to their grown regions")
+        check(ex.load_expanded(path, attrs, (4, 4)) is None, "which are refused on another grid")
+        _grown, grown_attrs = store.load_labels(path, expanded_key)
+        check(store._text(grown_attrs[ex.EXPANDED_FROM_ATTR]) == key, "the regions say what they were grown from")
+
+        # The same channel again without expansion: the old regions must go.
+        key, expanded_key = ex.store_result(path, "dapi labels", result(None), None, "dapi")
+        check(expanded_key == "" and store.list_labels(path) == ["dapi labels"],
+              "a rerun without expansion removes the stale regions")
+        _stored, attrs = store.load_labels(path, key)
+        check(ex.load_expanded(path, attrs, masks.shape) is None, "and no longer points at any")
+
+
+def test_the_batch_measures_over_the_expanded_regions() -> None:
+    print("batch with expansion")
+    seg.register_backend(_StubBackend())
+    monkey: dict = {}
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            path = _container(Path(directory), "fish_1.ims")
+            image = np.full((12, 12), 10.0, dtype=np.float32)
+            image[1:3, 1:3] = 100.0  # where the stub puts its one object
+            _patch_reader(monkey, {"fish_1.ims": [_FakeSpec("dapi", image, (0.5, 0.5))]})
+
+            def run(expand_um):
+                settings = seg.SegmentationSettings(
+                    backend="stub-batch", use_gpu=False, expand_um=expand_um
+                )
+                return ex.run_batch([path], ex.BatchOptions(channel="dapi", settings=settings))[0]
+
+            plain = run(0.0)
+            wide = run(1.0)
+            check(wide.ok and wide.saved, f"the run succeeds and is stored ({wide.error or 'ok'})")
+            check(wide.expanded_key == "dapi labels expanded" and plain.expanded_key == "",
+                  "the outcome names the regions it stored")
+            a, b = plain.stats[0], wide.stats[0]
+            check(a.n_voxels == b.n_voxels == 4 and a.centroid_um == b.centroid_um,
+                  "the object is the same size and place either way")
+            check(a.mean == 100.0 and 10.0 < b.mean < 100.0,
+                  f"and its intensity now takes in the surround ({b.mean:.1f})")
+    finally:
+        _unpatch_reader(monkey)
+        seg._BACKENDS.pop("stub-batch", None)
+
+
 def main() -> int:
     for test in (
         test_rois_round_trip,
         test_labels_round_trip_without_disturbing_the_image,
         test_a_file_that_is_not_a_container,
+        test_a_tiff_keeps_its_results_in_a_sidecar,
+        test_the_batch_writes_a_tiff_s_labels_beside_it,
         test_listing_a_folder,
         test_thumbnail_merges_channels,
         test_channel_is_picked_by_name,
@@ -586,6 +738,8 @@ def main() -> int:
         test_the_genotype_comes_off_the_file_name,
         test_a_write_that_does_not_survive_is_reported,
         test_labels_are_stored_in_the_narrowest_type_that_holds_them,
+        test_an_expanded_run_stores_two_maps,
+        test_the_batch_measures_over_the_expanded_regions,
     ):
         test()
         print()

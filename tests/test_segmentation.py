@@ -1094,6 +1094,78 @@ def test_maximum_diameter_inside_a_run() -> None:
         seg._BACKENDS.pop("fixed-masks", None)
 
 
+def test_expansion_grows_objects_without_stealing() -> None:
+    print("expanding objects for intensity")
+    masks = np.zeros((40, 60), dtype=np.int32)
+    masks[18:22, 10:14] = 1   # alone
+    masks[18:22, 36:40] = 2   # 4 px from its neighbour
+    masks[18:22, 44:48] = 3
+
+    grown = seg.expand_labels(masks, (0.5, 0.5), 3.0)  # 3 µm is 6 px
+    check(grown.shape == masks.shape and grown.dtype == masks.dtype, "same grid, same type")
+    check(bool(np.all(grown[masks > 0] == masks[masks > 0])), "every object still holds its own pixels")
+    check(set(np.unique(grown)) == {0, 1, 2, 3}, "and no label is invented or lost")
+    check(grown[20, 4] == 1 and grown[20, 3] == 0, "it reaches 6 px out and no further")
+    check(grown[20, 19] == 1 and grown[20, 20] == 0, "on the other side too")
+    gap = grown[20, 40:44]
+    check(list(gap) == [2, 2, 3, 3], f"two neighbours split the gap between them ({list(gap)})")
+
+    check(np.array_equal(seg.expand_labels(masks, (0.5, 0.5), 0.0), masks), "zero changes nothing")
+    empty = np.zeros((8, 8), dtype=np.int32)
+    check(not seg.expand_labels(empty, (1.0, 1.0), 5.0).any(), "nothing to grow is nothing grown")
+
+    # In µm, not voxels: planes 4 µm apart are out of reach of a 3 µm expansion.
+    stack = np.zeros((3, 20, 20), dtype=np.int32)
+    stack[1, 8:12, 8:12] = 1
+    tall = seg.expand_labels(stack, (4.0, 0.5, 0.5), 3.0)
+    check(not tall[0].any() and not tall[2].any(), "a coarse Z step is not jumped")
+    check(int((tall[1] > 0).sum()) > 16, "while the plane itself is grown")
+    close = seg.expand_labels(stack, (1.0, 0.5, 0.5), 3.0)
+    check(bool(close[0].any() and close[2].any()), "and a fine one is crossed")
+
+
+def test_expanded_intensities_keep_the_nucleus_shape() -> None:
+    print("measuring over the expanded region")
+    masks = np.zeros((40, 40), dtype=np.int32)
+    masks[18:22, 18:22] = 1
+    image = np.full((40, 40), 10.0)
+    image[18:22, 18:22] = 100.0  # bright nucleus, dim surround
+    grown = seg.expand_labels(masks, (0.5, 0.5), 2.0)
+
+    plain = seg.measure_objects(masks, image, (0.5, 0.5))[0]
+    check(plain == seg.object_table(masks, image, (0.5, 0.5))[0], "without expansion it is the object table")
+
+    wide = seg.measure_objects(masks, image, (0.5, 0.5), expanded=grown)[0]
+    check(wide.n_voxels == 16 and wide.volume_um3 == plain.volume_um3, "the size is the nucleus's")
+    check(wide.equivalent_diameter_um == plain.equivalent_diameter_um, "so is the diameter")
+    check(wide.centroid_um == plain.centroid_um, "and the centroid")
+    n = int((grown == 1).sum())
+    expected = (16 * 100.0 + (n - 16) * 10.0) / n
+    check(abs(wide.mean - expected) < 1e-9, f"the mean is over the grown region ({wide.mean:.2f})")
+    check(abs(wide.integrated - (16 * 100.0 + (n - 16) * 10.0)) < 1e-6, "and so is the integrated intensity")
+    check(wide.maximum == 100.0 and wide.median == 10.0, "with its maximum and median")
+
+    unmeasured = seg.measure_objects(masks, None, (0.5, 0.5), expanded=grown)[0]
+    check(unmeasured.mean == 0.0 and unmeasured.n_voxels == 16, "no signal still gives the shape")
+
+
+def test_expansion_inside_a_run() -> None:
+    print("expansion inside a run")
+    seg.register_backend(_StubBackend())
+    image = np.random.default_rng(3).random((30, 30)).astype(np.float32)
+
+    off = seg.segment_volume(image, (0.5, 0.5), settings=seg.SegmentationSettings(backend="stub"))
+    check(off.expanded_masks is None and off.expand_um == 0.0, "off by default: one label map")
+
+    settings = seg.SegmentationSettings(backend="stub", expand_um=2.0)
+    on = seg.segment_volume(image, (0.5, 0.5), settings=settings)
+    check(np.array_equal(on.masks, off.masks), "the objects themselves are unchanged")
+    check(on.expanded_masks is not None and on.expanded_masks.shape == on.masks.shape,
+          "and a second map comes back on the same grid")
+    check(int((on.expanded_masks > 0).sum()) > int((on.masks > 0).sum()), "which is larger")
+    check(on.expand_um == 2.0, "with the distance it was grown by")
+
+
 def main() -> int:
     for test in (
         test_physical_units,
@@ -1123,6 +1195,9 @@ def main() -> int:
         test_the_gap_is_in_micrometres,
         test_maximum_diameter_filter,
         test_maximum_diameter_inside_a_run,
+        test_expansion_grows_objects_without_stealing,
+        test_expanded_intensities_keep_the_nucleus_shape,
+        test_expansion_inside_a_run,
     ):
         test()
         print()
