@@ -207,6 +207,30 @@ extend `_BRIGHTFIELD_TOKENS` in
 | Toggle Scale Bar | `Ctrl+B` | show / hide the calibrated scale bar |
 | Show/Hide Metadata | `Ctrl+M` | collapse the metadata dock |
 
+### Panels menu
+
+Only **Experiment setup** is open at first. Every other panel is in the
+**Panels** menu of the menu bar, after *Plugins*, ticked when open; open ones
+share a tab bar, closed ones take no room. A panel's own close button only puts
+it away.
+
+### Picking up where you left off
+
+Closing the window saves what it looked like, and the next launch puts it back:
+the open panels, each panel's settings, the last directory, the experiment folder
+with its selected samples, the images that were on screen, and the zoom and slider
+positions. A sample that is no longer there (a share not mounted today) is skipped
+without a message.
+
+Files given on the command line, or dropped on the app icon, are opened *instead*
+of last time's images; the panels and settings still come back. Start on an empty
+window with `microscopy-viewer --fresh`. The session lives in `session.json` in
+the per-user data directory, next to the log; deleting it does the same once.
+
+A panel's settings are read off its controls, so they only go back onto the same
+form: after an update that adds or removes a control in a panel, that panel
+starts from its defaults once.
+
 ### 3D and maximum-intensity projection
 
 **2D / 3D (MIP)** switches the viewer into a volume rendering and puts every image
@@ -1629,6 +1653,7 @@ python tests/test_regions.py        # region geometry and per-region counting �
 python tests/test_experiment.py     # folder scans, the in-file store, batch runs — no Qt needed
 python tests/test_naming.py         # reading the genotype out of a file name — no Qt needed
 python tests/test_onboarding.py     # the tour's script and its seen/not-seen memory — no Qt needed
+python tests/test_session.py        # the saved session file — no Qt needed
 python tests/test_analysis.py       # region morphometrics, channel statistics, the report folder — no Qt needed
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```

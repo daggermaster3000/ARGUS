@@ -48,6 +48,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="do not start the guided tour on first launch (the Tour button still works)",
     )
     parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="open on an empty window instead of the panels, folder and images of last time",
+    )
+    parser.add_argument(
         "--version", action="store_true", help="print the version and exit"
     )
     return parser.parse_args(argv)
@@ -102,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             splash=not args.no_splash,
             busy_overlay=not args.no_busy_overlay,
             tour=not args.no_tour,
+            restore_session=not args.fresh,
         )
     except BaseException as exc:  # noqa: BLE001 - last line of defence for a GUI app
         _fatal(exc)

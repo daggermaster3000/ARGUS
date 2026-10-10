@@ -104,6 +104,8 @@ class ExperimentWidget(QWidget):
         self._overview_window = None
         self._worker = None
         self._cancelled = False
+        #: ``(selected, opened)`` paths waiting for the scan :meth:`restore` started.
+        self._restoring = None
         self._relay = _Relay()
         self._relay.message.connect(self._log)
         self._relay.preview.connect(self._set_preview)
@@ -283,6 +285,45 @@ class ExperimentWidget(QWidget):
             return [e for e in self._entries if id(e) not in self._overview_ids]
         return [self._entries[row] for row in sorted(rows) if row < len(self._entries)]
 
+    def selected_paths(self) -> list[str]:
+        """The files selected in the grid — none when nothing is, unlike
+        :meth:`selected_entries`."""
+        return [str(item.data(PATH_ROLE)) for item in self._grid.selectedItems()]
+
+    def restore(self, folder, selected=(), opened=()) -> None:
+        """Come back to *folder* as it was left: scanned, with *selected* selected.
+
+        *opened* are the files the viewer has already put back on screen; the
+        label maps stored in them come up once the scan has found them, as they
+        do when a sample is opened from here.
+        """
+        self._folder_edit.setText(str(folder))
+        self._restoring = ([str(path) for path in selected], [str(path) for path in opened])
+        self.scan()
+        if self._worker is None:
+            # Nothing to scan, so nothing will come back to finish this.
+            self._restoring = None
+
+    def _finish_restore(self) -> None:
+        selected, opened = self._restoring
+        self._restoring = None
+        self._grid.clearSelection()
+        first = None
+        for row in range(self._grid.count()):
+            item = self._grid.item(row)
+            if str(item.data(PATH_ROLE)) in selected:
+                item.setSelected(True)
+                first = first or item
+        if first is not None:
+            self._grid.scrollToItem(first)
+        entries = [entry for entry in self._entries
+                   if str(entry.path) in opened and entry.readable]
+        if entries:
+            self._load_stored_labels(entries)
+            regions = getattr(self._app, "regions_widget", None)
+            if regions is not None:
+                regions.raise_layer()
+
     # -- scanning -------------------------------------------------------------
 
     def choose_folder(self) -> None:
@@ -413,7 +454,11 @@ class ExperimentWidget(QWidget):
                         "in their own window and at the end of the grid, marked “overview?”. "
                         "They are left out of “all samples” unless selected.")
         self._log(summary)
-        if self._overviews:
+        if self._restoring is not None:
+            # Coming back to last time's folder: the overview is a button away,
+            # not a window opened over the viewer at every launch.
+            self._finish_restore()
+        elif self._overviews:
             self.show_overview()
 
     # -- overviews ------------------------------------------------------------
@@ -472,6 +517,8 @@ class ExperimentWidget(QWidget):
     def _clear_worker(self) -> None:
         self._worker = None
         self._cancelled = False
+        # A scan that failed or was stopped: the next one is an ordinary scan.
+        self._restoring = None
         self._busy(False)
 
     def _on_error(self, exc) -> None:
