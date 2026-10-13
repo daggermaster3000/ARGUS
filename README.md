@@ -573,12 +573,14 @@ decimated — the conversion happens after the decimation, not before.
 | Setting | What it does |
 |---|---|
 | **Segment** | The channel that is labelled. A nuclear stain with the `nuclei` model is the reliable case. |
-| **Nuclei** | Optional second stain handed to Cellpose alongside the segmented one, which is how you get whole cells rather than nuclei: segment the membrane or cytoplasmic channel and point this at DAPI. The nuclei separate cells that touch and guarantee one mask per nucleus. Leave it at `— none —` for a single-channel run. |
+| **Nuclei** | Optional second stain handed to Cellpose alongside the segmented one, which is how you get whole cells rather than nuclei: segment the membrane or cytoplasmic channel and point this at DAPI. The nuclei separate cells that touch and guarantee one mask per nucleus. Leave it at `— none —` for a single-channel run. Not the same as **Membrane** below: this asks Cellpose to find the cell outlines, that one grows the nuclei out along a stain afterwards. |
 | **Measure** | The channel intensities are read from. Segment on DAPI, measure on the reporter, and every row is signal per nucleus. |
 | **Mode** | `2D + stitch` segments each plane and joins overlapping masks between planes — faster, and usually better on an anisotropic stack where a nucleus is four planes tall. `3D` computes flows in 3D. `2D per plane` leaves labels unconnected between planes. |
 | **Diameter** | Expected object diameter in µm. The setting that matters most; automatic is worth overriding. |
 | **Median filter** | Radius in pixels of a median filter applied to the channels before segmentation. `off` by default. Removes shot noise and hot pixels without moving edges. Costs time per image — see the estimate in the Batch panel. |
 | **Expand for intensity** | Grows every object by up to this many µm and measures intensities there as well. `off` by default. See *Measuring round the nucleus* below. |
+| **Membrane** | Optional membrane or cortical stain the objects are grown out along, turning nuclei into cells. Not segmented and never handed to Cellpose. Needs **Expand for intensity** set, which caps how far a cell may reach. See *Cells from a membrane channel*. |
+| **Smooth the membrane** / **Cell compactness** | Only used with a membrane channel: blur the stain before growing along it, and bias the cells towards round outlines. Both `off`. |
 | **Max solidity** | Objects rounder than this are dropped after the run: `0.985` throws out the convex discs that debris and beads produce and leaves the cells. `off` skips the measurement entirely; `1.000` measures every object and drops none, which is how you choose the cut. Needs scikit-image, which arrives with cellpose. |
 | **Segment at most** | Volumes above this are decimated **laterally** before segmentation — Z is left alone, since that is where objects are already only a few planes tall. The labels always come back on the original grid. |
 
@@ -661,6 +663,61 @@ them. Integrated intensity adds up exactly: nucleus + expansion = combined.
   per-image tables, the AnnData and everything read from them carry the extra
   columns, for the measured channel and — with *measure every channel* — for
   each of the others. Rerunning replaces the grown set together with the other.
+
+#### Cells from a membrane channel
+
+Growing by distance treats every cell as the same size, and two neighbours as
+meeting half way between their nuclei. Often they do not: one is twice the width
+of the other, and the line between them is a membrane that the image already
+shows. **Membrane** takes that channel and uses it.
+
+It is not segmented and never reaches Cellpose. The flood that grows each
+nucleus climbs the membrane stain instead of the distance, so where two cells
+meet they divide at the stain between them rather than at the midpoint, and a
+wide cell comes out wide. This is the seeded watershed of the Pelkmans lab's
+[abbott-segmentation-tasks](https://github.com/pelkmanslab/abbott-segmentation-tasks)
+— nuclei as the seeds, the membrane channel as the elevation — and it is worth
+having because a nuclear stain is the one channel Cellpose is reliable on, while
+cell outlines in a packed organoid are where it struggles.
+
+```
+Segment              DAPI                  → nuclei      (Cellpose)
+Membrane             E-cadherin / phalloidin
+Expand for intensity 8 µm                  → nuclei_cells (watershed)
+```
+
+Every cell keeps the label of its nucleus, so the two label sets line up object
+for object and `nuclei_cells` has exactly one nucleus per cell — the thing a
+two-channel Cellpose run gives you, without asking Cellpose to find the outlines.
+
+**A membrane divides neighbours; it does not stop a cell on its own.** A
+watershed divides the ground between the markers it is given, and a ridge is a
+dividing line only when there is a flood on each side of it. A nucleus with no
+neighbour therefore takes everything it can reach, membranes in the way or not.
+This is why **Expand for intensity** is not optional here: it caps how far a cell
+may reach from its nucleus, and with it at `off` nothing is grown at all and the
+panel says so. In packed tissue the cap only binds at the outer edge — which is
+exactly where there is no neighbour to divide against. (abbott has the same
+property and bounds the flood with a Fractal masking ROI table instead.)
+
+Two knobs, both used only with a membrane channel and both `off` by default:
+
+| Setting | What it does |
+|---|---|
+| **Smooth the membrane** | Blurs the stain, in µm, before growing along it. A membrane is a pixel or two wide and noisy, and one bright speck inside a cell stops that cell's growth where the speck is; a blur of about the membrane's own width fixes that without moving the membrane. Intensities are still measured on the raw channel. |
+| **Cell compactness** | Biases the cells towards round outlines — skimage's compact watershed, and abbott's one advanced parameter. Zero lets the stain decide the whole outline, which is right when it is continuous. Raise it when the stain has gaps and cells leak through them into their neighbours. |
+
+The columns are the same columns as a distance-grown run, on purpose: a membrane
+run and a distance run can then be put side by side. What changes is what they
+mean — the `expansion` columns are that cell's cytoplasm out to its own membrane
+rather than a shell of fixed thickness, and `nucleus + expansion` is the cell.
+
+The label set is named for what produced it, so the two cannot be confused or
+overwrite one another: `nuclei_cells` when a membrane channel grew them,
+`nuclei_expanded` when distance did. In the panel the layer is `<image> cells`
+rather than `<image> expanded labels`. In a batch run, a cycle that turns out not
+to have the stain is grown by distance and **says so** in its outcome message,
+under the `_expanded` name — never silently written as cells.
 
 ### File explorer
 
@@ -777,7 +834,7 @@ seven times as long.
 | Setting | What it does |
 |---|---|
 | **Wells** / **Acquisitions** | What to run. Everything, one row, one cycle — ctrl-click and shift-click. Wells that already carry the label set are marked. |
-| **Segment** / **Nuclei** / **Measure** | As in the Segmentation panel, but resolved per image by wavelength or label. **Nuclei** gives whole cells instead of nuclei. |
+| **Segment** / **Nuclei** / **Membrane** / **Measure** | As in the Segmentation panel, but resolved per image by wavelength or label. **Nuclei** gives whole cells instead of nuclei; **Membrane** grows the nuclei into cells along a stain, written as `<name>_cells`. A cycle that lacks a picked channel is reported in its outcome rather than quietly substituted. |
 | **every channel, in columns of its own** | Measure all the stains of each image rather than one, adding `Mean intensity (Green488-bCAT)` and its four companions per channel. One segmentation, four answers. |
 | **Median filter** | The same setting as the Segmentation panel's, shown here because a plate run is where it costs real time; the two are kept in step. The line under it estimates what it adds to the selected images. |
 | **Label set** | Name written under `labels/`. Give a second run a different name to keep both. |

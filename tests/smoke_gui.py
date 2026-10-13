@@ -525,9 +525,18 @@ def main() -> int:
     panel.refresh_device()
     check(bool(panel._device_label.text()), f"the device is shown before any run ({panel._device_label.text()})")
 
+    check(
+        panel._membrane_box.itemData(0) == "" and panel._membrane_box.count() > 1,
+        "the membrane list offers “none” first and then the layers",
+    )
+
     settings = panel.settings()
     check(settings.mode in sg.MODES, f"the mode combo yields a real mode ({settings.mode})")
     check(settings.diameter_um == 0.0, "the diameter starts on automatic rather than a made-up number")
+    check(
+        settings.membrane_smooth_um == 0.0 and settings.membrane_compactness == 0.0,
+        "the membrane knobs start off, so a run without one behaves as it always did",
+    )
 
     layer = app.viewer.layers[str(panel._channel_box.currentData())]
     image, voxel, problem = panel._snapshot(layer)

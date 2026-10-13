@@ -18,6 +18,13 @@ Three things here are more than a thin wrapper around ``model.eval``:
 * **Big volumes are decimated in XY and the masks put back on the full grid.** A
   558 Mvoxel stack does not fit any consumer card. The label map that comes back is
   always on the grid that went in, so it drops straight onto the source layer.
+* **Cells can come from a membrane channel rather than from Cellpose.** Segment
+  the nuclei, then grow each one out along a membrane stain until it meets the
+  stain or its neighbour: a seeded watershed, after the model rather than inside
+  it. This is the approach of ``pelkmanslab/abbott-segmentation-tasks``, and it
+  is worth having because a nuclear stain is the one channel Cellpose is reliable
+  on, while cell outlines in a packed organoid are where it struggles. Every cell
+  then has exactly one nucleus, with the same label. See :func:`expand_labels`.
 
 Cellpose 4 (``cpsam``, ``cpsam_v2``, the ``cpdino`` pair) and Cellpose 3 (``cyto3``,
 ``nuclei``, the rest of the zoo) have different call signatures — v4 dropped
@@ -204,6 +211,16 @@ class SegmentationSettings:
     #: nucleus reaches it. Size and shape stay those of the object as segmented.
     #: See :func:`expand_labels` and the compartments of :func:`object_table`.
     expand_um: float = 0.0
+    #: Bias the growth towards round objects — skimage's compact watershed. Only
+    #: used when a membrane channel is given; with the distance map the flood is
+    #: already as round as the gap allows.
+    membrane_compactness: float = 0.0
+    #: Blur the membrane channel by this much, **in µm**, before growing along
+    #: it. Zero is off. A membrane stain is one or two pixels wide and noisy, and
+    #: a single bright speck in the cytoplasm stops the flood dead; a blur of
+    #: about the membrane's own width is usually enough. It is used for the
+    #: growth only — intensities are still measured on the raw channel.
+    membrane_smooth_um: float = 0.0
 
     def resolved_model(self) -> str:
         """What to hand the backend: a path if one is set, else the model name."""
@@ -235,6 +252,10 @@ class SegmentationResult:
     warnings: list[str] = field(default_factory=list)
     #: Whether a nuclear channel was passed alongside the segmented one.
     used_nuclear_channel: bool = False
+    #: Whether :attr:`expanded_masks` was grown along a membrane channel rather
+    #: than purely by distance. It changes what the grown set *is* — cells, not
+    #: nuclei with a shell — so it is recorded rather than inferred.
+    used_membrane_channel: bool = False
     #: Median-filter radius the channels were smoothed with, in pixels; 0 for none.
     median_radius_px: int = 0
     #: Labels removed by the solidity filter, and the shape of everything measured.
@@ -1086,15 +1107,50 @@ def expand_labels(
     masks: np.ndarray,
     voxel_size_um: Sequence[float],
     distance_um: float,
+    boundary: np.ndarray | None = None,
+    compactness: float = 0.0,
+    smooth_um: float = 0.0,
 ) -> np.ndarray:
     """Grow every object outwards by up to *distance_um*, keeping its label.
 
-    A seeded watershed over the distance from the nearest object: each object
-    floods outwards from its own outline, two neighbours meet on the line
-    equidistant from both, and nothing is claimed further out than
-    *distance_um*. An object therefore always contains itself, never takes a
-    voxel of another, and in a dense field ends up with its share of the gap
-    rather than a full ring.
+    A seeded watershed: each object floods outwards from its own outline, two
+    neighbours meet where their floods collide, and nothing is claimed further
+    out than *distance_um*. An object therefore always contains itself, never
+    takes a voxel of another, and in a dense field ends up with its share of the
+    gap rather than a full ring.
+
+    What the flood climbs is the one real choice here:
+
+    * **No *boundary*** — the distance from the nearest object. Two neighbours
+      meet on the line equidistant from both, which is the best guess available
+      when nothing in the image says where one cell stops.
+    * **A *boundary* channel** — a membrane or cortical stain on the same grid.
+      The flood climbs the stain instead, so where two cells meet they divide at
+      the membrane between them rather than at the midpoint between their
+      nuclei. Two cells of very different widths then come out that way round,
+      which distance has no way of knowing. This is the seeded watershed of
+      ``pelkmanslab/abbott-segmentation-tasks``: nuclei as the seeds, the
+      membrane channel as the elevation.
+
+    **A membrane separates neighbours; it does not stop a cell on its own.** A
+    watershed divides the ground between the markers it is given, and a ridge is
+    only a dividing line when there is a flood on each side of it. One nucleus
+    with no neighbour therefore takes everything it can reach, membranes in the
+    way or not. This is the same in abbott, which bounds the flood with a masking
+    ROI table rather than with the stain.
+
+    Here it is bounded by *distance_um*, which is why that is not optional with a
+    boundary channel: it caps how far a cell may reach from its nucleus, and
+    without it every voxel of the image ends up inside some cell — the
+    background of a sparse field divided between the cells at its edge, and
+    their intensities then measured over it. In packed tissue the cap rarely
+    binds except at the outer edge, which is exactly where there is no
+    neighbour to divide against.
+
+    *compactness* above zero biases the flood towards round objects — skimage's
+    compact watershed, and abbott's one advanced parameter. *smooth_um* blurs the
+    boundary channel first, in µm, which keeps a noisy membrane from stopping the
+    flood a pixel after it starts. Neither does anything without a *boundary*.
 
     The distance is in µm against the voxel size, so on a stack whose planes are
     4 µm apart a 3 µm expansion stays in its plane instead of jumping one — a
@@ -1119,7 +1175,27 @@ def expand_labels(
     distance = ndimage.distance_transform_edt(labels == 0, sampling=voxel).astype(
         np.float32, copy=False
     )
-    grown = watershed(distance, markers=labels, mask=distance <= float(distance_um))
+    reach = distance <= float(distance_um)
+
+    elevation = distance
+    if boundary is not None:
+        stain = np.asarray(boundary)
+        if stain.shape != labels.shape:
+            raise ValueError(
+                f"the boundary channel is {tuple(stain.shape)} and the labels are "
+                f"{tuple(labels.shape)}; they have to be on the same grid"
+            )
+        elevation = stain.astype(np.float32, copy=True)
+        if smooth_um > 0:
+            sigma = tuple(float(smooth_um) / v if v > 0 else 0.0 for v in voxel)
+            # A plane 4 µm from the next is not blurred into it: the sigma of an
+            # axis is the requested distance in that axis's own voxels, so a
+            # single-plane stack and an anisotropic stack both stay put.
+            elevation = ndimage.gaussian_filter(elevation, sigma=sigma)
+
+    grown = watershed(
+        elevation, markers=labels, mask=reach, compactness=float(max(0.0, compactness))
+    )
     return grown.astype(labels.dtype, copy=False)
 
 
@@ -1129,6 +1205,7 @@ def segment_volume(
     settings: SegmentationSettings | None = None,
     progress: Callable[[str], None] | None = None,
     nuclei: np.ndarray | None = None,
+    membrane: np.ndarray | None = None,
 ) -> SegmentationResult:
     """Segment one 2D or 3D array and return its labels on the same grid.
 
@@ -1140,6 +1217,17 @@ def segment_volume(
     using the nuclear channel to tell touching cells apart and to guarantee one
     mask per nucleus. It is the difference between "the fluorescent blobs" and
     "the cells", and it is what the two-channel Cellpose models were trained on.
+
+    *membrane* is a different use of a membrane stain, and the two are worth not
+    confusing. It is not segmented and never reaches Cellpose: the objects are
+    grown out along it afterwards, by a seeded watershed that starts at each mask
+    and stops where the stain is bright. Segment the nuclei — which Cellpose is
+    reliable at — and let the membrane say how far each one's cell reaches. The
+    grown set lands in :attr:`SegmentationResult.expanded_masks` with the same
+    labels as the nuclei, so every cell has exactly one nucleus and the two can
+    be measured against each other. It needs
+    :attr:`SegmentationSettings.expand_um` to bound how far a cell may reach; see
+    :func:`expand_labels`.
     """
     settings = settings or SegmentationSettings()
     message = missing_backend_message(settings.backend)
@@ -1156,6 +1244,10 @@ def segment_volume(
     # z-stack and returns a fraction of the objects a plain 2D run finds. Plate
     # and slide-scanner data reaches us shaped this way all the time, so drop the
     # axis for the run and put it back on the labels.
+    # The shape the caller handed in, which is the shape the masks come back on
+    # and therefore the grid a membrane channel has to be on.
+    incoming_shape = tuple(array.shape)
+
     singleton_z = array.ndim == 3 and array.shape[0] == 1
     if singleton_z:
         array = array[0]
@@ -1172,6 +1264,25 @@ def segment_volume(
             f"{tuple(array.shape)}; they have to be on the same grid, so it was ignored."
         )
         nuclear = None
+
+    # The membrane channel is not segmented and is not decimated: it is used at
+    # the very end, against the masks on the grid the caller handed in. So it is
+    # checked against that grid and otherwise left exactly as acquired.
+    boundary = None if membrane is None else np.asarray(membrane)
+    if boundary is not None and tuple(boundary.shape) != incoming_shape:
+        warnings.append(
+            f"The membrane channel is {tuple(boundary.shape)} and the segmented channel is "
+            f"{incoming_shape}; they have to be on the same grid, so it was ignored."
+        )
+        boundary = None
+    if boundary is not None and settings.expand_um <= 0:
+        # Silence here would be the worst of the three options: the user picked a
+        # membrane channel, no cells came out, and nothing said why.
+        warnings.append(
+            "A membrane channel was given but the growth distance is zero, so there was "
+            "nothing to grow along. Set how far a cell may reach from its nucleus, in µm."
+        )
+        boundary = None
 
     # Denoise before anything measures or decimates the array, so the filter sees
     # the pixels as they were acquired and Cellpose sees the filtered ones.
@@ -1272,9 +1383,17 @@ def segment_volume(
     expanded = None
     if settings.expand_um > 0:
         if progress is not None:
-            progress(f"growing the objects by {settings.expand_um:g} µm")
+            along = " along the membrane channel" if boundary is not None else ""
+            progress(f"growing the objects by up to {settings.expand_um:g} µm{along}")
         try:
-            expanded = expand_labels(masks, padded_voxel[-masks.ndim:], settings.expand_um)
+            expanded = expand_labels(
+                masks,
+                padded_voxel[-masks.ndim:],
+                settings.expand_um,
+                boundary=boundary,
+                compactness=settings.membrane_compactness,
+                smooth_um=settings.membrane_smooth_um,
+            )
         except ImportError as exc:
             warnings.append(str(exc))
     padded_factors = ((1.0,) * (3 - len(factors)) + tuple(float(f) for f in factors))[-3:]
@@ -1292,6 +1411,7 @@ def segment_volume(
         elapsed_s=elapsed,
         warnings=warnings,
         used_nuclear_channel=nuclear is not None,
+        used_membrane_channel=boundary is not None and expanded is not None,
         median_radius_px=int(settings.median_radius_px),
         dropped_labels=dropped,
         shapes=shapes,
@@ -1346,6 +1466,13 @@ _STAT_KEYS = ("mean", "median", "std", "max", "integrated")
 #: segmented — keeps the unqualified columns it always had. The expansion is
 #: only what was added by growing: the ring round the nucleus, the cytoplasm.
 #: The two together are the whole grown region.
+#:
+#: The names do not change when the growth followed a membrane channel, and the
+#: columns are the same columns on purpose — a table from a membrane run and one
+#: from a distance run can then be put side by side, which is the comparison
+#: worth being able to make. What changes is what they mean: with a membrane
+#: channel the expansion is that cell's cytoplasm out to its own membrane rather
+#: than a shell of fixed thickness, and "nucleus + expansion" is the cell.
 COMPARTMENT_OBJECT = ""
 COMPARTMENT_EXPANSION = "expansion"
 COMPARTMENT_COMBINED = "nucleus + expansion"

@@ -534,6 +534,76 @@ def test_grown_objects_are_written_and_measured(directory: Path) -> None:
     check(again.counted(batch.STATUS_DONE) == 1, "run again with overwrite, the grown set is replaced with the other")
 
 
+def test_cells_are_grown_along_a_membrane_channel(directory: Path) -> None:
+    print("growing cells along a membrane channel across a plate")
+
+    if seg.shape_error() is not None:
+        print("  skip scikit-image is not installed")
+        return
+
+    seg.register_backend(_StubBackend())
+    plate = _make_plate(directory)
+    survey = batch.survey_plate(plate)
+    jobs = batch.select_jobs(survey, wells=["B/02"], acquisitions=[1])
+
+    check(
+        batch.expanded_label_name("nuclei") == "nuclei_expanded"
+        and batch.expanded_label_name("nuclei", membrane=True) == "nuclei_cells",
+        "the grown set is named for what grew it, so the two cannot overwrite each other",
+    )
+
+    settings = _stub_settings(
+        membrane=batch.ChannelPick(batch.BY_WAVELENGTH, "A02_C02"),
+        segmentation=seg.SegmentationSettings(
+            backend="batch-stub", model="stub-model", expand_um=2.0
+        ),
+    )
+    report = batch.run_batch(jobs, settings, survey=survey)
+    check(report.counted(batch.STATUS_DONE) == 1, f"the run completes ({report.outcomes[0].message})")
+    check(
+        batch.has_labels(jobs[0], "nuclei") and batch.has_labels(jobs[0], "nuclei_cells"),
+        "the nuclei and the cells are both in the image, under their own names",
+    )
+    check(
+        not batch.has_labels(jobs[0], "nuclei_expanded"),
+        "and nothing was written under the distance-grown name",
+    )
+
+    import zarr
+
+    group = zarr.open_group(str(jobs[0].path), mode="r")
+    nuclei = np.asarray(group["labels/nuclei/0"])
+    cells = np.asarray(group["labels/nuclei_cells/0"])
+    check(
+        nuclei.shape == cells.shape
+        and bool(np.all(cells[nuclei > 0] == nuclei[nuclei > 0]))
+        and int((cells > 0).sum()) > int((nuclei > 0).sum()),
+        "every cell carries its nucleus's own label, so the two line up object for object",
+    )
+
+    # A cycle that never had the stain must not quietly produce distance-grown
+    # objects under a name that claims they are cells.
+    absent = _stub_settings(
+        membrane=batch.ChannelPick(batch.BY_WAVELENGTH, "A09_C09"),
+        overwrite=True,
+        segmentation=seg.SegmentationSettings(
+            backend="batch-stub", model="stub-model", expand_um=2.0
+        ),
+    )
+    other = batch.select_jobs(survey, wells=["B/03"], acquisitions=[1])
+    quiet = batch.run_batch(other, absent, survey=survey)
+    check(
+        "No channel matching" in quiet.outcomes[0].message
+        and "grown by distance" in quiet.outcomes[0].message,
+        f"a missing membrane is reported ({quiet.outcomes[0].message!r})",
+    )
+    check(
+        batch.has_labels(other[0], "nuclei_expanded")
+        and not batch.has_labels(other[0], "nuclei_cells"),
+        "and what was written is named for what actually produced it",
+    )
+
+
 def test_which_channel_was_measured(directory: Path) -> None:
     print("the table says what it measured")
 
@@ -742,6 +812,7 @@ def main() -> int:
             ("resilience", test_one_bad_image_does_not_end_the_run),
             ("tables", test_tables),
             ("grown", test_grown_objects_are_written_and_measured),
+            ("cells", test_cells_are_grown_along_a_membrane_channel),
             ("measured", test_which_channel_was_measured),
             ("allchannels", test_measuring_every_channel),
             ("anndata", test_anndata_beside_the_tables),

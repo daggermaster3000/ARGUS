@@ -165,6 +165,20 @@ class BatchSegmentationWidget(QWidget):
         )
         form.addRow("Nuclei", self._nuclei_box)
 
+        self._membrane_box = QComboBox()
+        self._membrane_box.setToolTip(
+            "Optional membrane or cortical stain the segmented objects are grown out along, "
+            "turning nuclei into cells. It is not segmented and never reaches Cellpose: each "
+            "nucleus grows outwards afterwards and stops at the stain or at a neighbour.\n\n"
+            "Needs a growth distance — “Expand for intensity” in the Segmentation panel — "
+            "which caps how far a cell may reach from its nucleus. The cells are written "
+            "into each image as a label set of their own, named “<labels>_cells”.\n\n"
+            "Matched by wavelength id like the others, so a cycle that lacks the stain is "
+            "reported rather than silently grown by distance."
+        )
+        self._membrane_box.currentIndexChanged.connect(self.refresh_settings_summary)
+        form.addRow("Membrane", self._membrane_box)
+
         self._measure_box = QComboBox()
         self._measure_box.setToolTip(
             "The channel the per-object intensities are read from. Segment on DAPI and measure "
@@ -386,6 +400,7 @@ class BatchSegmentationWidget(QWidget):
         for box, extra in (
             (self._segment_box, None),
             (self._nuclei_box, NO_CHANNEL),
+            (self._membrane_box, NO_CHANNEL),
             (self._measure_box, SAME_CHANNEL),
         ):
             previous = box.currentData()
@@ -500,7 +515,15 @@ class BatchSegmentationWidget(QWidget):
         if self.median_radius() > 0:
             text += f", median r={self.median_radius()} px"
         if settings.expand_um > 0:
-            text += f", grown {settings.expand_um:g} µm for intensity"
+            membrane = self._membrane_box.currentData()
+            if membrane is not None and getattr(membrane, "is_set", False):
+                text += f", cells grown up to {settings.expand_um:g} µm along the membrane"
+            else:
+                text += f", grown {settings.expand_um:g} µm for intensity"
+        elif self._membrane_box.currentData() is not None:
+            # The one combination that silently does nothing, said out loud where
+            # the choice was made.
+            text += ", membrane picked but no growth distance set"
         if self._measure_all.isChecked():
             text += ", every channel measured"
         self._settings_summary.setText(f"{text} — {device.describe()}")
@@ -524,6 +547,7 @@ class BatchSegmentationWidget(QWidget):
             segmentation=self.segmentation_settings(),
             channel=self._segment_box.currentData() or batch.ChannelPick(),
             nuclei=self._nuclei_box.currentData() or batch.ChannelPick(),
+            membrane=self._membrane_box.currentData() or batch.ChannelPick(),
             measure=self._measure_box.currentData() or batch.ChannelPick(),
             measure_all_channels=self._measure_all.isChecked(),
             label_name=self._label_name.text().strip() or batch.DEFAULT_LABEL_NAME,

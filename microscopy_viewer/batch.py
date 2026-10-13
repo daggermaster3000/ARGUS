@@ -416,10 +416,16 @@ def read_channel(job: ImageJob, channel: ChannelInfo, level: int = 0) -> np.ndar
 #: What the grown copy of a label set is called: ``nuclei`` -> ``nuclei_expanded``.
 EXPANDED_SUFFIX = "_expanded"
 
+#: What it is called when the growth followed a membrane channel: ``nuclei`` ->
+#: ``nuclei_cells``. A different name because it is a different claim — these
+#: reach each cell's own membrane rather than a fixed distance — and a plate
+#: carrying both should not have one silently overwrite the other.
+CELLS_SUFFIX = "_cells"
 
-def expanded_label_name(name: str) -> str:
+
+def expanded_label_name(name: str, membrane: bool = False) -> str:
     """Name of the label set holding *name*'s objects grown for intensity."""
-    return f"{name}{EXPANDED_SUFFIX}"
+    return f"{name}{CELLS_SUFFIX if membrane else EXPANDED_SUFFIX}"
 
 
 def has_labels(job: ImageJob, name: str) -> bool:
@@ -565,6 +571,11 @@ class BatchSettings:
     channel: ChannelPick = field(default_factory=ChannelPick)
     #: Optional second stain handed to Cellpose alongside it, for whole cells.
     nuclei: ChannelPick = field(default_factory=ChannelPick)
+    #: Membrane or cortical stain the segmented objects are grown out along, to
+    #: turn nuclei into cells. Not segmented and never handed to Cellpose: it is
+    #: the elevation of a seeded watershed that runs afterwards, bounded by
+    #: ``segmentation.expand_um``. See :func:`segmentation.expand_labels`.
+    membrane: ChannelPick = field(default_factory=ChannelPick)
     #: Channel the per-object intensities are read from; unset means the
     #: segmented channel.
     measure: ChannelPick = field(default_factory=ChannelPick)
@@ -780,10 +791,25 @@ def segment_job(
             progress(f"{job.describe()}: reading {channel.describe()}")
         image = read_channel(job, channel, settings.level)
 
+        # Collected before the run, and joined to the run's own warnings below.
+        early_notes: list[str] = []
+
         nuclei = None
         nuclear = settings.nuclei.resolve(job.channels)
         if nuclear is not None and nuclear.index != channel.index:
             nuclei = read_channel(job, nuclear, settings.level)
+
+        membrane = None
+        boundary = settings.membrane.resolve(job.channels)
+        if settings.membrane.is_set and boundary is None:
+            # A cycle that is missing the stain would otherwise quietly produce
+            # distance-grown objects under a name that says they are cells.
+            early_notes.append(
+                f"No channel matching {settings.membrane.describe()} in this image; the "
+                "objects were grown by distance instead of along a membrane."
+            )
+        elif boundary is not None:
+            membrane = read_channel(job, boundary, settings.level)
 
         result = sg.segment_volume(
             image,
@@ -791,6 +817,7 @@ def segment_job(
             settings=settings.segmentation,
             progress=progress,
             nuclei=nuclei,
+            membrane=membrane,
         )
 
         write_labels(
@@ -805,13 +832,13 @@ def segment_job(
             # earlier run left under the name: the two must describe one run.
             write_labels(
                 job,
-                expanded_label_name(settings.label_name),
+                expanded_label_name(settings.label_name, result.used_membrane_channel),
                 result.expanded_masks,
                 level=settings.level,
                 overwrite=True,
             )
 
-        notes = list(result.warnings)
+        notes = early_notes + list(result.warnings)
         signal, measured_channel = image, channel
         wanted = settings.measure
         if wanted.is_set:

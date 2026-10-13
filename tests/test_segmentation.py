@@ -1198,6 +1198,166 @@ def test_cellpose_call_shape() -> None:
         check("nuclei" in seg.available_models("cellpose"), "cellpose 3 offers the model zoo")
 
 
+def test_cells_are_grown_along_a_membrane() -> None:
+    print("growing nuclei into cells along a membrane stain")
+
+    if not _has_skimage():
+        print("  skip scikit-image is not installed")
+        return
+
+    # Two nuclei in cells of very different widths: the membrane between them is
+    # the bright wall at x=34, which is nowhere near the midpoint between the two
+    # nuclei (x=25). Distance alone has to put the join at the midpoint; the
+    # stain puts it where the cells really meet.
+    masks = np.zeros((40, 60), dtype=np.int32)
+    masks[18:23, 8:13] = 1
+    masks[18:23, 38:43] = 2
+
+    membrane = np.zeros((40, 60), dtype=np.float32)
+    membrane[:, 34] = 100.0
+
+    cells = seg.expand_labels(masks, (1.0, 1.0), 40.0, boundary=membrane)
+    check(cells.shape == masks.shape and cells.dtype == masks.dtype, "the cells are on the same grid")
+    check(bool(np.all(cells[masks > 0] == masks[masks > 0])), "every cell contains its own nucleus")
+    check(set(np.unique(cells)) <= {0, 1, 2}, "one cell per nucleus, and no others invented")
+
+    row, plain = cells[20], seg.expand_labels(masks, (1.0, 1.0), 40.0)
+    check(
+        row[33] == 1 and row[34] == 2,
+        f"the two cells divide at the membrane (x=33 is {row[33]}, x=34 is {row[34]})",
+    )
+    check(
+        plain[20][33] == 2,
+        f"which is not where distance puts it: it divides at the midpoint ({plain[20][33]} at x=33)",
+    )
+    check(
+        int((cells == 1).sum()) > int((cells == 2).sum())
+        and int((plain == 1).sum()) < int((plain == 2).sum()),
+        "so the wider cell comes out wider, which distance gets the wrong way round",
+    )
+
+    # The property that makes the distance cap compulsory rather than advisory.
+    alone = np.zeros((40, 60), dtype=np.int32)
+    alone[18:23, 8:13] = 1
+    solo = seg.expand_labels(alone, (1.0, 1.0), 40.0, boundary=membrane)
+    check(
+        bool(solo[20][40]),
+        "a cell with no neighbour is not stopped by a membrane: a ridge only divides "
+        "two floods, so nothing holds it but the distance",
+    )
+    capped = seg.expand_labels(alone, (1.0, 1.0), 8.0, boundary=membrane)
+    check(
+        not capped[20][25] and int((capped == 1).sum()) < int((solo == 1).sum()),
+        "which is what the distance caps",
+    )
+
+    smoothed = seg.expand_labels(masks, (1.0, 1.0), 40.0, boundary=membrane, smooth_um=1.0)
+    check(set(np.unique(smoothed)) <= {0, 1, 2}, "blurring the membrane keeps one cell per nucleus")
+    check(
+        int((smoothed == 1).sum()) > int((smoothed == 2).sum()),
+        "and still divides at the membrane rather than the midpoint",
+    )
+    compact = seg.expand_labels(masks, (1.0, 1.0), 40.0, boundary=membrane, compactness=200.0)
+    check(
+        int((compact == 1).sum()) != int((cells == 1).sum()),
+        "compactness changes the outline rather than being ignored",
+    )
+
+    stack = np.zeros((1, 40, 60), dtype=np.int32)
+    stack[0] = masks
+    flat = seg.expand_labels(stack, (1.0, 1.0, 1.0), 40.0, boundary=membrane[np.newaxis])
+    check(bool(np.array_equal(flat[0], cells)), "a stack one plane deep grows in its plane")
+
+    try:
+        seg.expand_labels(masks, (1.0, 1.0), 40.0, boundary=membrane[:, :30])
+    except ValueError as exc:
+        check("same grid" in str(exc), f"a membrane on another grid is refused ({exc})")
+    else:
+        check(False, "a membrane on another grid should be refused")
+
+
+def test_the_membrane_channel_reaches_the_run() -> None:
+    print("the membrane channel reaches the run")
+
+    if not _has_skimage():
+        print("  skip scikit-image is not installed")
+        return
+
+    class _OneBlock(_StubBackend):
+        """One nucleus, in the middle of the left half."""
+
+        def segment(self, image, settings, diameter_px, anisotropy, device, progress=None,
+                    channel_axis=None):
+            shape = np.asarray(image).shape
+            masks = np.zeros(shape, dtype=np.int32)
+            masks[..., 18:23, 8:13] = 1
+            return masks, {}
+
+    seg.register_backend(_OneBlock())
+    image = np.zeros((40, 60), dtype=np.float32)
+    membrane = np.zeros((40, 60), dtype=np.float32)
+    membrane[:, 34] = 100.0
+
+    said: list[str] = []
+    run = seg.segment_volume(
+        image,
+        (1.0, 1.0),
+        settings=seg.SegmentationSettings(backend="stub", expand_um=40.0),
+        membrane=membrane,
+        progress=said.append,
+    )
+    check(run.used_membrane_channel, "the result records that a membrane was used")
+    check(run.expanded_masks is not None, "and the grown objects come back")
+    check(any("membrane" in line for line in said), f"the run says so ({said[-1]})")
+
+    plain = seg.segment_volume(
+        image, (1.0, 1.0), settings=seg.SegmentationSettings(backend="stub", expand_um=40.0)
+    )
+    check(not plain.used_membrane_channel, "without one it says that too")
+
+    # The two mistakes worth being told about rather than guessing at.
+    no_reach = seg.segment_volume(
+        image, (1.0, 1.0), settings=seg.SegmentationSettings(backend="stub"), membrane=membrane
+    )
+    check(
+        no_reach.expanded_masks is None and not no_reach.used_membrane_channel,
+        "a membrane with no growth distance grows nothing",
+    )
+    check(
+        any("growth distance is zero" in note for note in no_reach.warnings),
+        f"and says why rather than silently doing nothing ({no_reach.warnings})",
+    )
+
+    wrong = seg.segment_volume(
+        image,
+        (1.0, 1.0),
+        settings=seg.SegmentationSettings(backend="stub", expand_um=40.0),
+        membrane=membrane[:, :30],
+    )
+    check(
+        not wrong.used_membrane_channel and wrong.expanded_masks is not None,
+        "a membrane on the wrong grid is dropped, and the objects are still grown by distance",
+    )
+    check(
+        any("same grid" in note for note in wrong.warnings),
+        f"with a warning saying so ({wrong.warnings})",
+    )
+
+    flat = seg.segment_volume(
+        image[np.newaxis],
+        (1.0, 1.0, 1.0),
+        settings=seg.SegmentationSettings(backend="stub", expand_um=40.0),
+        membrane=membrane[np.newaxis],
+    )
+    check(
+        flat.used_membrane_channel
+        and flat.expanded_masks is not None
+        and flat.expanded_masks.shape == (1, 40, 60),
+        "a single-plane stack works, which is the shape plate data arrives in",
+    )
+
+
+
 def main() -> int:
     for test in (
         test_physical_units,
@@ -1207,6 +1367,8 @@ def main() -> int:
         test_objects_are_grown_without_taking_each_others_ground,
         test_intensity_in_the_nucleus_the_expansion_and_both,
         test_the_expansion_setting_reaches_the_run,
+        test_cells_are_grown_along_a_membrane,
+        test_the_membrane_channel_reaches_the_run,
         test_median_prefilter,
         test_the_median_setting_reaches_the_run,
         test_shape_descriptors,

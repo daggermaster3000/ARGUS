@@ -54,6 +54,9 @@ logger = get_logger("segmentation_widget")
 LABELS_SUFFIX = "labels"
 #: The same objects grown for intensity (see ``Expand for intensity``).
 EXPANDED_LABELS_SUFFIX = "expanded labels"
+#: The same, when the growth followed a membrane channel: these are cells, and
+#: calling them an expansion would undersell what is on screen.
+CELL_LABELS_SUFFIX = "cells"
 
 MODEL_FILTER = "Cellpose models (*);;All files (*)"
 
@@ -61,6 +64,8 @@ MODEL_FILTER = "Cellpose models (*);;All files (*)"
 SAME_CHANNEL = "— the segmented channel —"
 #: Entry for "segment one channel on its own", the default.
 NO_NUCLEI = "— none —"
+#: Entry for "grow by distance rather than along a stain", the default.
+NO_MEMBRANE = "— none —"
 
 
 def _short_name(layer) -> str:
@@ -146,6 +151,21 @@ class SegmentationWidget(QWidget):
             "Leave it at “none” to segment a single channel on its own."
         )
         form.addRow("Nuclei", self._nuclei_box)
+
+        self._membrane_box = QComboBox()
+        self._membrane_box.setToolTip(
+            "Optional membrane or cortical stain used to turn the segmented nuclei into "
+            "cells. It is not segmented and never reaches Cellpose: each nucleus is grown "
+            "outwards afterwards and stops where the stain is bright or where it meets a "
+            "neighbour, so a cell follows its own membrane instead of a fixed radius.\n\n"
+            "Segment DAPI, give the membrane here, and set “Expand for intensity” to how "
+            "far a cell may reach from its nucleus — that distance still caps the growth, "
+            "and without it nothing is grown at all. Every cell keeps the label of its "
+            "nucleus, so the two layers line up object for object.\n\n"
+            "This is the seeded watershed of the Pelkmans lab's "
+            "abbott-segmentation-tasks. Leave it at “none” to grow by distance alone."
+        )
+        form.addRow("Membrane", self._membrane_box)
 
         self._measure_box = QComboBox()
         self._measure_box.setToolTip(
@@ -284,6 +304,40 @@ class SegmentationWidget(QWidget):
             "exported table; the Objects tab shows the object's own."
         )
         form.addRow("Expand for intensity", self._expand)
+
+        self._membrane_smooth = QDoubleSpinBox()
+        self._membrane_smooth.setRange(0.0, 20.0)
+        self._membrane_smooth.setDecimals(1)
+        self._membrane_smooth.setSingleStep(0.5)
+        self._membrane_smooth.setValue(0.0)
+        self._membrane_smooth.setSuffix(" µm")
+        self._membrane_smooth.setSpecialValueText("off")
+        self._membrane_smooth.setToolTip(
+            "Blur the membrane channel before growing along it. Only used when a membrane "
+            "channel is picked.\n\n"
+            "A membrane stain is a pixel or two wide and noisy, and a single bright speck "
+            "inside a cell stops that cell's growth where the speck is. Blurring by about "
+            "the membrane's own width is usually enough to stop that without moving the "
+            "membrane. Intensities are still measured on the raw channel."
+        )
+        form.addRow("Smooth the membrane", self._membrane_smooth)
+
+        self._membrane_compactness = QDoubleSpinBox()
+        self._membrane_compactness.setRange(0.0, 1000.0)
+        self._membrane_compactness.setDecimals(1)
+        self._membrane_compactness.setSingleStep(10.0)
+        self._membrane_compactness.setValue(0.0)
+        self._membrane_compactness.setSpecialValueText("off")
+        self._membrane_compactness.setToolTip(
+            "Bias the cells towards round shapes. Only used when a membrane channel is "
+            "picked.\n\n"
+            "Zero lets the stain decide the whole outline, which is right when the membrane "
+            "is continuous. Raise it when the stain has gaps and cells leak through them "
+            "into their neighbours — the growth then prefers to stay near its own nucleus. "
+            "It is skimage's compact watershed, and the one advanced parameter the "
+            "abbott-segmentation-tasks seeded watershed exposes."
+        )
+        form.addRow("Cell compactness", self._membrane_compactness)
 
         self._median = QSpinBox()
         self._median.setRange(0, 10)
@@ -450,6 +504,7 @@ class SegmentationWidget(QWidget):
             for box, extra in (
                 (self._channel_box, None),
                 (self._nuclei_box, NO_NUCLEI),
+                (self._membrane_box, NO_MEMBRANE),
                 (self._measure_box, SAME_CHANNEL),
             ):
                 previous = box.currentData()
@@ -526,6 +581,8 @@ class SegmentationWidget(QWidget):
             max_solidity=float(self._max_solidity.value()),
             median_radius_px=int(self._median.value()),
             expand_um=float(self._expand.value()),
+            membrane_smooth_um=float(self._membrane_smooth.value()),
+            membrane_compactness=float(self._membrane_compactness.value()),
             normalize=self._normalize.isChecked(),
             use_gpu=self._use_gpu.isChecked(),
             batch_size=int(self._batch_size.value()),
@@ -619,6 +676,20 @@ class SegmentationWidget(QWidget):
                 "The nuclear channel is the channel being segmented; it was segmented on its own."
             )
 
+        membrane_name = str(self._membrane_box.currentData() or "")
+        membrane = None
+        if membrane_name and membrane_name != source_name:
+            membrane, _membrane_voxel, membrane_problem = self._snapshot(
+                self._layer_named(membrane_name)
+            )
+            if membrane is None:
+                problems.append(membrane_problem or f"“{membrane_name}” could not be read.")
+        elif membrane_name == source_name:
+            problems.append(
+                "The membrane channel is the channel being segmented, so there was nothing "
+                "to grow along; the objects were grown by distance instead."
+            )
+
         measure_name = str(self._measure_box.currentData() or "") or source_name
         measure_layer = self._layer_named(measure_name)
         signal, _signal_voxel, signal_problem = self._snapshot(measure_layer)
@@ -635,9 +706,10 @@ class SegmentationWidget(QWidget):
         settings = self.settings()
         self._run_button.setEnabled(False)
         with_nuclei = "" if nuclei is None else f" with nuclei from {nuclei_name}"
+        with_membrane = "" if membrane is None else f", cells along {membrane_name}"
         self._status.setText(
             f"Segmenting {_short_name(source)} ({'×'.join(str(n) for n in image.shape)})"
-            f"{with_nuclei} on {self._device_label.text()}…"
+            f"{with_nuclei}{with_membrane} on {self._device_label.text()}…"
         )
 
         def _progress(text: str) -> None:
@@ -647,7 +719,12 @@ class SegmentationWidget(QWidget):
 
         def _work():
             result = sg.segment_volume(
-                image, voxel, settings=settings, progress=_progress, nuclei=nuclei
+                image,
+                voxel,
+                settings=settings,
+                progress=_progress,
+                nuclei=nuclei,
+                membrane=membrane,
             )
             # The shapes are already measured when the filter ran; measuring them
             # again for the table would double the cost of the slowest step.
@@ -712,10 +789,17 @@ class SegmentationWidget(QWidget):
             summary += f", median r={result.median_radius_px} px"
         summary += ")."
         if result.expanded_masks is not None:
-            summary += (
-                f" Grown {result.expand_um:g} µm: intensities also measured in the "
-                "expansion and in nucleus + expansion (see the exported table)."
-            )
+            if result.used_membrane_channel:
+                summary += (
+                    f" Cells grown along the membrane, up to {result.expand_um:g} µm from "
+                    "each nucleus: intensities also measured in the cytoplasm and in "
+                    "the whole cell (see the exported table)."
+                )
+            else:
+                summary += (
+                    f" Grown {result.expand_um:g} µm: intensities also measured in the "
+                    "expansion and in nucleus + expansion (see the exported table)."
+                )
         if result.n_dropped:
             summary += (
                 f" {result.n_dropped} dropped above solidity "
@@ -739,9 +823,16 @@ class SegmentationWidget(QWidget):
             if layer_name in self._viewer.layers:
                 self._viewer.layers.remove(layer_name)
             scale = result.voxel_size_um[-result.masks.ndim:]
-            grown_name = f"{base} {EXPANDED_LABELS_SUFFIX}"
-            if grown_name in self._viewer.layers:
-                self._viewer.layers.remove(grown_name)
+            grown_suffix = (
+                CELL_LABELS_SUFFIX if result.used_membrane_channel else EXPANDED_LABELS_SUFFIX
+            )
+            # Both names are cleared: a run with a membrane channel after one
+            # without should not leave the previous grown set on screen beside
+            # its replacement, where the two would be taken for one.
+            for stale in (EXPANDED_LABELS_SUFFIX, CELL_LABELS_SUFFIX):
+                if f"{base} {stale}" in self._viewer.layers:
+                    self._viewer.layers.remove(f"{base} {stale}")
+            grown_name = f"{base} {grown_suffix}"
             if result.expanded_masks is not None:
                 # Underneath the objects themselves, and faint: the nucleus is
                 # what was found, the ring round it is where else it was measured.
