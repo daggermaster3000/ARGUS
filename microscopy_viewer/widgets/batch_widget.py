@@ -499,6 +499,8 @@ class BatchSegmentationWidget(QWidget):
             text += f", solidity ≤ {settings.max_solidity:g}"
         if self.median_radius() > 0:
             text += f", median r={self.median_radius()} px"
+        if settings.expand_um > 0:
+            text += f", grown {settings.expand_um:g} µm for intensity"
         if self._measure_all.isChecked():
             text += ", every channel measured"
         self._settings_summary.setText(f"{text} — {device.describe()}")

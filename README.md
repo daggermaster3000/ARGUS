@@ -578,6 +578,7 @@ decimated — the conversion happens after the decimation, not before.
 | **Mode** | `2D + stitch` segments each plane and joins overlapping masks between planes — faster, and usually better on an anisotropic stack where a nucleus is four planes tall. `3D` computes flows in 3D. `2D per plane` leaves labels unconnected between planes. |
 | **Diameter** | Expected object diameter in µm. The setting that matters most; automatic is worth overriding. |
 | **Median filter** | Radius in pixels of a median filter applied to the channels before segmentation. `off` by default. Removes shot noise and hot pixels without moving edges. Costs time per image — see the estimate in the Batch panel. |
+| **Expand for intensity** | Grows every object by up to this many µm and measures intensities there as well. `off` by default. See *Measuring round the nucleus* below. |
 | **Max solidity** | Objects rounder than this are dropped after the run: `0.985` throws out the convex discs that debris and beads produce and leaves the cells. `off` skips the measurement entirely; `1.000` measures every object and drops none, which is how you choose the cut. Needs scikit-image, which arrives with cellpose. |
 | **Segment at most** | Volumes above this are decimated **laterally** before segmentation — Z is left alone, since that is where objects are already only a few planes tall. The labels always come back on the original grid. |
 
@@ -619,6 +620,47 @@ python -m pip install ".[segmentation]"
 Without it the panel still appears and says exactly that, the way the atlas panel
 reports a missing `antspyx`. `Backend` is a three-method interface here too, so
 StarDist or micro-SAM can be added beside Cellpose.
+
+#### Measuring round the nucleus
+
+A reporter in the cytoplasm is not under the nucleus that was segmented, and the
+nucleus's own mean misses it. **Expand for intensity** grows every object
+outwards by up to the distance given, in µm, and measures there too.
+
+The growing is a seeded watershed over the distance from the nearest object:
+each object floods out from its own outline, two neighbours meet on the line
+equidistant from both, and nothing is claimed further out than the distance. So
+an object always contains itself, never takes a pixel of another, and in a dense
+field ends up with its share of the gap rather than a full ring. The distance is
+in µm against the voxel size: on a stack whose planes are 4 µm apart, a 3 µm
+expansion stays in its plane. Objects dropped by **Max solidity** are not grown.
+
+Every channel measured is then measured in three places, each with its own set
+of columns (mean, median, std, max, integrated):
+
+| Compartment | What it is | Column |
+|---|---|---|
+| the object | the nucleus as segmented | `Mean intensity`, `Mean intensity (Green488)` — unchanged |
+| expansion | only what growing added: the ring round the nucleus | `Mean intensity, expansion`, `Mean intensity, expansion (Green488)` |
+| nucleus + expansion | the two together: the whole grown region | `Mean intensity, nucleus + expansion`, `… (Green488)` |
+
+with `Volume, expansion (µm³)` and `Volume, nucleus + expansion (µm³)` beside
+them. Integrated intensity adds up exactly: nucleus + expansion = combined.
+
+- **Size, position and shape are the nucleus's**, whatever the expansion: the
+  count, the volume, the diameter and the solidity describe what was segmented.
+- An object with no room to grow — packed in among its neighbours — has an
+  empty cell in its expansion columns, not a zero. Its combined columns are then
+  its own.
+- With the setting off, the table is exactly the one it always was.
+- In the panel the grown objects are added as a second, fainter labels layer,
+  `<image> expanded labels`, under the objects themselves. The Objects tab
+  shows the object's own columns; **Export** writes all of them.
+- In a batch run the grown objects are written into each image as a second
+  label set beside the first, `<name>_expanded` (`nuclei_expanded`), and the
+  per-image tables, the AnnData and everything read from them carry the extra
+  columns, for the measured channel and — with *measure every channel* — for
+  each of the others. Rerunning replaces the grown set together with the other.
 
 ### File explorer
 

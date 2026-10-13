@@ -52,6 +52,8 @@ logger = get_logger("segmentation_widget")
 #: Suffix on the Labels layer a run produces, so a second run on another channel
 #: is distinguishable and the source stays obvious in the layer list.
 LABELS_SUFFIX = "labels"
+#: The same objects grown for intensity (see ``Expand for intensity``).
+EXPANDED_LABELS_SUFFIX = "expanded labels"
 
 MODEL_FILTER = "Cellpose models (*);;All files (*)"
 
@@ -260,6 +262,28 @@ class SegmentationWidget(QWidget):
             "Needs scikit-image, which comes with cellpose."
         )
         form.addRow("Max solidity", self._max_solidity)
+
+        self._expand = QDoubleSpinBox()
+        self._expand.setRange(0.0, 100.0)
+        self._expand.setDecimals(1)
+        self._expand.setSingleStep(0.5)
+        self._expand.setValue(0.0)
+        self._expand.setSuffix(" µm")
+        self._expand.setSpecialValueText("off")
+        self._expand.setToolTip(
+            "Grow every object by up to this far and measure intensities there as well. A "
+            "reporter in the cytoplasm is not under the nucleus that was segmented; growing "
+            "the nucleus reaches it. Neighbours split the gap between them (a watershed), so "
+            "no object takes another's.\n\n"
+            "Every channel is then measured three ways, each with its own columns:\n"
+            "• the object itself (the nucleus) — the columns there always were;\n"
+            "• “expansion” — only what growing added, the ring round the nucleus;\n"
+            "• “nucleus + expansion” — the two together.\n\n"
+            "Size, position and shape stay those of the object as segmented. The grown "
+            "objects are added as a second labels layer. The extra columns are in the "
+            "exported table; the Objects tab shows the object's own."
+        )
+        form.addRow("Expand for intensity", self._expand)
 
         self._median = QSpinBox()
         self._median.setRange(0, 10)
@@ -501,6 +525,7 @@ class SegmentationWidget(QWidget):
             min_size=int(self._min_size.value()),
             max_solidity=float(self._max_solidity.value()),
             median_radius_px=int(self._median.value()),
+            expand_um=float(self._expand.value()),
             normalize=self._normalize.isChecked(),
             use_gpu=self._use_gpu.isChecked(),
             batch_size=int(self._batch_size.value()),
@@ -631,6 +656,7 @@ class SegmentationWidget(QWidget):
                 signal,
                 result.voxel_size_um[-image.ndim:],
                 shapes=result.shapes,
+                expanded=result.expanded_masks,
             )
             return result, stats
 
@@ -685,6 +711,11 @@ class SegmentationWidget(QWidget):
         if result.median_radius_px:
             summary += f", median r={result.median_radius_px} px"
         summary += ")."
+        if result.expanded_masks is not None:
+            summary += (
+                f" Grown {result.expand_um:g} µm: intensities also measured in the "
+                "expansion and in nucleus + expansion (see the exported table)."
+            )
         if result.n_dropped:
             summary += (
                 f" {result.n_dropped} dropped above solidity "
@@ -708,6 +739,18 @@ class SegmentationWidget(QWidget):
             if layer_name in self._viewer.layers:
                 self._viewer.layers.remove(layer_name)
             scale = result.voxel_size_um[-result.masks.ndim:]
+            grown_name = f"{base} {EXPANDED_LABELS_SUFFIX}"
+            if grown_name in self._viewer.layers:
+                self._viewer.layers.remove(grown_name)
+            if result.expanded_masks is not None:
+                # Underneath the objects themselves, and faint: the nucleus is
+                # what was found, the ring round it is where else it was measured.
+                self._viewer.add_labels(
+                    result.expanded_masks,
+                    name=grown_name,
+                    scale=tuple(float(v) for v in scale),
+                    opacity=0.35,
+                )
             self._viewer.add_labels(
                 result.masks,
                 name=layer_name,

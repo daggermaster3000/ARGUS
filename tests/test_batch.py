@@ -447,6 +447,93 @@ def test_tables(directory: Path) -> None:
     )
 
 
+def test_grown_objects_are_written_and_measured(directory: Path) -> None:
+    print("growing the objects across a plate")
+
+    try:
+        import pandas as pd
+    except ImportError:
+        print("  skip pandas is not installed")
+        return
+    if seg.shape_error() is not None:
+        print("  skip scikit-image is not installed")
+        return
+
+    seg.register_backend(_StubBackend())
+    plate = _make_plate(directory)
+    survey = batch.survey_plate(plate)
+    jobs = batch.select_jobs(survey, wells=["B/02"], acquisitions=[1])
+    tables = directory / "tables"
+
+    plain = _stub_settings(write_tables=True, table_dir=tables, measure_all_channels=True)
+    batch.run_batch(jobs, plain, survey=survey)
+    before = pd.read_csv(tables / "B_02_0.csv")
+    check(
+        not batch.has_labels(jobs[0], batch.expanded_label_name("nuclei")),
+        "a run that does not grow the objects writes one label set, as before",
+    )
+    check(not any("expansion" in column for column in before.columns), "and the table it always wrote")
+
+    grown = _stub_settings(
+        write_tables=True, table_dir=tables, measure_all_channels=True, overwrite=True,
+        segmentation=seg.SegmentationSettings(backend="batch-stub", model="stub-model", expand_um=2.0),
+    )
+    report = batch.run_batch(jobs, grown, survey=survey)
+    check(report.counted(batch.STATUS_DONE) == 1, f"the run completes ({report.outcomes[0].message})")
+    check(batch.expanded_label_name("nuclei") == "nuclei_expanded", "the grown label set is named after the other")
+    check(
+        batch.has_labels(jobs[0], "nuclei") and batch.has_labels(jobs[0], "nuclei_expanded"),
+        "both label sets are in the image afterwards",
+    )
+
+    import zarr
+
+    group = zarr.open_group(str(jobs[0].path), mode="r")
+    nuclei = np.asarray(group["labels/nuclei/0"])
+    wider = np.asarray(group["labels/nuclei_expanded/0"])
+    check(
+        nuclei.shape == wider.shape and bool(np.all(wider[nuclei > 0] == nuclei[nuclei > 0]))
+        and int((wider > 0).sum()) > int((nuclei > 0).sum()),
+        "the grown set holds the same objects, larger, on the same grid",
+    )
+
+    after = pd.read_csv(tables / "B_02_0.csv")
+    check(
+        list(after.columns[:16]) == list(before.columns[:16])
+        and [c for c in after.columns if "expansion" not in c] == list(before.columns),
+        "the object's own columns lead the table, and without the expansion ones it is the old table",
+    )
+    check(
+        {"Mean intensity, expansion", "Mean intensity, nucleus + expansion",
+         seg.EXPANSION_VOLUME, seg.COMBINED_VOLUME} <= set(after.columns),
+        "the measured channel has its expansion and combined columns, and their volumes",
+    )
+    named = [c for c in before.columns if c.startswith("Mean intensity (")]
+    check(
+        bool(named) and all(
+            c.replace("Mean intensity (", "Mean intensity, expansion (") in after.columns
+            and c.replace("Mean intensity (", "Mean intensity, nucleus + expansion (") in after.columns
+            for c in named
+        ),
+        f"and so has every other channel ({len(named)} of them)",
+    )
+    check(
+        bool(np.allclose(after["Mean intensity"], before["Mean intensity"]))
+        and bool(np.allclose(after["Volume (µm³)"], before["Volume (µm³)"])),
+        "the nucleus's own numbers are the ones a run without growing gives",
+    )
+    check(
+        bool(np.allclose(
+            after["Integrated intensity, nucleus + expansion"],
+            after["Integrated intensity"] + after["Integrated intensity, expansion"],
+        )),
+        "and nucleus + expansion add up to the combined, in the written table",
+    )
+
+    again = batch.run_batch(jobs, grown, survey=survey)
+    check(again.counted(batch.STATUS_DONE) == 1, "run again with overwrite, the grown set is replaced with the other")
+
+
 def test_which_channel_was_measured(directory: Path) -> None:
     print("the table says what it measured")
 
@@ -654,6 +741,7 @@ def main() -> int:
             ("run", test_a_run),
             ("resilience", test_one_bad_image_does_not_end_the_run),
             ("tables", test_tables),
+            ("grown", test_grown_objects_are_written_and_measured),
             ("measured", test_which_channel_was_measured),
             ("allchannels", test_measuring_every_channel),
             ("anndata", test_anndata_beside_the_tables),
