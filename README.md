@@ -1081,11 +1081,6 @@ the `.h5ad`, and read by every tab: the UMAP, the well display, one well's
 neighbourhood statistics, and the label set written back into the plate. A colour
 means the same thing everywhere, and cluster 3 is one thing rather than three.
 
-A file the viewer has just exported has no clustering, so the first time one is
-opened the page computes it and stores it — half a million objects is around half
-a minute, and the log in the console says where it is. After that it is on the
-file and opening it again is immediate.
-
 It is recomputed only when you press **Re-cluster**. Change a parameter and the
 sidebar says the settings have moved on; nothing is recomputed until you ask,
 because it is the one slow step on the page.
