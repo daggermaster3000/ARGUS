@@ -198,6 +198,12 @@ class SegmentationSettings:
     #: the label map comes back on the original grid and intensities are still
     #: measured on the raw channel.
     median_radius_px: int = 0
+    #: Grow every object by up to this far, **in µm**, to make the region its
+    #: intensities are also measured over. Zero is off. A reporter in the
+    #: cytoplasm is not under the nucleus that was segmented; growing the
+    #: nucleus reaches it. Size and shape stay those of the object as segmented.
+    #: See :func:`expand_labels` and the compartments of :func:`object_table`.
+    expand_um: float = 0.0
 
     def resolved_model(self) -> str:
         """What to hand the backend: a path if one is set, else the model name."""
@@ -234,6 +240,10 @@ class SegmentationResult:
     #: Labels removed by the solidity filter, and the shape of everything measured.
     dropped_labels: list[int] = field(default_factory=list)
     shapes: dict[int, dict[str, float]] = field(default_factory=dict)
+    #: The same objects grown by :attr:`expand_um`, on the same grid and with
+    #: the same labels; ``None`` when the run did not ask for it.
+    expanded_masks: np.ndarray | None = None
+    expand_um: float = 0.0
 
     @property
     def n_dropped(self) -> int:
@@ -1072,6 +1082,47 @@ def filter_round_objects(
     return drop_labels(masks, dropped), dropped, shapes
 
 
+def expand_labels(
+    masks: np.ndarray,
+    voxel_size_um: Sequence[float],
+    distance_um: float,
+) -> np.ndarray:
+    """Grow every object outwards by up to *distance_um*, keeping its label.
+
+    A seeded watershed over the distance from the nearest object: each object
+    floods outwards from its own outline, two neighbours meet on the line
+    equidistant from both, and nothing is claimed further out than
+    *distance_um*. An object therefore always contains itself, never takes a
+    voxel of another, and in a dense field ends up with its share of the gap
+    rather than a full ring.
+
+    The distance is in µm against the voxel size, so on a stack whose planes are
+    4 µm apart a 3 µm expansion stays in its plane instead of jumping one — a
+    count of voxels would not know the difference. A stack one plane deep is
+    grown in its plane.
+    """
+    labels = np.asarray(masks)
+    if distance_um <= 0 or not labels.any():
+        return labels.copy()
+
+    try:
+        from scipy import ndimage
+        from skimage.segmentation import watershed
+    except ImportError as exc:
+        raise ImportError(
+            "Growing the objects needs scikit-image and scipy, which come with cellpose."
+        ) from exc
+
+    voxel = tuple(float(v) for v in tuple(voxel_size_um)[-labels.ndim:])
+    if len(voxel) < labels.ndim:
+        voxel = (1.0,) * (labels.ndim - len(voxel)) + voxel
+    distance = ndimage.distance_transform_edt(labels == 0, sampling=voxel).astype(
+        np.float32, copy=False
+    )
+    grown = watershed(distance, markers=labels, mask=distance <= float(distance_um))
+    return grown.astype(labels.dtype, copy=False)
+
+
 def segment_volume(
     image: np.ndarray,
     voxel_size_um: Sequence[float] = (1.0, 1.0, 1.0),
@@ -1215,6 +1266,17 @@ def segment_volume(
         diameter_px = float(estimated)
 
     padded_voxel = ((1.0,) * (3 - len(voxel)) + tuple(voxel))[-3:]
+
+    # Grown last, from the objects that survived the filter: a disc that was
+    # dropped as debris must not keep a share of its neighbours' surroundings.
+    expanded = None
+    if settings.expand_um > 0:
+        if progress is not None:
+            progress(f"growing the objects by {settings.expand_um:g} µm")
+        try:
+            expanded = expand_labels(masks, padded_voxel[-masks.ndim:], settings.expand_um)
+        except ImportError as exc:
+            warnings.append(str(exc))
     padded_factors = ((1.0,) * (3 - len(factors)) + tuple(float(f) for f in factors))[-3:]
 
     result = SegmentationResult(
@@ -1233,6 +1295,8 @@ def segment_volume(
         median_radius_px=int(settings.median_radius_px),
         dropped_labels=dropped,
         shapes=shapes,
+        expanded_masks=expanded,
+        expand_um=float(settings.expand_um) if expanded is not None else 0.0,
     )
     logger.info(
         "segmented %s in %.1f s: %d object(s), model %s, %s",
@@ -1277,10 +1341,31 @@ INTENSITY_STATS = (
 
 _STAT_KEYS = ("mean", "median", "std", "max", "integrated")
 
+#: Where an object's intensities are measured once it has been grown
+#: (:func:`expand_labels`). The object itself — the nucleus, when nuclei were
+#: segmented — keeps the unqualified columns it always had. The expansion is
+#: only what was added by growing: the ring round the nucleus, the cytoplasm.
+#: The two together are the whole grown region.
+COMPARTMENT_OBJECT = ""
+COMPARTMENT_EXPANSION = "expansion"
+COMPARTMENT_COMBINED = "nucleus + expansion"
+EXPANDED_COMPARTMENTS = (COMPARTMENT_EXPANSION, COMPARTMENT_COMBINED)
 
-def intensity_column(statistic: str, channel: str) -> str:
-    """Column name for one intensity statistic of one named channel."""
-    return f"{statistic} ({channel})" if channel else statistic
+#: Size columns written beside the intensities of the two grown compartments.
+EXPANSION_VOLUME = "Volume, expansion (µm³)"
+COMBINED_VOLUME = "Volume, nucleus + expansion (µm³)"
+
+
+def intensity_column(statistic: str, channel: str, compartment: str = COMPARTMENT_OBJECT) -> str:
+    """Column name for one intensity statistic of one channel in one compartment.
+
+    ``Mean intensity``, ``Mean intensity (Green488)``, ``Mean intensity,
+    expansion (Green488)``, ``Mean intensity, nucleus + expansion``. The object
+    itself is left unqualified so a table from a run without expansion has the
+    columns it always had.
+    """
+    name = f"{statistic}, {compartment}" if compartment else statistic
+    return f"{name} ({channel})" if channel else name
 
 
 def _check_signal(masks: np.ndarray, signal: np.ndarray, what: str) -> np.ndarray:
@@ -1298,6 +1383,22 @@ def _check_signal(masks: np.ndarray, signal: np.ndarray, what: str) -> np.ndarra
             "intensities can only be measured on the grid the objects are on"
         )
     return array.reshape(-1)
+
+
+def _region_stats(
+    flat_signal: np.ndarray, indices: np.ndarray, ids: np.ndarray, counts: np.ndarray, highest: int
+) -> dict[str, np.ndarray]:
+    """:func:`_intensity_stats` over one compartment, empty where it has no voxels.
+
+    An object packed in among its neighbours can have no expansion at all. Its
+    mean there is not zero — a zero would be read as "no signal" — it is
+    missing, and is written as NaN.
+    """
+    if indices.size == 0:
+        return {key: np.full(highest + 1, np.nan) for key in _STAT_KEYS}
+    stats = _intensity_stats(ids, flat_signal[indices].astype(np.float64), counts, highest)
+    empty = counts[: highest + 1] == 0
+    return {key: np.where(empty, np.nan, values) for key, values in stats.items()}
 
 
 def _intensity_stats(
@@ -1326,6 +1427,7 @@ def object_table(
     voxel_size_um: Sequence[float] = (1.0, 1.0, 1.0),
     shapes: dict[int, dict[str, float]] | None = None,
     extra_signals: Mapping[str, np.ndarray] | None = None,
+    expanded: np.ndarray | None = None,
 ) -> list[ObjectStat]:
     """Per-object size, position and intensity.
 
@@ -1338,6 +1440,18 @@ def object_table(
     one set of intensity columns per entry, named after the channel. That is how
     one segmentation answers a question about every stain of a 4i cycle without
     being run once per stain.
+
+    *expanded* is the same objects grown (:func:`expand_labels`), and adds, for
+    every channel measured, the intensities of two more compartments beside the
+    object's own:
+
+    * the object itself — the nucleus — in the unqualified columns, as always;
+    * the **expansion**: only what growing added, the ring round the nucleus;
+    * **nucleus + expansion**: the whole grown region, the two together.
+
+    Size, position and shape stay those of the object as segmented; the volume
+    of the two grown compartments is written beside their intensities. An object
+    with no room to grow has NaN in its expansion columns, not zero.
     """
     labels = np.asarray(masks)
     flat = labels.reshape(-1)
@@ -1367,9 +1481,41 @@ def object_table(
     while len(centroids) < 3:  # a 2D image has no Z centroid; it is reported as 0
         centroids.insert(0, np.zeros(highest + 1))
 
+    # The grown compartments: which voxels, and whose they are.
+    regions: list[tuple[str, np.ndarray, np.ndarray, np.ndarray]] = []
+    if expanded is not None:
+        grown = np.asarray(expanded)
+        if grown.shape != labels.shape:
+            raise ValueError(
+                f"the expanded labels are {tuple(grown.shape)} and the labels are "
+                f"{tuple(labels.shape)}; they have to be the same objects on the same grid"
+            )
+        grown_flat = grown.reshape(-1)
+        if not np.array_equal(grown_flat[indices], flat[indices]):
+            raise ValueError(
+                "the expanded labels are not these objects grown: an object does not "
+                "carry its own label where it was segmented"
+            )
+        combined_at = np.flatnonzero(grown_flat)
+        combined_ids = grown_flat[combined_at].astype(np.int64, copy=False)
+        if combined_ids.size and int(combined_ids.max()) > highest:
+            raise ValueError("the expanded labels hold objects the labels do not")
+        added = flat[combined_at] == 0
+        for compartment, at, whose in (
+            (COMPARTMENT_EXPANSION, combined_at[added], combined_ids[added]),
+            (COMPARTMENT_COMBINED, combined_at, combined_ids),
+        ):
+            regions.append((compartment, at, whose, np.bincount(whose, minlength=highest + 1)))
+
+    # (channel, compartment) -> statistics, in the order the columns are written.
+    grown_stats: dict[tuple[str, str], dict[str, np.ndarray]] = {}
+
     if signal is not None:
-        values = _check_signal(labels, signal, "the measured channel")[indices].astype(np.float64)
+        primary_flat = _check_signal(labels, signal, "the measured channel")
+        values = primary_flat[indices].astype(np.float64)
         primary = _intensity_stats(ids, values, counts, highest)
+        for compartment, at, whose, sizes in regions:
+            grown_stats[("", compartment)] = _region_stats(primary_flat, at, whose, sizes, highest)
     else:
         nothing = np.zeros(highest + 1)
         primary = {key: nothing for key in _STAT_KEYS}
@@ -1378,10 +1524,33 @@ def object_table(
 
     per_channel: dict[str, dict[str, np.ndarray]] = {}
     for name, array in (extra_signals or {}).items():
-        channel_values = _check_signal(labels, array, f"channel {str(name)!r}")[indices]
+        # Read once: the mapping may be reading the channel off disk.
+        channel_flat = _check_signal(labels, array, f"channel {str(name)!r}")
         per_channel[str(name)] = _intensity_stats(
-            ids, channel_values.astype(np.float64), counts, highest
+            ids, channel_flat[indices].astype(np.float64), counts, highest
         )
+        for compartment, at, whose, sizes in regions:
+            grown_stats[(str(name), compartment)] = _region_stats(
+                channel_flat, at, whose, sizes, highest
+            )
+
+    def _extra(label: int) -> dict[str, float]:
+        """One object's named columns: grown sizes, then channel by channel."""
+        row: dict[str, float] = {}
+        for compartment, _at, _whose, sizes in regions:
+            column = EXPANSION_VOLUME if compartment == COMPARTMENT_EXPANSION else COMBINED_VOLUME
+            row[column] = float(sizes[label]) * voxel_volume
+        for channel in ("", *per_channel):
+            if channel:
+                for column, key in zip(INTENSITY_STATS, _STAT_KEYS):
+                    row[intensity_column(column, channel)] = float(per_channel[channel][key][label])
+            for compartment in EXPANDED_COMPARTMENTS:
+                stats_here = grown_stats.get((channel, compartment))
+                if stats_here is None:
+                    continue
+                for column, key in zip(INTENSITY_STATS, _STAT_KEYS):
+                    row[intensity_column(column, channel, compartment)] = float(stats_here[key][label])
+        return row
 
     shape_by_label = shapes or {}
     blank = {name: float("nan") for name in SHAPE_COLUMNS}
@@ -1409,11 +1578,7 @@ def object_table(
                 std=float(stds[label]),
                 maximum=float(maxima[label]),
                 integrated=float(sums[label]),
-                extra={
-                    intensity_column(column, name): float(channel[key][label])
-                    for name, channel in per_channel.items()
-                    for column, key in zip(INTENSITY_STATS, _STAT_KEYS)
-                },
+                extra=_extra(label),
                 solidity=float(shape.get("solidity", float("nan"))),
                 circularity=float(shape.get("circularity", float("nan"))),
                 eccentricity=float(shape.get("eccentricity", float("nan"))),

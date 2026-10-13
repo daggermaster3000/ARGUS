@@ -406,6 +406,268 @@ def test_every_channel_can_be_measured() -> None:
     )
 
 
+def test_objects_are_grown_without_taking_each_others_ground() -> None:
+    print("growing the objects")
+
+    if not _has_skimage():
+        print("  skip scikit-image is not installed")
+        return
+
+    masks = np.zeros((40, 60), dtype=np.int32)
+    masks[10:15, 10:15] = 1
+    masks[10:15, 19:24] = 2  # four pixels from the first
+    masks[30:35, 45:50] = 3  # on its own
+    grown = seg.expand_labels(masks, (1.0, 1.0), 3.0)
+
+    check(grown.shape == masks.shape and grown.dtype == masks.dtype, "the grown map is on the same grid")
+    check(bool(np.all(grown[masks > 0] == masks[masks > 0])), "every object still contains itself")
+    check(set(np.unique(grown)) == {0, 1, 2, 3}, "no object is lost and none is invented")
+    check(
+        int((grown == 3).sum()) > int((masks == 3).sum()) and grown[30, 42] == 3 and grown[30, 41] == 0,
+        "an object on its own grows by the distance asked for, and no further",
+    )
+    gap = grown[10:15, 15:19]
+    check(
+        bool(np.all(gap[:, :2] == 1) and np.all(gap[:, 2:] == 2)),
+        f"two neighbours split the gap between them down the middle ({gap[0].tolist()})",
+    )
+    check(bool(np.array_equal(seg.expand_labels(masks, (1.0, 1.0), 0.0), masks)), "zero grows nothing")
+    check(
+        int((seg.expand_labels(masks, (0.5, 0.5), 3.0) == 3).sum()) > int((grown == 3).sum()),
+        "the distance is in µm: finer pixels, more of them",
+    )
+
+    stack = np.zeros((3, 40, 60), dtype=np.int32)
+    stack[1] = masks
+    flat = seg.expand_labels(stack, (4.0, 1.0, 1.0), 3.0)
+    check(
+        not flat[0].any() and not flat[2].any() and bool(np.array_equal(flat[1], grown)),
+        "planes 4 µm apart are not jumped by a 3 µm expansion",
+    )
+    thick = seg.expand_labels(stack, (1.0, 1.0, 1.0), 3.0)
+    check(bool(thick[0].any() and thick[2].any()), "and are reached when they are 1 µm apart")
+    single = seg.expand_labels(masks[np.newaxis], (1.0, 1.0, 1.0), 3.0)
+    check(bool(np.array_equal(single[0], grown)), "a stack one plane deep is grown in its plane")
+
+
+def test_intensity_in_the_nucleus_the_expansion_and_both() -> None:
+    print("intensity in the nucleus, in the expansion, and in the two together")
+
+    if not _has_skimage():
+        print("  skip scikit-image is not installed")
+        return
+
+    masks = np.zeros((40, 60), dtype=np.int32)
+    masks[10:15, 10:15] = 1
+    masks[30:35, 45:50] = 2
+    grown = seg.expand_labels(masks, (1.0, 1.0), 3.0)
+    ring = (grown > 0) & (masks == 0)
+
+    # Nuclear stain: 10 in the nucleus, 2 round it. Reporter: the other way about.
+    dapi = np.zeros(masks.shape)
+    dapi[masks > 0] = 10.0
+    dapi[ring] = 2.0
+    reporter = np.zeros(masks.shape)
+    reporter[masks == 1] = 1.0
+    reporter[ring & (grown == 1)] = 50.0
+    reporter[masks == 2] = 3.0
+    reporter[ring & (grown == 2)] = 7.0
+
+    plain = seg.object_table(masks, dapi, (0.5, 0.5), extra_signals={"Green488": reporter})
+    stats = seg.object_table(
+        masks, dapi, (0.5, 0.5), extra_signals={"Green488": reporter}, expanded=grown
+    )
+    first, second = stats
+    n = int((masks == 1).sum())
+    r = int((ring & (grown == 1)).sum())
+
+    check(
+        (first.n_voxels, first.volume_um3, first.centroid_um, first.mean)
+        == (plain[0].n_voxels, plain[0].volume_um3, plain[0].centroid_um, plain[0].mean),
+        "size, position and the nucleus's own intensity are what they were without growing",
+    )
+    check(first.mean == 10.0, "the unqualified columns are the nucleus")
+    check(
+        first.extra["Mean intensity, expansion"] == 2.0,
+        f"the expansion is measured on its own ({first.extra['Mean intensity, expansion']})",
+    )
+    combined = (10.0 * n + 2.0 * r) / (n + r)
+    check(
+        _close(first.extra["Mean intensity, nucleus + expansion"], combined),
+        f"and the two together are the mean over both ({first.extra['Mean intensity, nucleus + expansion']:.3f})",
+    )
+    check(
+        _close(
+            first.extra["Integrated intensity, nucleus + expansion"],
+            first.integrated + first.extra["Integrated intensity, expansion"],
+        ),
+        "the integrated intensities add up: nucleus + expansion = combined",
+    )
+    check(
+        first.extra["Max intensity, expansion"] == 2.0
+        and first.extra["Max intensity, nucleus + expansion"] == 10.0
+        and first.extra["Median intensity, expansion"] == 2.0
+        and first.extra["Std, expansion"] == 0.0,
+        "every statistic is there for each compartment",
+    )
+    check(
+        _close(first.extra[seg.EXPANSION_VOLUME], r * 0.25)
+        and _close(first.extra[seg.COMBINED_VOLUME], (n + r) * 0.25),
+        "with the volume of each, in calibrated units",
+    )
+
+    check(
+        first.extra["Mean intensity (Green488)"] == 1.0
+        and first.extra["Mean intensity, expansion (Green488)"] == 50.0
+        and _close(
+            first.extra["Mean intensity, nucleus + expansion (Green488)"],
+            (1.0 * n + 50.0 * r) / (n + r),
+        ),
+        "every other channel is measured the same three ways: a reporter in the cytoplasm "
+        "shows in the expansion, not in the nucleus",
+    )
+    check(
+        second.extra["Mean intensity, expansion (Green488)"] == 7.0
+        and second.extra["Mean intensity (Green488)"] == 3.0,
+        "per object, not per image",
+    )
+
+    frame = seg.object_dataframe(stats)
+    columns = list(frame.columns)
+    check(
+        len(columns) == len(seg.OBJECT_COLUMNS) + 2 + 10 + 15,
+        f"two volumes, ten columns for the measured channel, fifteen per extra channel ({len(columns)})",
+    )
+    check(
+        columns.index("Mean intensity")
+        < columns.index("Mean intensity, expansion")
+        < columns.index("Mean intensity, nucleus + expansion")
+        < columns.index("Mean intensity (Green488)")
+        < columns.index("Mean intensity, expansion (Green488)")
+        < columns.index("Mean intensity, nucleus + expansion (Green488)"),
+        "channel by channel: nucleus, expansion, the two together",
+    )
+    check(
+        list(seg.object_dataframe(plain).columns) == [c for c in columns if "expansion" not in c],
+        "the table of a run without growing is the same table minus the expansion columns",
+    )
+    check(
+        seg.intensity_column("Mean intensity", "Green488", seg.COMPARTMENT_EXPANSION)
+        == "Mean intensity, expansion (Green488)"
+        and seg.intensity_column("Mean intensity", "", seg.COMPARTMENT_COMBINED)
+        == "Mean intensity, nucleus + expansion"
+        and seg.intensity_column("Mean intensity", "Green488") == "Mean intensity (Green488)",
+        "the column names come from one place",
+    )
+
+    # Two objects tiling the whole image have nowhere to grow.
+    packed = np.ones((6, 8), dtype=np.int32)
+    packed[:, 4:] = 2
+    signal = np.full(packed.shape, 5.0)
+    tight = seg.object_table(packed, signal, (1.0, 1.0), expanded=seg.expand_labels(packed, (1.0, 1.0), 3.0))
+    check(
+        np.isnan(tight[0].extra["Mean intensity, expansion"])
+        and np.isnan(tight[0].extra["Integrated intensity, expansion"])
+        and tight[0].extra[seg.EXPANSION_VOLUME] == 0.0,
+        "an object with no room to grow has no expansion intensity, rather than a zero",
+    )
+    check(
+        tight[0].extra["Mean intensity, nucleus + expansion"] == 5.0,
+        "and its combined intensity is its own",
+    )
+
+    try:
+        seg.object_table(masks, dapi, (1.0, 1.0), expanded=grown[:, :50])
+        check(False, "an expanded map on another grid is refused")
+    except ValueError:
+        check(True, "an expanded map on another grid is refused")
+    try:
+        seg.object_table(masks, dapi, (1.0, 1.0), expanded=np.where(grown == 1, 2, grown))
+        check(False, "an expanded map of other objects is refused")
+    except ValueError:
+        check(True, "an expanded map of other objects is refused")
+    check(
+        seg.object_table(np.zeros((4, 4), np.int32), dapi[:4, :4], expanded=np.zeros((4, 4), np.int32)) == [],
+        "nothing segmented is still an empty table",
+    )
+
+
+def test_the_expansion_setting_reaches_the_run() -> None:
+    print("the expansion setting reaches the run")
+
+    if not _has_skimage():
+        print("  skip scikit-image is not installed")
+        return
+
+    class _TwoShapes(_StubBackend):
+        """One disc and one ragged object, as the solidity check uses."""
+
+        def segment(self, image, settings, diameter_px, anisotropy, device, progress=None,
+                    channel_axis=None):
+            shape = np.asarray(image).shape
+            masks = np.zeros(shape, dtype=np.int32)
+            plane = np.zeros(shape[-2:], dtype=np.int32)
+            _disc(np.zeros(shape[-2:], dtype=np.float32), plane, (20, 20), 12, 1)
+            plane[50:75, 50:75] = 2
+            plane[62:75, 62:75] = 0
+            masks[...] = plane
+            return masks, {}
+
+    seg.register_backend(_TwoShapes())
+    image = np.zeros((80, 80), dtype=np.float32)
+
+    off = seg.segment_volume(image, (1.0, 1.0), settings=seg.SegmentationSettings(backend="stub"))
+    check(off.expanded_masks is None and off.expand_um == 0.0, "off by default: nothing is grown")
+
+    said: list[str] = []
+    on = seg.segment_volume(
+        image, (0.5, 0.5), settings=seg.SegmentationSettings(backend="stub", expand_um=2.0),
+        progress=said.append,
+    )
+    check(
+        on.expanded_masks is not None and on.expanded_masks.shape == on.masks.shape and on.expand_um == 2.0,
+        "switched on, the grown objects come back beside the objects",
+    )
+    check(
+        bool(np.all(on.expanded_masks[on.masks > 0] == on.masks[on.masks > 0]))
+        and int((on.expanded_masks > 0).sum()) > int((on.masks > 0).sum()),
+        "each containing its own object, and more",
+    )
+    check(bool(np.array_equal(on.masks, off.masks)), "the objects themselves are untouched")
+    check(any("growing" in line for line in said), f"and the run says so ({said[-1]})")
+    reach = int((on.expanded_masks[20] == 1).sum()) - int((on.masks[20] == 1).sum())
+    check(reach == 8, f"2 µm at 0.5 µm a pixel is four pixels each side ({reach})")
+
+    shapes = seg.shape_properties(off.masks)
+    cut = (shapes[1]["solidity"] + shapes[2]["solidity"]) / 2  # between the disc and the ragged one
+    filtered = seg.segment_volume(
+        image, (1.0, 1.0),
+        settings=seg.SegmentationSettings(backend="stub", expand_um=2.0, max_solidity=cut),
+    )
+    check(
+        filtered.dropped_labels == [1]
+        and set(np.unique(filtered.expanded_masks)) == set(np.unique(filtered.masks)) == {0, 2},
+        f"an object dropped by the solidity filter is not grown either ({np.unique(filtered.expanded_masks)})",
+    )
+
+    flat = seg.segment_volume(
+        image[np.newaxis], (1.0, 1.0, 1.0), settings=seg.SegmentationSettings(backend="stub", expand_um=2.0)
+    )
+    check(
+        flat.expanded_masks is not None and flat.expanded_masks.shape == (1, 80, 80),
+        "a stack one plane deep gets its grown objects on the grid it came in on",
+    )
+    stats = seg.object_table(
+        flat.masks, image[np.newaxis], flat.voxel_size_um, expanded=flat.expanded_masks
+    )
+    check(
+        "Mean intensity, expansion" in stats[0].extra,
+        "and the table of the run carries the expansion",
+    )
+
+    seg.register_backend(_StubBackend())
+
+
 def test_median_prefilter() -> None:
     print("median filter before segmenting")
 
@@ -942,6 +1204,9 @@ def main() -> int:
         test_a_flat_stack_is_measured_as_a_disc,
         test_intensities_belong_to_the_objects,
         test_every_channel_can_be_measured,
+        test_objects_are_grown_without_taking_each_others_ground,
+        test_intensity_in_the_nucleus_the_expansion_and_both,
+        test_the_expansion_setting_reaches_the_run,
         test_median_prefilter,
         test_the_median_setting_reaches_the_run,
         test_shape_descriptors,

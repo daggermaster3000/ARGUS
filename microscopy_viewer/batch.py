@@ -413,6 +413,15 @@ def read_channel(job: ImageJob, channel: ChannelInfo, level: int = 0) -> np.ndar
     return np.asarray(array[selector])
 
 
+#: What the grown copy of a label set is called: ``nuclei`` -> ``nuclei_expanded``.
+EXPANDED_SUFFIX = "_expanded"
+
+
+def expanded_label_name(name: str) -> str:
+    """Name of the label set holding *name*'s objects grown for intensity."""
+    return f"{name}{EXPANDED_SUFFIX}"
+
+
 def has_labels(job: ImageJob, name: str) -> bool:
     """Whether *job* already carries a label set called *name* with data in it."""
     target = job.path / LABELS_GROUP / name
@@ -791,6 +800,16 @@ def segment_job(
             level=settings.level,
             overwrite=settings.overwrite,
         )
+        if result.expanded_masks is not None:
+            # Derived from the labels just written, so it replaces whatever an
+            # earlier run left under the name: the two must describe one run.
+            write_labels(
+                job,
+                expanded_label_name(settings.label_name),
+                result.expanded_masks,
+                level=settings.level,
+                overwrite=True,
+            )
 
         notes = list(result.warnings)
         signal, measured_channel = image, channel
@@ -831,6 +850,7 @@ def segment_job(
             result.voxel_size_um[-result.masks.ndim :],
             shapes=result.shapes,
             extra_signals=extra,
+            expanded=result.expanded_masks,
         )
 
         outcome = ImageOutcome(
