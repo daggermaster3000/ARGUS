@@ -152,6 +152,66 @@ PALETTE: tuple[str, ...] = (
 #: unnamed colour repeated is worse than an obvious "and the rest".
 OVERFLOW_COLOUR = "#bbbbbb"
 
+# ---------------------------------------------------------------------------
+# The neutrals, the ramps, and the user's own picks
+# ---------------------------------------------------------------------------
+# Every colour the page draws comes from here, so that there is one answer to
+# "what colour is this" rather than one per plot. A hex literal written inside a
+# plot is the beginning of two palettes that drift apart.
+
+#: Lines that are lines — a null, a reference, a trend — and anything that has to
+#: read on both the light and the dark theme. Never given to a real group.
+NEUTRAL = "#8a8983"
+#: The edge of every filled mark. See the house style in the dashboard page.
+OUTLINE = "#000000"
+#: Text drawn over a plot, and the axis furniture under it.
+INK = "#1f1f1e"
+INK_MUTED = "#6b6a65"
+GRID = "#e4e3de"
+
+#: Amounts: light is little, dark is much. One hue, so a heatmap of counts is
+#: never mistaken for a signed difference.
+SEQUENTIAL = "viridis"
+#: Signed differences only, and always symmetric about zero so that the neutral
+#: midpoint really is "no difference". See :func:`diverging_limits`.
+DIVERGING = "RdBu_r"
+
+
+def diverging_limits(values) -> tuple[float, float]:
+    """``(-span, +span)`` for a diverging scale, so zero sits at its midpoint.
+
+    An autoscaled diverging map puts its neutral colour wherever the data's
+    middle happens to be, which on an all-positive matrix paints "a little" as
+    "no difference".
+    """
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    span = float(np.nanmax(np.abs(finite))) if finite.size else 0.0
+    span = span or 1.0
+    return -span, span
+
+
+def paint(kind: str, mapping: Mapping[str, str], overrides: Mapping | None = None) -> dict[str, str]:
+    """*mapping* with the user's own colours for *kind* laid over it.
+
+    Every palette on its way to a plot goes through here. A plot that builds its
+    own mapping is a plot that ignores the colour pickers, and the reason to have
+    one function rather than a convention is that the convention is what gets
+    forgotten.
+
+    *kind* is the name of the column being coloured ("cluster", "well") and has
+    to be the same string in the plot as in the picker, or the pick does not
+    reach it. *overrides* is ``{kind: {value: hex}}`` — what the page keeps for
+    the user; only values actually changed are in it, so improving a default
+    still reaches someone who never picked.
+    """
+    painted = {str(name): str(colour) for name, colour in mapping.items()}
+    chosen = (overrides or {}).get(str(kind)) or {}
+    for name, colour in chosen.items():
+        if str(name) in painted and colour:
+            painted[str(name)] = str(colour)
+    return painted
+
 
 def colour_map(categories: Sequence[Any]) -> dict[str, str]:
     """``{category: hex}``, assigned by position and stable for a given order.

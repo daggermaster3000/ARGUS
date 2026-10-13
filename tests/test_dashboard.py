@@ -815,6 +815,135 @@ def test_a_fresh_file_opens_clustered(directory: Path) -> None:
     )
 
 
+def test_the_page_skeleton(directory: Path) -> None:
+    """The layout, driven through the real controls rather than the functions.
+
+    Every check here is one of the rules the page is laid out on, and each of them
+    is a rule because the obvious alternative went wrong: a chart without the
+    house style, a colour picked in the sidebar that one plot ignored, a graph
+    setting in the sidebar that only one tab used, a filter emptied and the plot
+    silently redrawn with everything in it.
+    """
+    print("the page skeleton")
+
+    if not (_has("streamlit") and _has("altair") and _has("squidpy") and _has("leidenalg")):
+        print("  skip  the page needs streamlit, altair, squidpy and leidenalg")
+        return
+
+    import json
+
+    from streamlit.testing.v1 import AppTest
+
+    path = _plate_file(directory, images=4, per_image=140)
+    page = AppTest.from_file(str(db.app_path()), default_timeout=900)
+    page.run()
+    page.text_input[0].set_value(str(path)).run()
+    check(not page.exception, f"the page runs: {[str(e.value)[:160] for e in page.exception]}")
+
+    # -- the tabs -----------------------------------------------------------
+    labels = [tab.label for tab in page.tabs]
+    check(
+        labels == ["Plate", "Wells", "Space", "Features", "Statistics", "Table"],
+        f"one question per tab, named in one word: {labels}",
+    )
+    check(labels[-1] == "Table", "and Table is last, which is the way out of the page")
+
+    # -- the caption of what survived ---------------------------------------
+    captions = [str(c.value) for c in page.caption]
+    check(
+        bool(captions) and "object(s)" in captions[0] and " of " in captions[0],
+        f"the first caption says what survived, with counts: {captions[0][:90] if captions else None!r}",
+    )
+
+    # -- every chart carries the house style --------------------------------
+    charts = page.get("arrow_vega_lite_chart") + page.get("vega_lite_chart")
+    specs = [json.loads(chart.proto.spec) for chart in charts]
+    edged = [
+        spec for spec in specs
+        if (spec.get("config", {}).get("circle", {}).get("stroke")
+            or spec.get("config", {}).get("bar", {}).get("stroke"))
+    ]
+    check(
+        bool(specs) and len(edged) == len(specs),
+        f"every chart goes through the wrapper and is edged in black "
+        f"({len(edged)} of {len(specs)})",
+    )
+
+    # -- a colour picked once reaches every plot ----------------------------
+    def colour_ranges(rendered) -> list[list[str]]:
+        found: list[list[str]] = []
+
+        def walk(node) -> None:
+            if isinstance(node, dict):
+                scale = node.get("scale")
+                if isinstance(scale, dict):
+                    values = scale.get("range")
+                    if isinstance(values, list) and values and isinstance(values[0], str):
+                        found.append([str(v).lower() for v in values])
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        for chart in rendered.get("arrow_vega_lite_chart") + rendered.get("vega_lite_chart"):
+            walk(json.loads(chart.proto.spec))
+        return found
+
+    pickers = [w for w in page.color_picker if str(w.key).startswith("colour-cluster-")]
+    check(bool(pickers), f"there is a picker per cluster ({len(pickers)})")
+    pickers[0].set_value("#ff00ff").run()
+    ranges = colour_ranges(page)
+    carrying = [values for values in ranges if "#ff00ff" in values]
+    check(
+        bool(ranges) and len(carrying) == len(ranges),
+        f"a colour picked once reaches every plot ({len(carrying)} of {len(ranges)} scales)",
+    )
+    check(
+        page.session_state["_colour_overrides"].get("cluster") == {"0": "#ff00ff"},
+        "and only the pick that differs from the default is kept",
+    )
+
+    # -- the graph setting lives with the statistics that use it ------------
+    keys = {str(w.key) for w in page.selectbox} | {str(w.key) for w in page.slider}
+    check("stats-graph" in keys, f"the graph is chosen in the Statistics tab: {sorted(keys)}")
+    graph_box = next(w for w in page.selectbox if w.key == "stats-graph")
+    graph_box.set_value("knn").run()
+    joined = [str(c.value) for c in page.caption if "joined by" in str(c.value)]
+    check(
+        bool(joined) and "nearest neighbours" in joined[0],
+        f"and changing it changes the graph the statistics run on: {joined[0][:90] if joined else None!r}",
+    )
+
+    # -- every widget is keyed with its section -----------------------------
+    sections = ("file-", "colour-", "rows-", "cluster-", "group-", "plate-", "wells-",
+                "space-", "features-", "stats-", "table-")
+    widget_keys = [
+        str(key) for key in page.session_state.filtered_state
+        if isinstance(key, str) and not key.startswith("_")
+    ]
+    stray = [key for key in widget_keys if not key.startswith(sections)]
+    check(not stray, f"every widget is keyed with its section: {stray}")
+
+    # -- the values behind the plots are downloadable -----------------------
+    downloads = [b.label for b in page.get("download_button")]
+    check(len(downloads) >= 5, f"the plots' values are downloadable ({len(downloads)} buttons)")
+    check(
+        all(label.endswith("(CSV)") for label in downloads),
+        f"and say what and in which format: {downloads}",
+    )
+
+    # -- an emptied filter warns rather than drawing everything -------------
+    rows = next(w for w in page.multiselect if w.key == "table-clusters")
+    rows.set_value([]).run()
+    warnings = [str(w.value) for w in page.warning]
+    check(
+        any("Put a cluster back" in text for text in warnings),
+        f"emptying a filter warns and says what to change: {[t[:60] for t in warnings]}",
+    )
+    check(not page.exception, "and raises nothing")
+
+
 def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-dashboard-"))
     try:
@@ -839,6 +968,7 @@ def main() -> int:
             ("assignall", test_every_object_gets_a_cluster),
             ("blanks", test_blanks_do_not_poison_the_pca),
             ("freshfile", test_a_fresh_file_opens_clustered),
+            ("skeleton", test_the_page_skeleton),
         ):
             case = directory / name
             case.mkdir()

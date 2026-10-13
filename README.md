@@ -1022,7 +1022,7 @@ colours back.
 | **select** | `rectangle` or `lasso` to pick objects out of the plot; `off` leaves the drag to pan the axes. |
 | **x** / **y** | The scatter axes. Above 100 000 points the plot draws a random sample, and says so — random rather than the first N, because a table is written in label order and the first N would be one corner of the well. |
 
-#### Well display
+#### Wells
 
 Every well's spatial view, side by side as a plate, drawn from the one clustering
 stored in the `.h5ad`:
@@ -1191,20 +1191,90 @@ UMAP neighbours / min_dist
 Give every object a cluster   the rest take their neighbours' — on by default
 ```
 
-Five tabs. The first two ask a different kind of question from the other three:
+Six tabs. The first two ask a different kind of question from the next three, and
+the last is the way out:
 
 | Tab | What it answers |
 |---|---|
-| **Across the plate** | which wells hold which phenotypes — every well at once, in feature space, as a UMAP |
-| **Well display** | the plate laid out — every well's spatial view side by side, from one clustering |
-| **Where they are** | the well as a scatter, coloured by phenotype or by any measurement, with how many objects fall in each group |
-| **What they are** | which measurements separate the groups — a box per group, and any two features against each other |
-| **Does it mean anything** | neighbourhood enrichment, Ripley's L, co-occurrence, Moran's I, centrality |
+| **Plate** | which wells hold which phenotypes — every well at once, in feature space, as a UMAP |
+| **Wells** | the plate laid out — every well's spatial view side by side, from one clustering |
+| **Space** | one well as a scatter, coloured by phenotype or by any measurement, with how many objects fall in each group |
+| **Features** | which measurements separate the groups — a box per group, and any two features against each other |
+| **Statistics** | neighbourhood enrichment, Ripley's L, co-occurrence, Moran's I, centrality |
+| **Table** | the objects as rows, filtered and narrowed, with a CSV |
 
-#### Across the plate
+#### How the page is laid out
+
+One skeleton, everywhere, so that six tabs read as one tool rather than six
+programs. It is worth stating because each rule is there in place of something
+that went wrong:
+
+- **The sidebar holds only what changes every tab at once** — the file, the
+  colours, which rows, how they are grouped — in the order those choices are
+  made. A control that steers one tab lives in that tab however global it feels
+  while it is being written. The neighbourhood graph is the example: it used to
+  sit in the sidebar, where it looked like a page-wide setting, and it is now in
+  **Statistics** beside the five statistics that are statements about it. Nothing
+  else on the page ever used it, and a Delaunay triangulation is no longer built
+  for someone who only wanted to look at a UMAP.
+- **One caption under the title says what survived**, so it is true for every tab
+  and always in view: `140 of 560 object(s) from B/02/0, 27 feature(s) measured ·
+  grouped by leiden (plate-wide) into 7 group(s).` Counts carry a thousands
+  separator and say "of" the total.
+- **A tab answers one question**, named in one word, controls in a left column
+  and the result in a right one three times as wide. The controls read top to
+  bottom in the order the decision is made: what, then how it is grouped, then
+  how it is drawn.
+- **Table is always last.** The rows as they are, filtered by cluster and
+  narrowed to the columns you want, with a CSV of exactly what is on screen. It
+  is the check on everything the plots claim, and the way out of the page into a
+  spreadsheet or a script.
+- **One vocabulary for states.** `info` says what to load or compute, `warning`
+  says what to change, `error` says what broke and quotes it, `caption` reports a
+  partial result. Never an empty chart, and never a traceback for something the
+  data can produce — emptying a cluster filter says *put one back*, it does not
+  silently redraw with everything in it.
+- **Every plot's values are downloadable from under it**, labelled
+  "These … (CSV)".
+- **Every widget is keyed with its section** (`stats-graph`, `table-columns`,
+  `cluster-resolution`), which is also how the tests address them.
+
+#### Colour
+
+A cluster is the same colour in the UMAP, in the well display, in the box plot,
+in the plate heatmap's swatch and in the label set written into the plate. That
+holds because no plot builds its own palette: the colours are decided once, in
+`dashboard.py`, stored in the `.h5ad` with the clustering, and handed to every
+plot through `paint()`.
+
+**Cluster colours**, in the sidebar, is where to change one. The pickers start at
+the clustering's own colours and a pick is kept only when it differs from the
+default, so improving a default later still reaches someone who never picked. One
+pick reaches every plot on the page at once — which is the whole reason the
+function exists rather than a convention about where colours come from.
+
+The rest of the palette follows the kind of quantity:
+
+| For | What is used |
+|---|---|
+| groups | the 40-colour categorical palette, assigned by cluster number; grey past the end of it |
+| amounts (a share, a density) | one sequential hue, light for little |
+| signed differences (a z-score against a null) | diverging, and always symmetric about zero, so the neutral middle really is "no difference" |
+| a null, a reference line, a measurement that is not a group | the mid grey, which reads on either theme and is never given to a real group |
+| no information (a well the plate does not have) | blank, not the bottom of the scale |
+
+**Every filled mark is edged in black** — dots, bars, boxes — which is what lets
+a pale group read against the page and against the mark behind it, and what makes
+a figure survive being printed. Lines and heatmaps are left alone. It is applied
+in one wrapper every chart goes through, so there is no plot without it. Two
+honest caveats: the black edge is weak on the dark theme, which the style is not
+designed for, and text and axis colours are deliberately left to the theme rather
+than pinned to a light-theme grey.
+
+#### Plate
 
 Feature space, not the well: *which wells differ from which* is not a spatial
-question, and it is the one the other three tabs cannot ask, because their
+question, and it is the one the three spatial tabs cannot ask, because their
 coordinates are per image. Give it a combined `.h5ad` — the analysis panel's
 **…the whole folder as one** — and it embeds every well together.
 
