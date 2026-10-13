@@ -35,11 +35,13 @@ scales the matrix in place, which is what the clustering needs and is not what
 someone colouring by "Mean intensity" expects to see. :func:`colour_scale` is the
 choice between the two, and between this image's range and the plate's.
 
-**Every well can be drawn at once.** :func:`well_views` reduces a clustered plate
-to a few hundred points per well and :func:`store_well_views` keeps them in the
-file, so the plate display is a grid of live panels rather than a wall of
-pictures — the objects are still there to be pointed at. The clustering is what
-costs minutes and is what the caching saves.
+**There is one clustering.** :func:`run_clustering` is the only place a cluster is
+decided; it samples the plate, clusters and embeds that sample, gives every other
+object a cluster from its neighbours, and leaves all of it on the file. Every plot
+in the application reads that back through :func:`clustered_frame`, so a colour
+means the same thing on the UMAP, in the well display, in one well's spatial
+statistics and in the label set written into the plate. It is recomputed only when
+the parameters change.
 
 **Most objects were never clustered.** A plate is sampled a few hundred objects a
 well, which on this data is two per cent of them; the other ninety-eight have no
@@ -74,6 +76,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -677,8 +680,17 @@ def composition(adata, key: str = CLUSTER_KEY, by: str = "well"):
     """
     import pandas as pd
 
-    column = by if by in adata.obs else IMAGE_KEY
-    counts = pd.crosstab(adata.obs[column], adata.obs[key])
+    if by in adata.obs:
+        grouping = adata.obs[by].astype(str)
+    elif by == "well" and IMAGE_KEY in adata.obs:
+        # Derived rather than required: a file clustered by run_clustering has the
+        # image on it and the well is a reading of that, not a second fact.
+        grouping = pd.Series(
+            [well_of(str(name)) for name in adata.obs[IMAGE_KEY]], index=adata.obs.index
+        )
+    else:
+        grouping = adata.obs[IMAGE_KEY].astype(str)
+    counts = pd.crosstab(grouping, adata.obs[key])
     totals = counts.sum(axis=1).replace(0, np.nan)
     return counts.div(totals, axis=0).fillna(0.0)
 
@@ -703,98 +715,229 @@ def plate_grid(shares, group: str):
     return frame.reindex(columns=sorted(frame.columns, key=lambda c: (len(c), c)))
 
 
-#: Where the per-well views are kept inside the file.
-WELL_VIEWS_KEY = "well_views"
-
 #: Objects kept per well for the plate display. Forty-four panels of this many
 #: points is a page that draws and hovers instantly; the whole plate would be half
 #: a million points held in the browser.
 DEFAULT_VIEW_POINTS = 500
 
 
-def well_views(
-    adata,
-    per_well: int = DEFAULT_VIEW_POINTS,
-    key: str = CLUSTER_KEY,
-    seed: int = 0,
-    source=None,
-):
-    """One spatial view per well, as points rather than as a picture.
+#: Where the one clustering lives inside the file.
+CLUSTERING_KEY = "clustering"
 
-    Takes a plate that has already been clustered — so the clusters mean the same
-    thing in every panel, which is the only reason the wells can be laid out side
-    by side and compared at all — and reduces it to what a small panel can draw:
-    a few hundred objects per well with their position and their phenotype.
+#: Column every object's cluster is written to, and the one saying how it got it.
+ORIGIN_COLUMN = "cluster_origin"
 
-    Points and not a rendering, because a picture cannot be pointed at. The
-    expensive part of this is the clustering, and that is what the caching saves;
-    redrawing a few hundred points is free.
 
-    *source* is the file the plate was sampled out of, used only to count how many
-    objects each well really holds. Counting them in *adata* instead would report
-    the size of the sample, and a tooltip saying a well holds 400 objects when it
-    holds 46 394 is worse than one saying nothing.
+@dataclass(frozen=True)
+class ClusteringParams:
+    """Everything that decides what the clustering comes out as.
+
+    Compared as a whole to decide whether the stored one is still the one asked
+    for: change any of these and the clusters are different clusters, and a page
+    showing the old ones beside the new parameters would be lying.
+    """
+
+    sample_per_well: int = 750
+    resolution: float = 0.6
+    n_neighbors: int = DEFAULT_UMAP_NEIGHBOURS
+    min_dist: float = DEFAULT_MIN_DIST
+    n_comps: int = DEFAULT_COMPONENTS
+    assign_all: bool = True
+
+    def as_attrs(self) -> dict[str, Any]:
+        return {
+            "sample_per_well": int(self.sample_per_well),
+            "resolution": float(self.resolution),
+            "n_neighbors": int(self.n_neighbors),
+            "min_dist": float(self.min_dist),
+            "n_comps": int(self.n_comps),
+            "assign_all": bool(self.assign_all),
+        }
+
+    @classmethod
+    def from_attrs(cls, block: Mapping) -> "ClusteringParams":
+        return cls(
+            sample_per_well=int(block.get("sample_per_well", 750)),
+            resolution=float(block.get("resolution", 0.6)),
+            n_neighbors=int(block.get("n_neighbors", DEFAULT_UMAP_NEIGHBOURS)),
+            min_dist=float(block.get("min_dist", DEFAULT_MIN_DIST)),
+            n_comps=int(block.get("n_comps", DEFAULT_COMPONENTS)),
+            assign_all=bool(block.get("assign_all", True)),
+        )
+
+    def describe(self) -> str:
+        return (
+            f"{self.sample_per_well} per well, resolution {self.resolution:g}, "
+            f"{self.n_neighbors} neighbours, min_dist {self.min_dist:g}"
+        )
+
+
+def run_clustering(source, params: ClusteringParams | None = None, progress=None) -> dict:
+    """Cluster the plate once and write the result into *source*. Returns the record.
+
+    This is the only clustering in the application. Everything else — the UMAP,
+    the well display, the spatial statistics of one well, the label sets written
+    back into the plate — reads what this leaves behind, so that a cluster has one
+    meaning across the whole page rather than one meaning per tab.
+
+    What it leaves behind is a cluster for *every* object in ``obs``, an origin
+    saying whether that cluster was computed or predicted, the embedding of the
+    sampled objects, and the palette. The sample is what gets clustered and
+    embedded — a UMAP of half a million objects is minutes and a page that cannot
+    be drawn — and :func:`assign_all` carries the answer to the rest.
+    """
+    params = params or ClusteringParams()
+
+    def say(text: str) -> None:
+        logger.info("clustering: %s", text)
+        if progress is not None:
+            progress(text)
+
+    say(f"sampling {params.sample_per_well} objects per image")
+    reference = stratified_subsample(source, params.sample_per_well)
+    say(f"scaling and reducing {reference.n_obs:,} objects")
+    prepare(reference, n_comps=params.n_comps)
+    say("finding the clusters")
+    method = cluster(reference, resolution=params.resolution)
+    say("laying them out")
+    embed(reference, n_neighbors=params.n_neighbors, min_dist=params.min_dist)
+
+    names = [str(name) for name in _categories(reference.obs[CLUSTER_KEY])]
+    palette = colour_map(names)
+
+    if params.assign_all:
+        say("giving every object a cluster")
+        frame = assign_all(reference, source, progress=progress)
+        clusters = frame["cluster"].astype(str).to_numpy()
+        origins = frame["origin"].to_numpy()
+    else:
+        known = {
+            str(name): str(value)
+            for name, value in zip(reference.obs_names, reference.obs[CLUSTER_KEY])
+        }
+        clusters = np.array(
+            [known.get(str(name), "") for name in source.obs_names], dtype=object
+        )
+        origins = np.where(clusters == "", "", ORIGIN_CLUSTERED)
+
+    import pandas as pd
+
+    source.obs[CLUSTER_KEY] = pd.Categorical(
+        [str(value) for value in clusters], categories=names
+    )
+    source.obs[ORIGIN_COLUMN] = [str(value) for value in origins]
+
+    umap = np.asarray(reference.obsm["X_umap"], dtype=float)
+    record = {
+        **params.as_attrs(),
+        "method": str(method),
+        "clusters": names,
+        "colors": [palette[name] for name in names],
+        "umap_names": [str(name) for name in reference.obs_names],
+        "umap_x": umap[:, 0],
+        "umap_y": umap[:, 1],
+        "n_clustered": int(reference.n_obs),
+        "n_assigned": int(sum(1 for value in origins if value == ORIGIN_ASSIGNED)),
+        "n_objects": int(source.n_obs),
+        "features": [str(name) for name in reference.var_names],
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    source.uns[CLUSTERING_KEY] = record
+    say(
+        f"done: {method} into {len(names)} clusters, "
+        f"{record['n_clustered']:,} clustered, {record['n_assigned']:,} assigned"
+    )
+    return record
+
+
+def load_clustering(source) -> dict:
+    """The stored clustering record, or ``{}`` when the file has none."""
+    block = source.uns.get(CLUSTERING_KEY)
+    if not isinstance(block, (dict, Mapping)) or "clusters" not in block:
+        return {}
+    if CLUSTER_KEY not in source.obs:
+        return {}
+    record = {
+        "method": str(block.get("method", "")),
+        "clusters": [str(name) for name in block.get("clusters", [])],
+        "colors": [str(colour) for colour in block.get("colors", [])],
+        "created": str(block.get("created", "")),
+        "n_clustered": int(block.get("n_clustered", 0) or 0),
+        "n_assigned": int(block.get("n_assigned", 0) or 0),
+        "n_objects": int(block.get("n_objects", 0) or 0),
+        "features": [str(name) for name in block.get("features", [])],
+        "params": ClusteringParams.from_attrs(block),
+    }
+    names = [str(name) for name in block.get("umap_names", [])]
+    if names:
+        record["umap"] = {
+            "names": names,
+            "x": np.asarray(block.get("umap_x", []), dtype=float),
+            "y": np.asarray(block.get("umap_y", []), dtype=float),
+        }
+    return record
+
+
+def clustering_palette(record: Mapping) -> dict[str, str]:
+    """``{cluster: hex}`` from a stored record, falling back to the shared palette."""
+    names = [str(name) for name in record.get("clusters", [])]
+    colours = [str(colour) for colour in record.get("colors", [])]
+    if len(colours) == len(names) and names:
+        return dict(zip(names, colours))
+    return colour_map(names)
+
+
+def clustered_frame(source, image: str | None = None, limit: int | None = None, seed: int = 0):
+    """The objects and their clusters, ready to plot. Everything derives from this.
+
+    *image* narrows to one well and cycle; *limit* subsamples what comes back, for
+    a plot that has to stay quick. The clusters are the ones :func:`run_clustering`
+    left on the file, so a colour means the same thing here as in every other
+    plot on the page.
     """
     import pandas as pd
 
-    if "spatial" not in adata.obsm:
-        raise ValueError("this file has no obsm['spatial']; there is nothing to lay out")
-    if key not in adata.obs:
-        raise ValueError(f"nothing has been clustered into obs[{key!r}] yet")
+    if CLUSTER_KEY not in source.obs:
+        raise ValueError("this file has not been clustered yet")
 
-    xy = np.asarray(adata.obsm["spatial"], dtype=float)
-    images = (
-        adata.obs[IMAGE_KEY].astype(str).to_numpy()
-        if IMAGE_KEY in adata.obs
-        else np.array([""] * adata.n_obs)
-    )
-    clusters = adata.obs[key].astype(str).to_numpy()
-    labels = (
-        adata.obs["label"].to_numpy()
-        if "label" in adata.obs
-        else np.arange(adata.n_obs)
-    )
+    mask = np.ones(source.n_obs, dtype=bool)
+    if image:
+        if IMAGE_KEY not in source.obs:
+            raise ValueError("this file holds one image; there is nothing to narrow to")
+        mask = (source.obs[IMAGE_KEY].astype(str) == str(image)).to_numpy()
+        if not mask.any():
+            raise ValueError(f"no objects belong to {image!r}")
 
-    # How big each well really is, from the whole file when it was given.
-    totals: dict[str, int] = {}
-    if source is not None and IMAGE_KEY in source.obs:
-        counts = source.obs[IMAGE_KEY].astype(str).value_counts()
-        totals = {str(name): int(value) for name, value in counts.items()}
+    where = np.flatnonzero(mask)
+    if limit is not None and where.size > int(limit):
+        where = np.sort(
+            np.random.default_rng(seed).choice(where, size=int(limit), replace=False)
+        )
 
-    rng = np.random.default_rng(seed)
-    chosen: list[np.ndarray] = []
-    for image in sorted(set(images)):
-        where = np.flatnonzero(images == image)
-        totals.setdefault(str(image), int(where.size))
-        if where.size > int(per_well):
-            where = np.sort(rng.choice(where, size=int(per_well), replace=False))
-        chosen.append(where)
-    picked = np.concatenate(chosen) if chosen else np.empty(0, dtype=int)
-
-    names = [str(name) for name in _categories(adata.obs[key])]
+    spatial = source.obsm.get("spatial")
     frame = pd.DataFrame(
         {
-            "image": images[picked],
-            "well": [well_of(name) for name in images[picked]],
-            "x": xy[picked, 0],
-            "y": xy[picked, 1],
-            "cluster": clusters[picked],
-            "label": np.asarray(labels)[picked],
+            "object": [str(name) for name in source.obs_names[where]],
+            "cluster": source.obs[CLUSTER_KEY].astype(str).to_numpy()[where],
         }
     )
-    logger.info(
-        "well views: %d point(s) over %d well(s), at most %d each",
-        len(frame),
-        len(totals),
-        per_well,
-    )
-    return frame, {
-        "method": str(adata.uns.get(f"{key}_method", "clustering")),
-        "clusters": names,
-        "colors": [colour_map(names)[name] for name in names],
-        "per_well": per_well,
-        "totals": totals,
-    }
+    if spatial is not None:
+        coordinates = np.asarray(spatial, dtype=float)[where]
+        frame["x"] = coordinates[:, 0]
+        frame["y"] = coordinates[:, 1]
+    for column in ("label", IMAGE_KEY, ORIGIN_COLUMN):
+        if column in source.obs:
+            frame[column] = source.obs[column].astype(str).to_numpy()[where] \
+                if column != "label" else source.obs[column].to_numpy()[where]
+    if IMAGE_KEY in frame:
+        frame["well"] = [well_of(name) for name in frame[IMAGE_KEY]]
+    frame["_row"] = where
+    return frame
+
+
+def save_clustering(path: str | Path, source) -> Path:
+    """Write the file back with its clustering in it."""
+    return save_h5ad(path, source)
 
 
 def _categories(column) -> list:
@@ -804,69 +947,8 @@ def _categories(column) -> list:
     return sorted({str(value) for value in column})
 
 
-def store_well_views(adata, frame, meta: dict) -> None:
-    """Put the views into ``uns`` as flat arrays, which is what h5ad round-trips.
-
-    Flat columns rather than a dict per well: a nested structure of forty-four
-    small dicts survives a write and a read only if every reader agrees on the
-    nesting, and a table does not need them to.
-    """
-    adata.uns[WELL_VIEWS_KEY] = {
-        "image": np.asarray(frame["image"], dtype=object).astype(str),
-        "x": np.asarray(frame["x"], dtype=float),
-        "y": np.asarray(frame["y"], dtype=float),
-        "cluster": np.asarray(frame["cluster"], dtype=object).astype(str),
-        "label": np.asarray(frame["label"]).astype(np.int64),
-        "clusters": [str(name) for name in meta.get("clusters", [])],
-        "colors": [str(colour) for colour in meta.get("colors", [])],
-        "method": str(meta.get("method", "")),
-        "per_well": int(meta.get("per_well", 0)),
-        "totals_image": [str(name) for name in (meta.get("totals") or {})],
-        "totals_count": [int(value) for value in (meta.get("totals") or {}).values()],
-        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-
-
-def load_well_views(adata):
-    """``(frame, meta)`` from a file that has them, or ``(None, {})``."""
-    import pandas as pd
-
-    block = adata.uns.get(WELL_VIEWS_KEY)
-    if not isinstance(block, (dict, Mapping)) or "x" not in block:
-        return None, {}
-    try:
-        frame = pd.DataFrame(
-            {
-                "image": [str(value) for value in block["image"]],
-                "x": np.asarray(block["x"], dtype=float),
-                "y": np.asarray(block["y"], dtype=float),
-                "cluster": [str(value) for value in block["cluster"]],
-                "label": np.asarray(block["label"]).astype(int),
-            }
-        )
-    except Exception:
-        logger.exception("the stored well views could not be read")
-        return None, {}
-    frame["well"] = [well_of(name) for name in frame["image"]]
-    totals = dict(
-        zip(
-            [str(name) for name in block.get("totals_image", [])],
-            [int(value) for value in block.get("totals_count", [])],
-        )
-    )
-    meta = {
-        "method": str(block.get("method", "")),
-        "clusters": [str(name) for name in block.get("clusters", [])],
-        "colors": [str(colour) for colour in block.get("colors", [])],
-        "per_well": int(block.get("per_well", 0) or 0),
-        "created": str(block.get("created", "")),
-        "totals": totals,
-    }
-    return frame, meta
-
-
-def save_well_views(path: str | Path, adata) -> Path:
-    """Write the file back with its views in it. Returns where it went.
+def save_h5ad(path: str | Path, adata) -> Path:
+    """Write the file back, clustering and all. Returns where it went.
 
     The whole ``.h5ad`` is rewritten, which for a plate is a hundred megabytes and
     a few seconds; anndata has no way to add one ``uns`` entry in place, and a
@@ -876,7 +958,7 @@ def save_well_views(path: str | Path, adata) -> Path:
     started = time.perf_counter()
     adata.write_h5ad(target)
     logger.info(
-        "well views saved into %s (%.0f MB, %.1f s)",
+        "saved %s (%.0f MB, %.1f s)",
         target.name,
         target.stat().st_size / 1024 / 1024,
         time.perf_counter() - started,
