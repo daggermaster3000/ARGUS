@@ -22,7 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from qtpy.QtCore import Qt
+from qtpy.QtCore import QObject, Qt, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -66,6 +66,8 @@ SAME_CHANNEL = "— the segmented channel —"
 NO_NUCLEI = "— none —"
 #: Entry for "grow by distance rather than along a stain", the default.
 NO_MEMBRANE = "— none —"
+#: Shown in the training tab when the viewer holds no Labels layer to learn from.
+NO_MASKS = "— no corrected masks in the viewer —"
 
 
 def _short_name(layer) -> str:
@@ -81,6 +83,17 @@ def _short_name(layer) -> str:
     return f"{stem} :: {tail}" if separator else stem
 
 
+class _TrainingVoice(QObject):
+    """Carries cellpose's training log from the worker thread to the panel.
+
+    A plain callback cannot touch a widget from the worker thread. A signal can:
+    Qt queues it onto the thread the receiver lives on. Without it the panel
+    says nothing for the length of a run, which is the state people kill.
+    """
+
+    said = Signal(str)
+
+
 class SegmentationWidget(QWidget):
     """Pick a channel, segment it with Cellpose, measure the objects."""
 
@@ -88,9 +101,12 @@ class SegmentationWidget(QWidget):
         super().__init__(parent)
         self._viewer = viewer
         self._worker = None
+        self._trainer = None
         self._result: sg.SegmentationResult | None = None
         self._stats: list[sg.ObjectStat] = []
         self._updating = False
+        self._voice = _TrainingVoice(self)
+        self._voice.said.connect(self._training_said)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -103,6 +119,7 @@ class SegmentationWidget(QWidget):
         self._tabs = QTabWidget()
         self._tabs.addTab(self._build_setup_tab(), "Setup")
         self._tabs.addTab(self._build_objects_tab(), "Objects")
+        self._tabs.addTab(self._build_training_tab(), "Training")
         layout.addWidget(self._tabs, stretch=1)
 
         self._status = QLabel("Pick a channel, set the object diameter in µm, then Segment.")
@@ -447,6 +464,126 @@ class SegmentationWidget(QWidget):
         outer.addLayout(buttons)
         return page
 
+    def _build_training_tab(self) -> QWidget:
+        """Fine-tune the chosen model on masks that have been corrected by hand.
+
+        The channel and the starting model are the ones chosen in **Setup**
+        rather than chosen again here. Two places to say which model is in play
+        is two places that can disagree, and the answer to "which did it train?"
+        has to be the one on screen.
+        """
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(2, 2, 2, 2)
+
+        blurb = QLabel(
+            "Correct a Labels layer by hand, then train the model in Setup on it. "
+            "Cellpose trains in 2D, so a 3D stack is one example per plane and "
+            "planes with too few objects are left out."
+        )
+        blurb.setWordWrap(True)
+        outer.addWidget(blurb)
+
+        box = QGroupBox("Training data")
+        form = QFormLayout(box)
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self._train_from = QLabel("—")
+        self._train_from.setWordWrap(True)
+        self._train_from.setToolTip(
+            "The channel and the model chosen in Setup. Change them there — a "
+            "second copy here could disagree with the one the run uses."
+        )
+        form.addRow("Learns from", self._train_from)
+
+        self._masks_box = QComboBox()
+        self._masks_box.setToolTip(
+            "The Labels layer holding the corrected masks. Segment first, correct "
+            "the labels in napari, then train on them."
+        )
+        form.addRow("Corrected masks", self._masks_box)
+
+        self._train_min_masks = QSpinBox()
+        self._train_min_masks.setRange(1, 1000)
+        self._train_min_masks.setValue(sg.DEFAULT_MIN_TRAIN_MASKS)
+        self._train_min_masks.setToolTip(
+            "Planes carrying fewer objects than this are not trained on. Most of a "
+            "stack is empty at the top and bottom, and those planes teach the "
+            "network that this kind of image holds nothing."
+        )
+        form.addRow("Fewest objects", self._train_min_masks)
+        outer.addWidget(box)
+
+        settings_box = QGroupBox("The run")
+        run_form = QFormLayout(settings_box)
+        run_form.setLabelAlignment(Qt.AlignRight)
+
+        self._train_name = QLineEdit()
+        self._train_name.setPlaceholderText("named after the model and the time")
+        self._train_name.setToolTip(
+            "What to call the new model. Left empty it is named after what it was "
+            "trained from and when, so two fine-tunings of one model are two rows "
+            "rather than the same row twice."
+        )
+        run_form.addRow("New model", self._train_name)
+
+        self._train_epochs = QSpinBox()
+        self._train_epochs.setRange(1, 5000)
+        self._train_epochs.setValue(sg.DEFAULT_EPOCHS)
+        self._train_epochs.setToolTip(
+            "Passes over the training set. A hundred is cellpose's own default and "
+            "enough for a handful of corrected planes."
+        )
+        run_form.addRow("Epochs", self._train_epochs)
+
+        self._train_rate = QDoubleSpinBox()
+        self._train_rate.setDecimals(6)
+        self._train_rate.setRange(0.000001, 0.01)
+        self._train_rate.setSingleStep(0.000005)
+        self._train_rate.setValue(sg.DEFAULT_LEARNING_RATE)
+        self._train_rate.setToolTip(
+            "How far each step moves the weights. Cellpose's fine-tuning default is "
+            "1e-5; higher pulls the model off the general solution it already has, "
+            "which is the thing being kept."
+        )
+        run_form.addRow("Learning rate", self._train_rate)
+        outer.addWidget(settings_box)
+
+        self._train_button = QPushButton("Train")
+        self._train_button.clicked.connect(self.train)
+        outer.addWidget(self._train_button)
+
+        self._train_status = QLabel("Pick a corrected Labels layer, then Train.")
+        self._train_status.setWordWrap(True)
+        outer.addWidget(self._train_status)
+        outer.addStretch(1)
+        return page
+
+    def _labels_layers(self) -> list:
+        from napari.layers import Labels
+
+        return [layer for layer in self._viewer.layers if isinstance(layer, Labels)]
+
+    def refresh_training(self) -> None:
+        """Rebuild the masks list and restate what Setup has chosen."""
+        previous = self._masks_box.currentData()
+        self._masks_box.clear()
+        layers = self._labels_layers()
+        if not layers:
+            self._masks_box.addItem(NO_MASKS, "")
+        for layer in layers:
+            self._masks_box.addItem(_short_name(layer), str(layer.name))
+            self._masks_box.setItemData(
+                self._masks_box.count() - 1, str(layer.name), Qt.ToolTipRole
+            )
+        index = self._masks_box.findData(previous) if previous else -1
+        self._masks_box.setCurrentIndex(max(index, 0))
+
+        channel = str(self._channel_box.currentData() or "") or "no channel"
+        model = str(self._model_box.currentData() or "") or "no model"
+        self._train_from.setText(f"{Path(model).name or model}, on {channel}")
+        self._train_button.setEnabled(bool(layers) and sg.can_train())
+
     def _path_row(self, tooltip: str) -> tuple[QLineEdit, QWidget]:
         row = QWidget()
         layout = QHBoxLayout(row)
@@ -519,6 +656,7 @@ class SegmentationWidget(QWidget):
         finally:
             self._updating = False
         self._refresh_models()
+        self.refresh_training()
 
     def _refresh_models(self) -> None:
         """Fill the model list from the installed Cellpose, keeping the selection.
@@ -759,6 +897,144 @@ class SegmentationWidget(QWidget):
     def _clear_worker(self) -> None:
         self._worker = None
         self._run_button.setEnabled(True)
+
+    # -- training -------------------------------------------------------------
+
+    def training_examples(self) -> tuple[list, list[str], str]:
+        """``(examples, skipped, problem)`` from what is on screen.
+
+        Separate from :meth:`train` so the whole of the reading, pairing and
+        refusing can be driven and checked without starting a run that takes
+        minutes.
+        """
+        masks_name = str(self._masks_box.currentData() or "")
+        if not masks_name:
+            return [], [], "No Labels layer to train on. Segment, correct the masks, then train."
+
+        image, _voxel, problem = self._snapshot(self._layer_named(
+            str(self._channel_box.currentData() or "")
+        ))
+        if image is None:
+            return [], [], problem or "No channel selected."
+
+        labels, _labels_voxel, labels_problem = self._snapshot(self._layer_named(masks_name))
+        if labels is None:
+            return [], [], labels_problem or f"“{masks_name}” could not be read."
+
+        try:
+            examples, skipped = sg.training_examples(
+                image, labels, min_masks=int(self._train_min_masks.value())
+            )
+        except ValueError as error:
+            return [], [], str(error)
+        if not examples:
+            kept = "; ".join(skipped[:3])
+            return [], skipped, (
+                "No plane carried enough corrected objects to train on. "
+                f"Lower “Fewest objects”, or correct more masks. {kept}"
+            )
+        return examples, skipped, ""
+
+    def _training_said(self, text: str) -> None:
+        """One line of cellpose's training log, on the main thread."""
+        self._train_status.setText(text)
+
+    def train(self) -> None:
+        """Fine-tune the Setup model on the corrected masks, off the main thread."""
+        if self._trainer is not None:
+            self._train_status.setText("A training run is already going.")
+            return
+        if not sg.can_train():
+            self._train_status.setText(
+                sg.missing_backend_message() or "The installed cellpose cannot train a model."
+            )
+            return
+
+        examples, skipped, problem = self.training_examples()
+        if problem:
+            self._train_status.setText(problem)
+            return
+
+        settings = sg.TrainingSettings(
+            model=self.settings().resolved_model(),
+            name=self._train_name.text().strip(),
+            epochs=int(self._train_epochs.value()),
+            learning_rate=float(self._train_rate.value()),
+            min_masks=int(self._train_min_masks.value()),
+            use_gpu=bool(self.settings().use_gpu),
+        )
+        device = sg.compute_device(settings.use_gpu)
+        n_objects = sum(int(example.n_objects) for example in examples)
+        left_out = f", {len(skipped)} plane(s) left out" if skipped else ""
+        for note in skipped:
+            logger.info("training: skipped %s", note)
+
+        self._train_button.setEnabled(False)
+        self._train_status.setText(
+            f"Training {settings.resolved_name()} from {Path(settings.model).name or settings.model} "
+            f"on {len(examples)} plane(s), {n_objects:,} object(s){left_out}, "
+            f"on {device.describe()}…"
+        )
+
+        voice = self._voice
+
+        def _work():
+            return sg.train_model(
+                examples, settings, device, progress=lambda text: voice.said.emit(str(text))
+            )
+
+        try:
+            from napari.qt.threading import thread_worker
+        except Exception:  # pragma: no cover - no Qt threading available
+            self._finish_training(_work(), skipped)
+            self._clear_trainer()
+            return
+
+        @thread_worker
+        def _run():
+            return _work()
+
+        worker = _run()
+        worker.returned.connect(lambda outcome: self._finish_training(outcome, skipped))
+        worker.errored.connect(self._on_training_error)
+        worker.finished.connect(self._clear_trainer)
+        self._trainer = worker
+        worker.start()
+
+    def _clear_trainer(self) -> None:
+        self._trainer = None
+        self._train_button.setEnabled(True)
+
+    def _on_training_error(self, exc) -> None:
+        logger.exception("training failed", exc_info=exc)
+        self._trainer = None
+        self._train_button.setEnabled(True)
+        self._train_status.setText(f"Training failed: {exc}")
+
+    def _finish_training(self, result: sg.TrainingResult, skipped) -> None:
+        """Take the new model, and make it the one that would be used next.
+
+        Selected rather than only listed: training it and then segmenting with
+        the old one is the mistake the panel is in a position to prevent.
+        """
+        self._refresh_models()
+        index = self._model_box.findData(result.path)
+        if index < 0:
+            index = self._model_box.findData(result.name)
+        if index < 0:
+            # Not in the list: the weights went somewhere the scan does not look.
+            # Point the custom-model box at them, which is the other way in.
+            self._custom_edit.setText(result.path)
+            where = " It is not in the model list, so Custom model now points at it."
+        else:
+            self._model_box.setCurrentIndex(index)
+            self._custom_edit.clear()
+            where = " It is selected in Setup."
+        lines = [result.describe() + "." + where]
+        if skipped:
+            lines.append(f"Left out: {'; '.join(skipped[:4])}")
+        self._train_status.setText(" ".join(lines))
+        logger.info("training: %s -> %s", result.describe(), result.path)
 
     def _on_error(self, exc) -> None:
         logger.exception("segmentation failed", exc_info=exc)

@@ -511,6 +511,19 @@ class Backend:
         """
         raise NotImplementedError
 
+    def can_train(self) -> bool:
+        """Whether this backend can fine-tune a model. Most cannot."""
+        return False
+
+    def train(
+        self,
+        examples: Sequence[TrainingExample],
+        settings: TrainingSettings,
+        device: DeviceInfo,
+        progress: Callable[[str], None] | None = None,
+    ) -> TrainingResult:
+        raise NotImplementedError(f"{self.name} cannot train a model")
+
 
 class CellposeBackend(Backend):
     """Cellpose 3 and 4, through one call path.
@@ -635,11 +648,21 @@ class CellposeBackend(Backend):
         return tuple(choices)
 
     def _model(self, settings: SegmentationSettings, device: DeviceInfo):
+        return self._load_model(
+            settings.resolved_model(), bool(settings.use_gpu and device.is_gpu), device
+        )
+
+    def _load_model(self, wanted: str, use_gpu: bool, device: DeviceInfo):
+        """One loader for both jobs.
+
+        Training starts from a model and segmenting runs one, and a fine-tuned
+        model that cannot be loaded back the way it was created is not worth
+        making. Pulled out of :meth:`_model` so there is one place where a name,
+        a path and a major version turn into a network.
+        """
         from cellpose import models as cp_models
 
-        wanted = settings.resolved_model()
-        use_gpu = bool(settings.use_gpu and device.is_gpu)
-        kwargs: dict[str, Any] = {"gpu": use_gpu}
+        kwargs: dict[str, Any] = {"gpu": bool(use_gpu)}
         if use_gpu and device.kind == "cuda":
             # Pin the card that was reported on the panel rather than letting
             # cellpose pick, so what is shown is what runs.
@@ -672,6 +695,89 @@ class CellposeBackend(Backend):
                     f"Pick one of: {', '.join(self._builtin_names())}."
                 ) from exc
             raise RuntimeError(f"could not load the model “{label}”: {exc}") from exc
+
+    def can_train(self) -> bool:
+        if not self.available():
+            return False
+        try:
+            from cellpose import train as cp_train  # noqa: F401
+        except Exception:
+            logger.debug("cellpose is installed but its trainer is not", exc_info=True)
+            return False
+        return True
+
+    def train(self, examples, settings, device, progress=None):
+        """Fine-tune :attr:`TrainingSettings.model` on *examples*.
+
+        The weights are written where :func:`training_directory` says, which is
+        where the model list is read from, so the new model is selectable as
+        soon as the run ends.
+        """
+        from cellpose import train as cp_train
+
+        examples = list(examples)
+        if not examples:
+            raise ValueError(
+                "nothing to train on: no plane carried enough corrected objects"
+            )
+
+        base = settings.model or default_model(self.name)
+        name = settings.resolved_name(self.name)
+        directory = Path(settings.directory) if settings.directory else training_directory(
+            self.name
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+
+        use_gpu = bool(settings.use_gpu and device.is_gpu)
+        model = self._load_model(base, use_gpu, device)
+
+        kwargs = _accepted(
+            cp_train.train_seg,
+            {
+                "train_data": [example.image for example in examples],
+                "train_labels": [example.labels for example in examples],
+                "n_epochs": int(settings.epochs),
+                "learning_rate": float(settings.learning_rate),
+                "weight_decay": float(settings.weight_decay),
+                "batch_size": max(1, int(settings.batch_size)),
+                "min_train_masks": int(settings.min_masks),
+                "normalize": True,
+                "save_path": str(directory),
+                "model_name": name,
+            },
+        )
+
+        logger.info(
+            "training %s from %s: %d plane(s), %d object(s), %d epoch(s) on %s",
+            name, base, len(examples),
+            sum(int(e.n_objects) for e in examples), int(settings.epochs), device.name,
+        )
+        started = time.perf_counter()
+        with _Relay(progress):
+            outcome = cp_train.train_seg(model.net, **kwargs)
+        seconds = time.perf_counter() - started
+
+        # v3 and v4 both return (path, train losses, test losses); a version that
+        # returned the path alone would still be usable, so unpack leniently.
+        path, losses = outcome, ()
+        if isinstance(outcome, (tuple, list)):
+            path = outcome[0] if outcome else ""
+            if len(outcome) > 1:
+                losses = tuple(
+                    float(value) for value in np.asarray(outcome[1], dtype=float).ravel()
+                )
+
+        return TrainingResult(
+            path=str(path),
+            name=name,
+            base_model=str(base),
+            n_examples=len(examples),
+            n_objects=sum(int(example.n_objects) for example in examples),
+            epochs=int(settings.epochs),
+            seconds=float(seconds),
+            device=device.name,
+            train_losses=losses,
+        )
 
     def segment(
         self,
@@ -733,6 +839,68 @@ class CellposeBackend(Backend):
 
 
 _BACKENDS: dict[str, Backend] = {CellposeBackend.name: CellposeBackend()}
+
+
+def _accepted(function, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """*kwargs* minus anything *function* will not take.
+
+    ``train_seg`` is the one cellpose entry point whose signature changed across
+    the major versions in ways that matter here — v3 takes ``channels``, v4 has
+    no such idea — and asking the function what it accepts is steadier than
+    keeping a list of which version has which argument.
+    """
+    import inspect
+
+    try:
+        allowed = set(inspect.signature(function).parameters)
+    except (TypeError, ValueError):
+        return dict(kwargs)
+    return {name: value for name, value in kwargs.items() if name in allowed}
+
+
+class _Relay:
+    """Cellpose's training log, forwarded to a progress callback.
+
+    Training says nothing for minutes at a time unless its own logger is
+    listened to. The alternative is a panel that looks hung for the length of
+    the run, which is the state people kill.
+    """
+
+    def __init__(self, report: Callable[[str], None] | None):
+        self._report = report
+        self._handler = None
+        self._logger = None
+
+    def __enter__(self):
+        if self._report is None:
+            return self
+        import logging
+
+        try:
+            from cellpose.train import train_logger
+        except Exception:
+            return self
+
+        report = self._report
+
+        class _Handler(logging.Handler):
+            def emit(self, record):
+                try:
+                    report(record.getMessage())
+                except Exception:
+                    pass
+
+        self._handler = _Handler()
+        self._handler.setLevel(logging.INFO)
+        self._logger = train_logger
+        train_logger.addHandler(self._handler)
+        return self
+
+    def __exit__(self, *_exc):
+        if self._handler is not None and self._logger is not None:
+            self._logger.removeHandler(self._handler)
+        self._handler = None
+        return False
 
 
 def register_backend(backend: Backend) -> None:
@@ -838,8 +1006,235 @@ def default_model(name: str = "cellpose") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Fine-tuning a model on corrected masks
+# ---------------------------------------------------------------------------
+# Cellpose trains in 2D whatever it segments in, so a corrected 3D stack is
+# training data one plane at a time. That is not a limitation worked around
+# here, it is the shape of the thing: the network sees 2D patches, and the 3D
+# modes assemble planes afterwards.
+
+#: Passes over the training set. Cellpose's own default, and small enough on a
+#: handful of corrected planes that a run is minutes rather than hours.
+DEFAULT_EPOCHS = 100
+#: Cellpose's default for fine-tuning. Higher pulls the model off the general
+#: solution it already has, which is the thing being kept.
+DEFAULT_LEARNING_RATE = 1e-5
+DEFAULT_WEIGHT_DECAY = 0.1
+DEFAULT_TRAIN_BATCH = 1
+#: Planes carrying fewer objects than this are not trained on.
+#:
+#: A nearly empty plane is mostly a lesson in background, and cellpose refuses
+#: the whole run if the average is below its own ``min_train_masks``. Skipping
+#: them here means the run starts, and says which planes it left out.
+DEFAULT_MIN_TRAIN_MASKS = 5
+
+
+@dataclass(frozen=True)
+class TrainingExample:
+    """One 2D image and the masks drawn on it."""
+
+    image: np.ndarray
+    labels: np.ndarray
+    #: Where it came from, for the caller to print: ``"z = 12"``.
+    source: str = ""
+    n_objects: int = 0
+
+
+@dataclass(frozen=True)
+class TrainingSettings:
+    """What a fine-tuning run is steered by."""
+
+    #: The model to start from. Empty takes the backend's default.
+    model: str = ""
+    #: What to call the result. Empty asks :func:`training_name` for one.
+    name: str = ""
+    epochs: int = DEFAULT_EPOCHS
+    learning_rate: float = DEFAULT_LEARNING_RATE
+    weight_decay: float = DEFAULT_WEIGHT_DECAY
+    batch_size: int = DEFAULT_TRAIN_BATCH
+    min_masks: int = DEFAULT_MIN_TRAIN_MASKS
+    use_gpu: bool = True
+    #: Where to write it. Empty means beside the models cellpose already lists,
+    #: so the new one is in the panel's list the moment it exists.
+    directory: str = ""
+
+    def resolved_name(self, backend: str = "cellpose") -> str:
+        return self.name.strip() or training_name(self.model or default_model(backend))
+
+
+@dataclass(frozen=True)
+class TrainingResult:
+    """The model that came out, and enough about the run to judge it."""
+
+    path: str
+    name: str
+    base_model: str
+    n_examples: int
+    n_objects: int
+    epochs: int
+    seconds: float
+    device: str
+    train_losses: tuple[float, ...] = ()
+    #: Planes that were not trained on, and why.
+    skipped: tuple[str, ...] = ()
+
+    @property
+    def first_loss(self) -> float:
+        return float(self.train_losses[0]) if self.train_losses else float("nan")
+
+    @property
+    def last_loss(self) -> float:
+        return float(self.train_losses[-1]) if self.train_losses else float("nan")
+
+    def describe(self) -> str:
+        minutes = self.seconds / 60.0
+        text = (
+            f"{self.name}: {self.epochs} epoch(s) on {self.n_examples} plane(s), "
+            f"{self.n_objects:,} object(s), from {self.base_model}, "
+            f"on {self.device}, in {minutes:.1f} min"
+        )
+        if self.train_losses:
+            text += f"; loss {self.first_loss:.4f} -> {self.last_loss:.4f}"
+        if self.skipped:
+            text += f"; {len(self.skipped)} plane(s) left out"
+        return text
+
+
+def training_name(base: str, when: float | None = None) -> str:
+    """A name for a new model: what it came from, and when.
+
+    Stamped rather than "my_model": the panel lists every model in the folder by
+    name alone, and two fine-tunings of the same base a week apart are otherwise
+    the same row twice.
+    """
+    label = Path(str(base)).name or str(base)
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(when))
+    return f"{label}_{stamp}"
+
+
+def _split_touching(plane: np.ndarray) -> tuple[np.ndarray, int]:
+    """One plane's labels, renumbered from 1, with split objects pulled apart.
+
+    An object sliced out of a 3D stack can land in one plane as two separate
+    blobs — a cell that dips below the plane and comes back. They carry one id,
+    and cellpose turns a label into flows pointing at *its* centre, so one id in
+    two places trains the network to point at the empty space between them.
+    Connected pieces of the same id become separate objects here.
+
+    Pieces of *different* ids are left alone even where they touch, which is why
+    this is per id rather than a connected-component pass over the whole plane:
+    two touching cells are the case the network most needs to get right.
+    """
+    from scipy import ndimage as ndi
+
+    out = np.zeros(plane.shape, dtype=np.int32)
+    next_id = 0
+    for value in np.unique(plane):
+        if value == 0:
+            continue
+        pieces, count = ndi.label(plane == value)
+        if count == 0:
+            continue
+        out[pieces > 0] = 0
+        out += np.where(pieces > 0, pieces + next_id, 0).astype(np.int32)
+        next_id += int(count)
+    return out, next_id
+
+
+def training_examples(
+    image: np.ndarray,
+    labels: np.ndarray,
+    min_masks: int = DEFAULT_MIN_TRAIN_MASKS,
+) -> tuple[list[TrainingExample], list[str]]:
+    """A corrected image and its masks as 2D training pairs.
+
+    Returns ``(examples, skipped)``. A 2D image is one pair; a 3D stack is one
+    pair per plane, because that is what cellpose trains on.
+
+    A plane with fewer than *min_masks* objects is left out and named in
+    *skipped*: most of a stack is empty at the top and bottom, and those planes
+    teach the network that this kind of image contains nothing.
+    """
+    image = np.asarray(image)
+    labels = np.asarray(labels)
+    if image.shape != labels.shape:
+        raise ValueError(
+            f"the image is {'x'.join(str(n) for n in image.shape)} and the masks are "
+            f"{'x'.join(str(n) for n in labels.shape)}; they have to be the same grid"
+        )
+    if image.ndim not in (2, 3):
+        raise ValueError(f"training needs a 2D or 3D image, not {image.ndim}D")
+
+    planes = [(image, labels, "the plane")] if image.ndim == 2 else [
+        (image[index], labels[index], f"z = {index}") for index in range(image.shape[0])
+    ]
+
+    examples: list[TrainingExample] = []
+    skipped: list[str] = []
+    for plane_image, plane_labels, where in planes:
+        split, count = _split_touching(np.asarray(plane_labels))
+        if count < int(min_masks):
+            skipped.append(
+                f"{where}: {count} object(s), fewer than the {int(min_masks)} needed"
+            )
+            continue
+        examples.append(
+            TrainingExample(
+                image=np.ascontiguousarray(plane_image, dtype=np.float32),
+                labels=split,
+                source=where,
+                n_objects=count,
+            )
+        )
+    return examples, skipped
+
+
+def training_directory(name: str = "cellpose") -> Path:
+    """Where a trained model should be written so the panel can see it.
+
+    Cellpose writes to ``<save_path>/models/<name>``, and the panel lists what is
+    directly inside the cellpose model folder. When that folder is itself called
+    ``models`` — it is, ``~/.cellpose/models`` — handing cellpose its parent puts
+    the new model exactly where the list is read from.
+    """
+    directory = model_directory(name)
+    if directory is None:
+        return Path.home() / ".cellpose"
+    return directory.parent if directory.name == "models" else directory
+
+
+# ---------------------------------------------------------------------------
 # Physical units -> cellpose units
 # ---------------------------------------------------------------------------
+
+
+def can_train(name: str = "cellpose") -> bool:
+    """Whether a model can be fine-tuned with the installed backend."""
+    try:
+        return get_backend(name).can_train()
+    except Exception:
+        return False
+
+
+def train_model(
+    examples: Sequence[TrainingExample],
+    settings: TrainingSettings,
+    device: DeviceInfo | None = None,
+    progress: Callable[[str], None] | None = None,
+    name: str = "cellpose",
+) -> TrainingResult:
+    """Fine-tune a model on corrected masks. Returns where it was written.
+
+    The counterpart of :func:`segment_volume`: everything Qt-free, so the panel
+    is a form and a thread and the arithmetic is here where it can be checked.
+    """
+    backend = get_backend(name)
+    if not backend.can_train():
+        raise RuntimeError(missing_backend_message(name) or f"{name} cannot train a model")
+    chosen = device if device is not None else compute_device(bool(settings.use_gpu))
+    result = backend.train(examples, settings, chosen, progress=progress)
+    logger.info("training: %s", result.describe())
+    return result
 
 
 def anisotropy_from_voxel(voxel_size_um: Sequence[float]) -> float | None:

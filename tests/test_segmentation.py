@@ -1171,6 +1171,196 @@ def test_gpu_request_is_reported() -> None:
     check(not off.warnings, "and not asking for a GPU is not warned about")
 
 
+def test_a_stack_becomes_2d_training_pairs() -> None:
+    """Corrected masks into what cellpose can actually be trained on.
+
+    Cellpose trains in 2D whatever it segments in, so this is where a corrected
+    3D stack stops being a volume. Nothing here runs a training step: cpsam is a
+    ViT-L and one epoch is a GPU and a minute, which is not a unit test. What is
+    checked is everything that decides *what the network would be shown*.
+    """
+    print("a corrected stack as training pairs")
+
+    size = 48
+    yy, xx = np.mgrid[0:size, 0:size]
+    image = np.zeros((4, size, size), dtype=np.float32)
+    labels = np.zeros((4, size, size), dtype=np.int32)
+    ident = 1
+    for z in range(3):
+        for row in (1, 2, 3):
+            for col in (1, 2):
+                disc = (yy - row * 12) ** 2 + (xx - col * 16) ** 2 <= 16
+                image[z][disc] = 1000.0
+                labels[z][disc] = ident
+                ident += 1
+    # The fourth plane is nearly empty, as the top of a stack is.
+    labels[3][:4, :4] = 999
+
+    examples, skipped = seg.training_examples(image, labels)
+    check(
+        [example.source for example in examples] == ["z = 0", "z = 1", "z = 2"],
+        f"one pair per plane, named by plane: {[e.source for e in examples]}",
+    )
+    check(
+        all(example.image.ndim == 2 for example in examples),
+        "and each pair is 2D, which is what cellpose trains on",
+    )
+    check(
+        [example.n_objects for example in examples] == [6, 6, 6],
+        f"with the objects counted: {[e.n_objects for e in examples]}",
+    )
+    check(
+        len(skipped) == 1 and "z = 3" in skipped[0] and "1 object" in skipped[0],
+        f"the near-empty plane is left out, and said so: {skipped}",
+    )
+    check(
+        examples[0].image.dtype == np.float32,
+        f"the image is float32, the dtype the network takes: {examples[0].image.dtype}",
+    )
+
+    # A plane on its own is one pair, not a stack of one.
+    flat, flat_skipped = seg.training_examples(image[0], labels[0])
+    check(
+        len(flat) == 1 and flat[0].source == "the plane" and not flat_skipped,
+        f"a 2D image is one pair: {[e.source for e in flat]}",
+    )
+
+    # The threshold is the caller's.
+    few, few_skipped = seg.training_examples(image, labels, min_masks=7)
+    check(
+        not few and len(few_skipped) == 4,
+        f"asking for more objects than any plane has leaves nothing: {len(few)} pair(s)",
+    )
+
+    try:
+        seg.training_examples(image, labels[:, :8, :8])
+        check(False, "masks on another grid are refused")
+    except ValueError as exc:
+        check(
+            "same grid" in str(exc),
+            f"masks on another grid are refused, and the message says both shapes ({exc})",
+        )
+    try:
+        seg.training_examples(np.zeros((2, 2, 2, 2)), np.zeros((2, 2, 2, 2)))
+        check(False, "a 4D image is refused")
+    except ValueError as exc:
+        check("2D or 3D" in str(exc), f"a 4D image is refused ({exc})")
+
+
+def test_one_object_in_two_places_becomes_two() -> None:
+    """A 3D object sliced into two blobs in one plane is two objects in 2D.
+
+    Cellpose turns a label into flows pointing at *its* centre. One id in two
+    places points both blobs at the empty space between them, which is the
+    worst thing a training target can do, and nothing downstream complains.
+    """
+    print("splitting an object that a plane cut in two")
+
+    plane = np.zeros((40, 40), dtype=np.int32)
+    plane[2:8, 2:8] = 5            # one id,
+    plane[30:36, 30:36] = 5        # in two places
+    plane[2:8, 20:26] = 6
+    plane[2:8, 26:32] = 7          # touching 6, and a different cell
+
+    split, count = seg._split_touching(plane)
+    check(count == 4, f"the split id becomes two objects, so four in all ({count})")
+    check(
+        int(split[2:8, 2:8].max()) != int(split[30:36, 30:36].max()),
+        "and the two blobs no longer share an id",
+    )
+    check(
+        len(np.unique(split[2:8, 20:32])) == 2,
+        "two cells that touch are still two cells -- this is per id, not a "
+        "connected-component pass that would merge them",
+    )
+    check(
+        sorted(np.unique(split[split > 0]).tolist()) == [1, 2, 3, 4],
+        f"ids are consecutive from 1: {sorted(np.unique(split[split > 0]).tolist())}",
+    )
+    check(
+        bool(((plane > 0) == (split > 0)).all()),
+        "and no pixel changed sides: the same area is object and background",
+    )
+
+
+def test_where_a_trained_model_lands() -> None:
+    """A model nobody can select is a model nobody trained."""
+    print("naming and placing a trained model")
+
+    first = seg.training_name("cpsam", when=0)
+    check(
+        first.startswith("cpsam_") and len(first) > len("cpsam_"),
+        f"a name says what it came from and when: {first}",
+    )
+    check(
+        seg.training_name(r"C:/models/my_weights") .startswith("my_weights_"),
+        "a path is named after the file, not the whole path",
+    )
+
+    settings = seg.TrainingSettings(model="cpsam")
+    check(
+        settings.resolved_name().startswith("cpsam_"),
+        f"an unnamed run is named for you: {settings.resolved_name()}",
+    )
+    check(
+        seg.TrainingSettings(name=" mine ").resolved_name() == "mine",
+        "and a name you give is used, trimmed",
+    )
+
+    # Cellpose writes to <save_path>/models/<name>, and the panel lists what is
+    # directly inside the model folder. Those two have to meet.
+    directory = seg.training_directory()
+    folder = seg.model_directory()
+    if folder is None:
+        print("  skip cellpose is not installed")
+    else:
+        check(
+            (directory / "models") == folder,
+            f"training writes into the folder the model list is read from "
+            f"({directory / 'models'} vs {folder})",
+        )
+
+    result = seg.TrainingResult(
+        path="C:/x/models/m", name="m", base_model="cpsam", n_examples=3,
+        n_objects=27, epochs=2, seconds=90.0, device="a card",
+        train_losses=(0.5, 0.25), skipped=("z = 3: 1 object(s)",),
+    )
+    words = result.describe()
+    for part in ("3 plane(s)", "27 object(s)", "cpsam", "1.5 min", "0.5000 -> 0.2500", "left out"):
+        check(part in words, f"the result says {part!r}: {words}")
+
+
+def test_a_backend_that_cannot_train_says_so() -> None:
+    """Training is optional for a backend, and refusing is not an error to debug."""
+    print("a backend with no trainer")
+
+    stub = _StubBackend()
+    seg.register_backend(stub)
+    check(not stub.can_train(), "a backend does not train unless it says it does")
+    try:
+        stub.train([], seg.TrainingSettings(), seg.DeviceInfo())
+        check(False, "and training one refuses")
+    except NotImplementedError as exc:
+        check("cannot train" in str(exc), f"and training one refuses in words ({exc})")
+    try:
+        seg.train_model([], seg.TrainingSettings(), name="stub")
+        check(False, "through the module-level call too")
+    except RuntimeError as exc:
+        check(
+            "train" in str(exc).lower(),
+            f"through the module-level call too ({str(exc)[:60]})",
+        )
+
+    def two(a, b=1, c=2):
+        return a
+
+    kept = seg._accepted(two, {"b": 1, "c": 2, "channels": [0, 0]})
+    check(
+        kept == {"b": 1, "c": 2},
+        f"arguments a version does not take are dropped rather than raising: {kept}",
+    )
+
+
 def test_cellpose_call_shape() -> None:
     print("the cellpose call")
 
@@ -1389,6 +1579,10 @@ def main() -> int:
         test_decimation_inside_a_run,
         test_gpu_request_is_reported,
         test_cellpose_call_shape,
+        test_a_stack_becomes_2d_training_pairs,
+        test_one_object_in_two_places_becomes_two,
+        test_where_a_trained_model_lands,
+        test_a_backend_that_cannot_train_says_so,
     ):
         test()
         print()

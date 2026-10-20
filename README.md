@@ -656,6 +656,49 @@ memory it takes scales with the segmented fraction of the volume, not the volume
 
 The run is on a `thread_worker`, so the window stays usable while it goes.
 
+#### Training: fine-tuning the model on corrected masks
+
+The **Training** tab takes the model and the channel chosen in **Setup**, a Labels
+layer you have corrected by hand, and trains one on the other. The result is
+written into `~/.cellpose/models`, which is the folder the model list is read
+from, so when the run ends the new model is *selected in Setup* rather than merely
+available — training a model and then segmenting with the old one is the mistake
+the panel is in a position to prevent.
+
+The channel and the starting model are not chosen again in the tab. Two places to
+say which model is in play is two places that can disagree, and "which did it
+train?" has to have one answer.
+
+**Cellpose trains in 2D whatever it segments in**, so a corrected stack is one
+training example per plane. Two things follow, and both are done rather than left
+to the user:
+
+- A plane carrying fewer than **Fewest objects** (5) is not trained on, and is
+  named in the status line. Most of a stack is empty at the top and bottom, and
+  those planes teach the network that this kind of image holds nothing. Cellpose
+  also refuses the whole run if the average is below its own `min_train_masks`,
+  so skipping them here is the difference between a run and an error.
+- An object the plane cut in two — a cell that dips below it and comes back —
+  arrives as one id in two places. Cellpose turns a label into flows pointing at
+  *its* centre, so one id in two places trains the network to point both blobs at
+  the empty space between them. Disconnected pieces of one id become separate
+  objects. Pieces of *different* ids are left alone even where they touch: two
+  cells that touch are the case the network most needs to get right, and a
+  connected-component pass over the whole plane would merge them.
+
+**Epochs** (100) and **learning rate** (1e-5) are cellpose's own fine-tuning
+defaults. A higher rate pulls the model off the general solution it already has,
+which is the thing being kept. The new model is named after what it was trained
+from and when, so two fine-tunings of one base are two rows rather than the same
+row twice.
+
+Training runs on a `thread_worker` like segmentation, and cellpose's own training
+log is forwarded to the status line through a Qt signal — a panel that says
+nothing for the length of a run is the state people kill. There is **no held-out
+set**: the loss says the model fits what it was given, not that it generalises.
+On a handful of corrected planes a holdout would be noise, so the honest thing is
+to say it is absent rather than to print a validation number nobody should trust.
+
 Segmentation needs `cellpose`, which pulls in torch, so it is an optional extra
 rather than a dependency:
 
