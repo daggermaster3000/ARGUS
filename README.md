@@ -1254,6 +1254,16 @@ on a plate runs corner to corner. **The cap is on the drawing only**: the gating
 the thresholds, the counts and everything written to a file are over every
 selected object, and the line under the plot says so.
 
+**Keep** chooses which side of the bounds a gate keeps. *Inside* is a window
+round what you want — a size range that picks cells out of debris. *Outside* is a
+window round what you do not, which is much the easier thing to place when there
+is one contaminant to throw away, and on a bounded measurement (a solidity, a
+normalised signal) the outside of a window cannot be written as a window at all.
+
+A blank abstains under both. Inverting the unjudged objects along with the values
+is the obvious way to write *outside*, and it makes such a gate keep every
+unmeasured object — on a 4i plate, most of them.
+
 #### Combining gates: and / or / xor
 
 Each gate after the first carries a **join** saying how it combines with the
@@ -1290,6 +1300,15 @@ With `or` or `xor` in the rule the per-gate "removed" counts no longer add up to
 the total kept, and the line under the table says so rather than leaving the
 arithmetic looking broken.
 
+#### The same analysis in the spatial dashboard
+
+The dashboard has it too, as its own top-level tab. Its six existing views are
+now nested under **This plate** — Plate, Wells, Space, Features, Statistics,
+Table, unchanged — and **Across samples** holds the same three sub-tabs as this
+panel, driving the same `populations.py`. Nine tabs abreast asked a reader to
+hold two unrelated questions at once; a threshold means the same thing in either
+place because there is one implementation of it.
+
 **2. Positive** — what counts as a positive cell. The headline metric is
 **median + 3·sd** of a chosen measurement; mean + k·sd and a percentile are
 there too, and k is yours. **Signal** chooses raw or normalised, over the same
@@ -1314,9 +1333,8 @@ with their joins, the rule, and a positive flag per object — so the file carri
 what was done to it and the panel restores it when the file is opened again.
 
 The analysis itself is in `microscopy_viewer/populations.py`, which has no Qt in
-it and is tested headless — so the spatial dashboard can grow the same analysis
-by importing it rather than by writing a second copy of the arithmetic, and a
-threshold will then mean the same thing in both. That is not built yet.
+it and is tested headless. Both this panel and the dashboard's **Across samples**
+tab import it; neither computes a threshold, a bound or a percentage of its own.
 
 ### Spatial dashboard
 

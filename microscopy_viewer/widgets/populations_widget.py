@@ -224,11 +224,29 @@ class PopulationAnalysisWidget(QWidget):
         suggest = QPushButton("Suggest")
         suggest.setToolTip(
             "Put the bounds at the 0.5 and 99.5 percentiles of what is selected — the "
-            "tails, which is where the debris and the fused objects are."
+            "body of the distribution. As “keep what is inside” that cuts the tails, "
+            "which is where the debris and the fused objects are; as “keep what is "
+            "outside” it keeps only the tails."
         )
         suggest.clicked.connect(self.suggest_bounds)
         bounds_layout.addWidget(suggest)
         form.addRow("Bounds", bounds)
+
+        self._gate_mode = QComboBox()
+        for mode in populations.MODES:
+            self._gate_mode.addItem(populations.MODE_LABELS[mode], mode)
+        self._gate_mode.setToolTip(
+            "Which side of the bounds this gate keeps.\n\n"
+            "“keep what is inside” is a window round what you want — a size range "
+            "that picks cells out of debris.\n\n"
+            "“keep what is outside” is a window round what you do not want, which is "
+            "much the easier thing to place when there is one contaminant to throw "
+            "away. On a bounded measurement — a solidity, a normalised signal — the "
+            "outside of a window cannot be written as a window at all, so this is the "
+            "only way to express it."
+        )
+        self._gate_mode.currentIndexChanged.connect(lambda _index: self.draw_gate_plot())
+        form.addRow("Keep", self._gate_mode)
 
         self._gate_join = QComboBox()
         for join in populations.JOINS:
@@ -322,9 +340,9 @@ class PopulationAnalysisWidget(QWidget):
         actions.addStretch(1)
         gates_layout.addLayout(actions)
 
-        self._gate_table = QTableWidget(0, 6)
+        self._gate_table = QTableWidget(0, 7)
         self._gate_table.setHorizontalHeaderLabels(
-            ["Feature", "join", "from", "to", "removed", "blank"]
+            ["Feature", "join", "keep", "from", "to", "removed", "blank"]
         )
         self._gate_table.setToolTip(
             "The gates, in the order they are applied — top to bottom, each joined to "
@@ -765,7 +783,10 @@ class PopulationAnalysisWidget(QWidget):
         # Where a gate on each axis both keep an object: the rectangle the pair of
         # them reads as, shaded rather than outlined so it cannot be mistaken for
         # a bound of its own.
-        if scatter.x_bounds and scatter.y_bounds:
+        # Only when both are windows round what is kept: shading the inside of an
+        # exclude gate would mark the region it throws away as the one it keeps.
+        inside_only = all(not gate.excluding for gate in populations.applicable(self._adata, self._gates))
+        if scatter.x_bounds and scatter.y_bounds and inside_only:
             (x_low, x_high), (y_low, y_high) = scatter.x_bounds[0], scatter.y_bounds[0]
             limits_x, limits_y = axes.get_xlim(), axes.get_ylim()
             axes.axvspan(
@@ -904,7 +925,9 @@ class PopulationAnalysisWidget(QWidget):
         if high < low:
             low, high = high, low
         return populations.Gate(
-            feature, low, high, True, str(self._gate_join.currentData())
+            feature, low, high, True,
+            str(self._gate_join.currentData()),
+            str(self._gate_mode.currentData()),
         )
 
     def add_gate(self) -> None:
@@ -932,7 +955,8 @@ class PopulationAnalysisWidget(QWidget):
         # Its enabled state is the row's, not the editor's: updating the bounds of
         # a gate that is switched off should not switch it back on.
         self._gates[row] = populations.Gate(
-            gate.feature, gate.low, gate.high, self._gates[row].enabled, gate.join
+            gate.feature, gate.low, gate.high, self._gates[row].enabled, gate.join,
+            gate.mode,
         )
         self._recompute_gates()
 
@@ -955,7 +979,8 @@ class PopulationAnalysisWidget(QWidget):
             return
         gate = self._gates[row]
         self._gates[row] = populations.Gate(
-            gate.feature, gate.low, gate.high, item.checkState() == Qt.Checked, gate.join
+            gate.feature, gate.low, gate.high, item.checkState() == Qt.Checked, gate.join,
+            gate.mode,
         )
         self._recompute_gates()
 
@@ -970,6 +995,9 @@ class PopulationAnalysisWidget(QWidget):
             index = self._gate_join.findData(gate.join)
             if index >= 0:
                 self._gate_join.setCurrentIndex(index)
+            mode = self._gate_mode.findData(gate.mode)
+            if mode >= 0:
+                self._gate_mode.setCurrentIndex(mode)
         finally:
             self._updating = False
         self._set_bounds(gate.low, gate.high)
@@ -990,15 +1018,16 @@ class PopulationAnalysisWidget(QWidget):
                     # Blank on the first row: it is joined to nothing, and showing
                     # "and" there reads as a rule that was chosen.
                     (1, "" if row == 0 else str(gate.join)),
-                    (2, f"{gate.low:.4g}"),
-                    (3, f"{gate.high:.4g}"),
+                    (2, "outside" if gate.excluding else "inside"),
+                    (3, f"{gate.low:.4g}"),
+                    (4, f"{gate.high:.4g}"),
                     (
-                        4,
+                        5,
                         "missing"
                         if cost is not None and cost.missing
                         else ("—" if cost is None else f"{cost.n_removed:,}"),
                     ),
-                    (5, "—" if cost is None else f"{cost.n_blank:,}"),
+                    (6, "—" if cost is None else f"{cost.n_blank:,}"),
                 ):
                     self._gate_table.setItem(row, column, QTableWidgetItem(text))
         finally:

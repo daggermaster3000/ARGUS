@@ -984,6 +984,82 @@ def test_it_filters_the_way_the_analysis_panel_does(directory: Path) -> None:
     )
 
 
+def test_a_gate_can_keep_the_outside() -> None:
+    """Exclude: a window round what you do not want.
+
+    Not redundant with include. A single window can be inverted by hand -- two
+    gates, below and above, ORed -- but that is three decisions to express one,
+    and on a bounded measurement the outside of a window is not a window.
+    """
+    print("keeping what is outside the bounds")
+
+    if not _has("anndata"):
+        print("  skip anndata is not installed")
+        return
+
+    import anndata as ad
+
+    source = ad.AnnData(X=np.array([[1.0], [5.0], [9.0], [np.nan]]))
+    source.var_names = ["A"]
+    source.obs_names = ["low", "middle", "high", "blank"]
+
+    inside = pop.Gate("A", 3.0, 7.0)
+    outside = pop.Gate("A", 3.0, 7.0, mode=pop.MODE_EXCLUDE)
+
+    def kept(gate):
+        mask = pop.gate_mask(source, [gate])
+        return [str(name) for name, keep in zip(source.obs_names, mask) if keep]
+
+    check(
+        kept(inside) == ["middle", "blank"],
+        f"inside keeps the objects in the window: {kept(inside)}",
+    )
+    check(
+        kept(outside) == ["low", "high", "blank"],
+        f"outside keeps the objects beyond it: {kept(outside)}",
+    )
+    check(
+        not inside.excluding and outside.excluding,
+        "and each knows which way round it is",
+    )
+    check(
+        "not in" in outside.describe() and "not in" not in inside.describe(),
+        f"which it says: {outside.describe()!r} against {inside.describe()!r}",
+    )
+
+    # The blank is the subtle one. Inverting it along with the values is the
+    # obvious way to write exclude, and it makes an exclude gate keep every
+    # unmeasured object -- on a 4i plate, most of them.
+    check(
+        "blank" in kept(outside) and "blank" in kept(inside),
+        "a blank abstains under both, because it is no more outside the bounds "
+        "than inside them",
+    )
+    _passes, blank = outside.decide(np.asarray([np.nan, 5.0]))
+    check(
+        bool(blank[0]) and not bool(blank[1]),
+        "decide() still reports it as unjudged rather than as a pass",
+    )
+
+    # An exclude gate is exactly the two-window OR it saves you writing.
+    by_hand = pop.gate_mask(
+        source,
+        [pop.Gate("A", -np.inf, 3.0), pop.Gate("A", 7.0, np.inf, join=pop.JOIN_OR)],
+    )
+    # ... bar the bounds themselves, which are inclusive on both sides.
+    check(
+        [str(n) for n, k in zip(source.obs_names, by_hand) if k] == kept(outside),
+        "and it agrees with writing that OR out by hand",
+    )
+
+    histogram = pop.feature_histogram(source, "A")
+    check(
+        histogram.suggested_gate().mode == pop.MODE_INCLUDE
+        and histogram.suggested_gate(pop.MODE_EXCLUDE).excluding,
+        "the suggested bounds come back either way round, as asked",
+    )
+
+
 def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-populations-"))
     try:
@@ -994,6 +1070,8 @@ def main() -> int:
         test_gates_combine_with_and_or_xor()
         print()
         test_a_blank_abstains_rather_than_voting()
+        print()
+        test_a_gate_can_keep_the_outside()
         print()
         for name, test in (
             ("gates", test_samples_and_gates),

@@ -221,6 +221,26 @@ JOIN_LABELS = {
 #: everything: one unmeasured feature and the union is the whole plate.
 JOIN_IDENTITY = {JOIN_AND: True, JOIN_OR: False, JOIN_XOR: False}
 
+#: Which side of its bounds a gate keeps.
+#:
+#: ``include`` keeps the objects inside, which is how a size window picks cells
+#: out of debris. ``exclude`` keeps the objects outside, which is how you throw a
+#: contaminant away: a bound round the thing you do not want is far easier to
+#: place than two bounds round everything you do.
+#:
+#: They are not redundant with each other. A single window can be inverted by
+#: hand — two gates, below and above, ORed — but that is three decisions to
+#: express one, and on a bounded feature (a solidity, a normalised signal) the
+#: outside of a window is not expressible as a window at all.
+MODE_INCLUDE = "include"
+MODE_EXCLUDE = "exclude"
+MODES = (MODE_INCLUDE, MODE_EXCLUDE)
+
+MODE_LABELS = {
+    MODE_INCLUDE: "keep what is inside",
+    MODE_EXCLUDE: "keep what is outside",
+}
+
 
 def _combine(running: np.ndarray, contribution: np.ndarray, join: str) -> np.ndarray:
     if join == JOIN_OR:
@@ -244,6 +264,8 @@ class Gate:
     :attr:`join` says how this gate combines with the result of every gate before
     it — see :data:`JOINS`. It is ignored on the first enabled gate, which has
     nothing to combine with.
+
+    :attr:`mode` says which side of the bounds it keeps — see :data:`MODES`.
     """
 
     feature: str
@@ -251,22 +273,37 @@ class Gate:
     high: float = float("inf")
     enabled: bool = True
     join: str = JOIN_AND
+    mode: str = MODE_INCLUDE
+
+    @property
+    def excluding(self) -> bool:
+        return self.mode == MODE_EXCLUDE
 
     def describe(self) -> str:
         low = f"{self.low:.4g}" if np.isfinite(self.low) else "-inf"
         high = f"{self.high:.4g}" if np.isfinite(self.high) else "inf"
-        return f"{self.feature} in [{low}, {high}]" + ("" if self.enabled else " (off)")
+        relation = "not in" if self.excluding else "in"
+        return (
+            f"{self.feature} {relation} [{low}, {high}]"
+            + ("" if self.enabled else " (off)")
+        )
 
     def decide(self, values: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
-        """``(inside, blank)`` — what this gate judges, and what it cannot judge.
+        """``(passes, blank)`` — what this gate judges, and what it cannot judge.
 
         Kept apart because what to do with a blank depends on the operator it is
-        about to meet; see :data:`JOIN_IDENTITY`.
+        about to meet; see :data:`JOIN_IDENTITY`. **A blank is never inverted**:
+        excluding is about the values that are there, and an object with no value
+        is no more outside the bounds than it is inside them. Inverting the blanks
+        along with the rest is the obvious way to write this and it makes an
+        exclude gate keep every unmeasured object, which on a 4i plate is most of
+        them.
         """
         array = np.asarray(values, dtype=float)
         blank = ~np.isfinite(array)
         inside = (array >= float(self.low)) & (array <= float(self.high))
-        return inside & ~blank, blank
+        passes = ~inside if self.excluding else inside
+        return passes & ~blank, blank
 
     def contribution(self, values: Sequence[float], join: str = JOIN_AND) -> np.ndarray:
         """:meth:`decide`, with blanks filled in with *join*'s identity."""
@@ -463,9 +500,15 @@ class FeatureHistogram:
         """Bin midpoints, for a plot that wants one x per count."""
         return (self.edges[:-1] + self.edges[1:]) / 2.0
 
-    def suggested_gate(self) -> Gate:
-        """A gate at the suggested bounds, as a starting point to be moved."""
-        return Gate(self.feature, self.suggested_low, self.suggested_high)
+    def suggested_gate(self, mode: str = MODE_INCLUDE) -> Gate:
+        """A gate at the suggested bounds, as a starting point to be moved.
+
+        The suggested bounds are the body of the distribution, so as an
+        ``include`` they cut the tails and as an ``exclude`` they keep only the
+        tails. Both are things people want; the caller says which.
+        """
+        return Gate(self.feature, self.suggested_low, self.suggested_high, True,
+                    JOIN_AND, mode)
 
 
 def feature_histogram(
@@ -1053,6 +1096,7 @@ def run_populations(
         "gate_high": np.asarray([float(gate.high) for gate in gates], dtype=float),
         "gate_enabled": np.asarray([bool(gate.enabled) for gate in gates], dtype=bool),
         "gate_join": [str(gate.join) for gate in gates],
+        "gate_mode": [str(gate.mode) for gate in gates],
         "gate_expression": gate_expression(gates),
         "gate_removed": np.asarray(
             [int(cost.n_removed) for cost in report.costs], dtype=int
@@ -1097,6 +1141,9 @@ def load_populations(source) -> dict:
     # Defaulting to "and" rather than failing: a file written before gates could
     # be combined has no join on them, and every one of those rules was an and.
     joins = [str(name) for name in np.atleast_1d(block.get("gate_join", []))]
+    # Both default to what the only possible behaviour used to be, so a file
+    # written before gates could be joined or inverted still loads as itself.
+    modes = [str(name) for name in np.atleast_1d(block.get("gate_mode", []))]
     gates = [
         Gate(
             feature,
@@ -1104,6 +1151,7 @@ def load_populations(source) -> dict:
             float(highs[index]) if index < highs.size else float("inf"),
             bool(enabled[index]) if index < enabled.size else True,
             joins[index] if index < len(joins) and joins[index] in JOINS else JOIN_AND,
+            modes[index] if index < len(modes) and modes[index] in MODES else MODE_INCLUDE,
         )
         for index, feature in enumerate(features)
     ]

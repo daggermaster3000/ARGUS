@@ -22,7 +22,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from microscopy_viewer import dashboard as db  # noqa: E402
+from microscopy_viewer import dashboard as db
+from microscopy_viewer import populations as pops  # noqa: E402
 
 _failures: list[str] = []
 
@@ -806,10 +807,13 @@ def test_a_fresh_file_is_not_clustered_for_you(directory: Path) -> None:
         not db.load_clustering(db.read(str(path))),
         "opening the file clustered nothing",
     )
+    labels = [tab.label for tab in page.tabs]
     check(
-        [tab.label for tab in page.tabs]
-        == ["Plate", "Wells", "Space", "Features", "Statistics", "Table"],
-        "and every tab is still there rather than replaced by a message",
+        all(
+            name in labels
+            for name in ("Plate", "Wells", "Space", "Features", "Statistics", "Table")
+        ),
+        f"and every tab is still there rather than replaced by a message: {labels}",
     )
 
     captions = [str(c.value) for c in page.caption]
@@ -835,7 +839,8 @@ def test_a_fresh_file_is_not_clustered_for_you(directory: Path) -> None:
         f"and the table is still a way out of the page: {downloads}",
     )
     check(
-        [b.label for b in page.button] == ["Cluster"],
+        "Cluster" in [b.label for b in page.button]
+        and "Re-cluster" not in [b.label for b in page.button],
         f"the button offers to start it, not to redo it: {[b.label for b in page.button]}",
     )
 
@@ -848,7 +853,11 @@ def test_a_fresh_file_is_not_clustered_for_you(directory: Path) -> None:
         record.get("n_objects") == 360,
         f"covering every object rather than the sample: {record.get('n_objects')}",
     )
-    check(not page.info, f"and nothing is still asking to be clustered: {len(page.info)}")
+    asking = [str(m.value) for m in page.info if "Cluster" in str(m.value)]
+    check(
+        not asking,
+        f"and nothing is still asking to be clustered: {[t[:60] for t in asking]}",
+    )
     charts = page.get("arrow_vega_lite_chart") + page.get("vega_lite_chart")
     check(len(charts) >= 5, f"with the plots drawn ({len(charts)} chart(s))")
 
@@ -886,11 +895,15 @@ def test_the_page_skeleton(directory: Path) -> None:
 
     # -- the tabs -----------------------------------------------------------
     labels = [tab.label for tab in page.tabs]
+    plate_tabs = labels[labels.index("Plate") : labels.index("Across samples")]
     check(
-        labels == ["Plate", "Wells", "Space", "Features", "Statistics", "Table"],
-        f"one question per tab, named in one word: {labels}",
+        plate_tabs == ["Plate", "Wells", "Space", "Features", "Statistics", "Table"],
+        f"one question per tab, named in one word: {plate_tabs}",
     )
-    check(labels[-1] == "Table", "and Table is last, which is the way out of the page")
+    check(
+        plate_tabs[-1] == "Table",
+        "and Table is last of them, which is the way out of the page",
+    )
 
     # -- the caption of what survived ---------------------------------------
     captions = [str(c.value) for c in page.caption]
@@ -961,7 +974,7 @@ def test_the_page_skeleton(directory: Path) -> None:
 
     # -- every widget is keyed with its section -----------------------------
     sections = ("file-", "colour-", "rows-", "cluster-", "group-", "plate-", "wells-",
-                "space-", "features-", "stats-", "table-")
+                "space-", "features-", "stats-", "table-", "pop-")
     widget_keys = [
         str(key) for key in page.session_state.filtered_state
         if isinstance(key, str) and not key.startswith("_")
@@ -986,6 +999,106 @@ def test_the_page_skeleton(directory: Path) -> None:
         f"emptying a filter warns and says what to change: {[t[:60] for t in warnings]}",
     )
     check(not page.exception, "and raises nothing")
+
+
+def test_the_two_top_level_tabs(directory: Path) -> None:
+    """Six views of one plate on one side, the cross-sample analysis on the other.
+
+    Nine tabs abreast asked the reader to hold two unrelated questions at once.
+    What this test pins is that both halves still exist, that the cross-sample
+    side drives microscopy_viewer.populations rather than arithmetic of its own,
+    and that changing a gate drops thresholds pooled over the old one.
+    """
+    print("the two top-level tabs")
+
+    if not (_has("streamlit") and _has("altair") and _has("squidpy")):
+        print("  skip  the page needs streamlit, altair and squidpy")
+        return
+
+    from streamlit.testing.v1 import AppTest
+
+    path = _plate_file(directory, images=3, per_image=150)
+    page = AppTest.from_file(str(db.app_path()), default_timeout=900)
+    page.run()
+    page.text_input[0].set_value(str(path)).run()
+    check(not page.exception, f"the page runs: {[str(e.value)[:140] for e in page.exception]}")
+
+    labels = [tab.label for tab in page.tabs]
+    check(
+        labels[:1] == ["This plate"] and "Across samples" in labels,
+        f"two top-level tabs, the plate first: {labels[:8]}",
+    )
+    for name in ("Plate", "Wells", "Space", "Features", "Statistics", "Table"):
+        check(name in labels, f"{name} is still there, nested under the plate")
+    for name in ("Prepare", "Positive", "Explore"):
+        check(name in labels, f"{name} is a sub-tab of the cross-sample analysis")
+
+    def box(kind, key):
+        return next(widget for widget in getattr(page, kind) if widget.key == key)
+
+    # Gating, through the page's own controls.
+    feature = box("selectbox", "pop-gate-feature").value
+    box("button", "pop-gate-add").click().run()
+    gates = page.session_state["pop_gates"]
+    check(
+        len(gates) == 1 and gates[0].feature == feature,
+        f"Add gate adds one, on the chosen feature: {[g.describe() for g in gates]}",
+    )
+
+    # A second window on the same feature, ORed -- which is the case the napari
+    # panel grew the joins for, and has to work here too.
+    box("selectbox", "pop-gate-join").set_value(pops.JOIN_OR).run()
+    box("button", "pop-gate-add").click().run()
+    gates = page.session_state["pop_gates"]
+    check(
+        len(gates) == 2 and gates[1].join == pops.JOIN_OR,
+        f"and a second, joined with or: {[(g.feature, g.join) for g in gates]}",
+    )
+    rule_lines = [str(c.value) for c in page.caption if "Rule, applied in order" in str(c.value)]
+    check(
+        bool(rule_lines) and pops.JOIN_OR in rule_lines[0],
+        f"the rule is written out as it is applied: {rule_lines[:1]}",
+    )
+
+    # A threshold, and the result.
+    box("selectbox", "pop-rule-feature").set_value(feature).run()
+    box("selectbox", "pop-statistic").set_value(pops.STAT_PERCENTILE).run()
+    box("number_input", "pop-percentile").set_value(80.0).run()
+    box("button", "pop-apply").click().run()
+    check(not page.exception, f"the rule applies: {[str(e.value)[:140] for e in page.exception]}")
+
+    calls, summary, _attrs = page.session_state["pop_calls"]
+    check(calls.n_positive > 0, f"it calls some objects positive ({calls.n_positive})")
+    check(
+        len(summary) == 3 and "percent positive" in summary.columns,
+        f"with one row per sample: {list(summary.columns)[:5]}",
+    )
+    metrics = [(m.label, m.value) for m in page.get("metric")]
+    check(bool(metrics), f"and a headline number: {metrics}")
+
+    downloads = [b.label for b in page.get("download_button")]
+    check(
+        "These thresholds (CSV)" in downloads and "This summary (CSV)" in downloads,
+        f"the numbers behind it are downloadable: {downloads}",
+    )
+
+    # Every plot in Explore has to draw, including the one with the thresholds on.
+    for plot in ("Objects kept and excluded", "The signal"):
+        box("selectbox", "pop-plot").set_value(plot).run()
+        check(
+            not page.exception,
+            f"{plot!r} draws: {[str(e.value)[:140] for e in page.exception]}",
+        )
+
+    # And the thing that would otherwise lie: thresholds pooled over a gating
+    # that has since changed.
+    box("button", "pop-gate-clear").click().run()
+    try:
+        held = page.session_state["pop_calls"]
+    except Exception:
+        held = None
+    check(held is None, "changing the gates drops the thresholds pooled over the old ones")
+    check(not page.exception, "and the page survives it")
 
 
 def main() -> int:
@@ -1013,6 +1126,7 @@ def main() -> int:
             ("blanks", test_blanks_do_not_poison_the_pca),
             ("freshfile", test_a_fresh_file_is_not_clustered_for_you),
             ("skeleton", test_the_page_skeleton),
+            ("twotabs", test_the_two_top_level_tabs),
         ):
             case = directory / name
             case.mkdir()
