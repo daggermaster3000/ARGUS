@@ -1293,6 +1293,28 @@ objects and nothing in between — a rule that could not be written at all while
 every gate was ANDed, because the two windows are disjoint and ANDed they keep
 nothing. `xor` is for asking what two markers disagree about.
 
+**Between two `exclude` rows the join combines the bounds, not the survivors.**
+"exclude the bright *and* exclude the round" throws away the objects that are
+both — the dirt — and keeps a dim round cell. The join is read the way the two
+rows read: as one sentence about the objects being pointed at.
+
+This is worth spelling out because the obvious implementation gets it backwards.
+Fold exclusions on the keep side and `and` gives `not bright and not round`,
+which by De Morgan is `not (bright or round)`: an `and` that removes the
+**union**. Every round cell goes, dim ones included, and the only sign is half
+the scatter missing. Spelling the overlap `or` and the union `and` is the
+opposite of what both words say.
+
+So a run of consecutive `exclude` rows is folded over what they point at and
+thrown away once at the end, which is also how it is written out:
+`exclude (Median intensity in [4000, 17500] and Circularity in [0.8, 1])` — one
+exclusion of joined bounds, rather than two exclusions. Use `or` between them for
+the union: `exclude (bright or round)` removes anything bright and anything
+round. An `include` row breaks the run, because what it keeps is the only thing
+it can be combined with: `Voxels in [0, 4000] and exclude Circularity in
+[0.8, 1]` is still two sentences, and still means keep the small ones that are
+not round.
+
 **There is no precedence and there are no brackets.** The gates apply top to
 bottom, so `A or B and C` here means `(A or B) and C`, not what boolean algebra
 would make of it. Precedence would be indefensible in a table whose row order is
@@ -1306,11 +1328,18 @@ the *identity* of the operator it meets: a pass for `and`, a fail for `or` and
 because treating a blank as a pass regardless, which is right for `and` and was
 all that was needed when `and` was the only option, makes `or` keep everything:
 one unmeasured feature and the union is the whole plate. A single gate on its own
-still keeps what it cannot judge — one gate should not throw away a whole cycle.
+still keeps what it cannot judge — one gate should not throw away a whole cycle,
+and neither should a rule: an object no gate in it could judge at all is kept.
 
-With `or` or `xor` in the rule the per-gate "removed" counts no longer add up to
-the total kept, and the line under the table says so rather than leaving the
-arithmetic looking broken.
+The first row has no join of its own, but a blank on it still meets the second
+row's, so it abstains from that one. Seeding it with a fixed value instead makes
+the answer depend on which row the blank feature happens to be typed into, and
+the order of the rows is not information about the data.
+
+With `or` or `xor` in the rule, or with two `exclude` rows next to each other,
+the per-gate "removed" counts no longer add up to the total kept — the overlap of
+two exclusions is smaller than either of them — and the line under the table says
+so rather than leaving the arithmetic looking broken.
 
 #### The same analysis in the spatial dashboard
 

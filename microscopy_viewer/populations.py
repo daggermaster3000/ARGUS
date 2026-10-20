@@ -202,10 +202,24 @@ JOIN_XOR = "xor"
 JOINS = (JOIN_AND, JOIN_OR, JOIN_XOR)
 
 JOIN_LABELS = {
-    JOIN_AND: "and — must also pass this",
-    JOIN_OR: "or — may pass this instead",
-    JOIN_XOR: "xor — passes an odd number of the gates",
+    JOIN_AND: "and — both must hold",
+    JOIN_OR: "or — either may hold",
+    JOIN_XOR: "xor — an odd number of them hold",
 }
+
+#: What the join is joining, which depends on the two rows it sits between.
+#:
+#: Between two ``exclude`` rows it joins **what they point at**: "exclude the
+#: bright and exclude the round" throws away the objects that are both, and keeps
+#: a dim round cell. Anywhere else it joins what the rows keep, which is the only
+#: thing it can join when one of them is an ``include``.
+#:
+#: Folding exclusions on the keep side instead is the obvious implementation and
+#: it is a De Morgan trap: ``not bright and not round`` is ``not (bright or
+#: round)``, so an ``and`` between two exclusions quietly removes the **union**
+#: of them. The word on screen then means the opposite of what it says, and the
+#: user finds out by seeing a whole population disappear.
+JOIN_JOINS_BOUNDS = "between two exclude rows, the join combines the bounds"
 
 #: What an object a gate cannot judge contributes to each join.
 #:
@@ -314,6 +328,18 @@ class Gate:
     def excluding(self) -> bool:
         return self.mode == MODE_EXCLUDE
 
+    def bounds_phrase(self) -> str:
+        """Just the bounds, with no word for what becomes of them.
+
+        Needed because consecutive exclusions share one ``exclude``:
+        "exclude (A in [0, 3] and B in [50, inf])" says once what
+        "exclude A in [0, 3] and exclude B in [50, inf]" would say twice, and
+        saying it twice is what makes the reader expect two removals.
+        """
+        low = f"{self.low:.4g}" if np.isfinite(self.low) else "-inf"
+        high = f"{self.high:.4g}" if np.isfinite(self.high) else "inf"
+        return f"{self.feature} in [{low}, {high}]"
+
     def describe(self) -> str:
         """The gate in the words of what it points at.
 
@@ -322,12 +348,22 @@ class Gate:
         The negated form reads as a claim about every object that is *not* being
         pointed at, which is the harder sentence and the wrong one.
         """
-        low = f"{self.low:.4g}" if np.isfinite(self.low) else "-inf"
-        high = f"{self.high:.4g}" if np.isfinite(self.high) else "inf"
-        text = f"{self.feature} in [{low}, {high}]"
+        text = self.bounds_phrase()
         if self.excluding:
             text = f"exclude {text}"
         return text + ("" if self.enabled else " (off)")
+
+    def points_at(self, values: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+        """``(inside, blank)`` — the objects between the bounds, and the unmeasured.
+
+        The mode is not applied. This is the set the bounds name, which is the
+        same set in either mode, and it is what a join between two ``exclude``
+        rows combines.
+        """
+        array = np.asarray(values, dtype=float)
+        blank = ~np.isfinite(array)
+        inside = (array >= float(self.low)) & (array <= float(self.high))
+        return inside & ~blank, blank
 
     def decide(self, values: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
         """``(passes, blank)`` — what this gate judges, and what it cannot judge.
@@ -340,13 +376,11 @@ class Gate:
         exclude gate keep every unmeasured object, which on a 4i plate is most of
         them.
         """
-        array = np.asarray(values, dtype=float)
-        blank = ~np.isfinite(array)
         # The bounds pick out one set of objects whichever mode this is. All the
         # mode decides is whether being in that set is a pass or a failure.
-        selected = (array >= float(self.low)) & (array <= float(self.high))
-        passes = ~selected if self.excluding else selected
-        return passes & ~blank, blank
+        selected, blank = self.points_at(values)
+        passes = (~selected & ~blank) if self.excluding else selected
+        return passes, blank
 
     def contribution(self, values: Sequence[float], join: str = JOIN_AND) -> np.ndarray:
         """:meth:`decide`, with blanks filled in with *join*'s identity."""
@@ -408,8 +442,8 @@ class GateReport:
             text += f"; rule: {self.expression}"
         if self.combined:
             text += (
-                "; the per-gate counts are each gate on its own and do not add up to "
-                "this, because the rule is not a plain and"
+                "; the per-gate counts are each gate on its own and do not add up "
+                "to this, because the gates do not simply stack"
             )
         if self.missing:
             text += f"; {len(self.missing)} gate(s) name a feature this file does not have"
@@ -434,10 +468,18 @@ def gate_expression(gates: Sequence[Gate]) -> str:
     applied = [gate for gate in gates if gate.enabled]
     if not applied:
         return "everything (no gate is on)"
-    text = applied[0].describe()
+
+    dropping = applied[0].excluding
+    text = applied[0].bounds_phrase() if dropping else applied[0].describe()
     for gate in applied[1:]:
+        if dropping and gate.excluding:
+            text = f"{text} {gate.join} {gate.bounds_phrase()}"
+            continue
+        if dropping:
+            text = f"exclude ({text})"
+            dropping = False
         text = f"({text}) {gate.join} {gate.describe()}"
-    return text
+    return f"exclude ({text})" if dropping else text
 
 
 def gate_mask(
@@ -449,8 +491,14 @@ def gate_mask(
     through its own :attr:`Gate.join` — see :func:`gate_expression` for what that
     means and why there is no precedence.
 
+    **A run of consecutive ``exclude`` rows is folded on what they point at**, and
+    the whole run is thrown away once at the end — see :data:`JOIN_JOINS_BOUNDS`
+    for why anything else makes ``and`` mean ``or``. Everywhere else the fold is
+    over what the rows keep, which is the only thing there is to fold when one of
+    them is an ``include``.
+
     The first enabled gate has nothing to combine with, so its own join is
-    ignored and an object it cannot judge is kept: one gate on its own should not
+    ignored, and an object no gate could judge at all is kept: gating should not
     throw away what was never measured.
 
     A gate naming a feature the file does not carry is skipped rather than failing
@@ -466,14 +514,65 @@ def gate_mask(
     if not applied:
         return selection.copy()
 
-    keep = applied[0].contribution(values_of(adata, applied[0].feature), JOIN_AND)
-    for gate in applied[1:]:
-        keep = _combine(
-            keep,
-            gate.contribution(values_of(adata, gate.feature), gate.join),
-            gate.join,
-        )
-    return keep & selection
+    pointed = []
+    blanks = []
+    for gate in applied:
+        inside, blank = gate.points_at(values_of(adata, gate.feature))
+        pointed.append(inside)
+        blanks.append(blank)
+
+    # An object every applicable gate is blank on has not been judged by the rule
+    # at all. Below, a blank takes the identity of the operator it meets so that
+    # it leaves the running answer alone; with nothing to leave alone, the answer
+    # would be whatever the identities happened to spell. It is kept instead.
+    judged = np.zeros(len(pointed[0]), dtype=bool)
+    for blank in blanks:
+        judged |= ~blank
+
+    # ``dropping`` says which sense ``running`` is in: the objects to throw away,
+    # or the objects to keep.
+    dropping = applied[0].excluding
+    # The first gate has no operator of its own, but a blank on it still meets
+    # the second gate's, so it abstains from that one. Seeding it with a fixed
+    # value instead makes the answer depend on which row the blank feature
+    # happens to be typed into, and the order of the rows is not information
+    # about the data.
+    seed = (
+        bool(JOIN_IDENTITY.get(applied[1].join, True))
+        if len(applied) > 1
+        else (not dropping)
+    )
+    running = np.where(blanks[0], seed, pointed[0])
+
+    for gate, inside, blank in zip(applied[1:], pointed[1:], blanks[1:]):
+        abstain = bool(JOIN_IDENTITY.get(gate.join, True))
+        if dropping and gate.excluding:
+            running = _combine(running, np.where(blank, abstain, inside), gate.join)
+            continue
+        keep = ~running if dropping else running
+        dropping = False
+        passes = (~inside & ~blank) if gate.excluding else inside
+        running = _combine(keep, np.where(blank, abstain, passes), gate.join)
+
+    keep = ~running if dropping else running
+    return (keep | ~judged) & selection
+
+
+def _stacks(applied: Sequence[Gate]) -> bool:
+    """Whether the gates simply pile up, so each one's own cost is an upper bound.
+
+    True only for a plain ``and`` chain with no two exclusions next to each
+    other. An ``or`` or an ``xor`` gives back objects an earlier gate removed,
+    and an ``and`` between two exclusions removes only their overlap, which is
+    less than either on its own — in both cases the per-gate counts in the table
+    do not add up to the total, and the table has to say so.
+    """
+    if any(gate.join != JOIN_AND for gate in applied[1:]):
+        return False
+    return not any(
+        first.excluding and second.excluding
+        for first, second in zip(applied, applied[1:])
+    )
 
 
 def gate_report(
@@ -510,7 +609,7 @@ def gate_report(
         tuple(costs),
         tuple(missing),
         expression=gate_expression(gates),
-        combined=any(gate.join != JOIN_AND for gate in applied[1:]),
+        combined=not _stacks(applied),
     )
     logger.info("gating: %s", report.describe())
     return report

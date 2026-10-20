@@ -17,6 +17,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from dataclasses import replace
+
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -985,6 +987,127 @@ def test_it_filters_the_way_the_analysis_panel_does(directory: Path) -> None:
     )
 
 
+def test_two_exclusions_and_is_their_overlap() -> None:
+    """An ``and`` between two ``exclude`` rows removes what is in *both* bounds.
+
+    This is the De Morgan trap, and it is the one the panel walks into. Folding
+    exclusions on the keep side gives ``not bright and not round``, which is
+    ``not (bright or round)``: an ``and`` that removes the union. On a real plate
+    that throws away every round cell, dim ones included, and the only sign is
+    half the population missing from the scatter.
+    """
+    print("an and between two exclusions")
+
+    if not _has("anndata"):
+        print("  skip anndata is not installed")
+        return
+
+    import anndata as ad
+
+    # The four corners of the scatter: bright and round is dirt, dim and round
+    # is a cell, and the cell is the one the trap eats.
+    matrix = np.array(
+        [
+            [8000.0, 0.90],
+            [8000.0, 0.50],
+            [1000.0, 0.90],
+            [1000.0, 0.50],
+            [np.nan, np.nan],
+        ]
+    )
+    source = ad.AnnData(X=matrix)
+    source.var_names = ["Intensity", "Circularity"]
+    source.obs_names = ["bright+round", "bright", "dim+round", "dim", "blank"]
+
+    bright = pop.Gate("Intensity", 4000.0, 17500.0, mode=pop.MODE_EXCLUDE)
+
+    def kept(join: str) -> list[str]:
+        second = pop.Gate("Circularity", 0.8, 1.0, join=join, mode=pop.MODE_EXCLUDE)
+        mask = pop.gate_mask(source, [bright, second])
+        return [str(name) for name, keep in zip(source.obs_names, mask) if keep]
+
+    check(
+        kept(pop.JOIN_AND) == ["bright", "dim+round", "dim", "blank"],
+        f"and removes only what is in both bounds: {kept(pop.JOIN_AND)}",
+    )
+    check(
+        "dim+round" in kept(pop.JOIN_AND),
+        "so a dim round cell survives a rule aimed at bright round dirt",
+    )
+    check(
+        kept(pop.JOIN_OR) == ["dim", "blank"],
+        f"or removes what is in either, which is the other thing people want: "
+        f"{kept(pop.JOIN_OR)}",
+    )
+
+    # The two are not the same rule, which is the whole reason the word matters.
+    check(
+        kept(pop.JOIN_AND) != kept(pop.JOIN_OR),
+        "and and or are different rules here, so the word on screen decides the answer",
+    )
+
+    # And the sentence says so: one exclude over joined bounds, not two excludes.
+    expression = pop.gate_expression(
+        [bright, pop.Gate("Circularity", 0.8, 1.0, join=pop.JOIN_AND,
+                          mode=pop.MODE_EXCLUDE)]
+    )
+    check(
+        expression == "exclude (Intensity in [4000, 1.75e+04] and Circularity in [0.8, 1])",
+        f"the rule reads as one exclusion of joined bounds: {expression}",
+    )
+
+    # A run broken by an include is no longer a run: the include has to be
+    # combined with what is kept, because that is the only thing it talks about.
+    mixed = [
+        pop.Gate("Intensity", 0.0, 4000.0),
+        pop.Gate("Circularity", 0.8, 1.0, join=pop.JOIN_AND, mode=pop.MODE_EXCLUDE),
+    ]
+    mixed_kept = [
+        str(name) for name, keep in zip(source.obs_names, pop.gate_mask(source, mixed))
+        if keep
+    ]
+    check(
+        mixed_kept == ["dim", "blank"],
+        f"keep the dim and then drop the round is still keep dim and not round: "
+        f"{mixed_kept}",
+    )
+    check(
+        pop.gate_expression(mixed)
+        == "(Intensity in [0, 4000]) and exclude Circularity in [0.8, 1]",
+        f"and reads as the two sentences it is: {pop.gate_expression(mixed)}",
+    )
+
+    # Row order is not information about the data, so a blank must not depend on
+    # which row its feature happens to be typed into.
+    holes = ad.AnnData(X=np.array([[np.nan, 0.9], [np.nan, 0.5], [8000.0, 0.9]]))
+    holes.var_names = ["Intensity", "Circularity"]
+    holes.obs_names = ["blank+round", "blank+flat", "bright+round"]
+    round_x = pop.Gate("Circularity", 0.8, 1.0, mode=pop.MODE_EXCLUDE)
+    for join in pop.JOINS:
+        first = pop.gate_mask(
+            holes, [bright, replace(round_x, join=join)]
+        )
+        last = pop.gate_mask(
+            holes, [round_x, replace(bright, join=join)]
+        )
+        check(
+            bool(np.array_equal(first, last)),
+            f"a blank on the first row abstains like any other, so {join} does not "
+            f"depend on the order of the rows",
+        )
+
+    # Judged by nothing at all is kept, whatever the identities would have spelled.
+    nothing = pop.gate_mask(
+        source,
+        [bright, pop.Gate("Circularity", -np.inf, np.inf, join=pop.JOIN_AND,
+                          mode=pop.MODE_EXCLUDE)],
+    )
+    check(
+        bool(nothing[-1]),
+        "an object no gate could judge is kept rather than swept up by an identity",
+    )
+
+
 def test_a_gate_can_keep_the_outside() -> None:
     """Exclude: a window round what you do not want.
 
@@ -1190,6 +1313,8 @@ def main() -> int:
         test_gates_combine_with_and_or_xor()
         print()
         test_a_blank_abstains_rather_than_voting()
+        print()
+        test_two_exclusions_and_is_their_overlap()
         print()
         test_a_gate_can_keep_the_outside()
         print()
