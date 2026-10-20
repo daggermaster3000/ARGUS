@@ -1254,14 +1254,26 @@ on a plate runs corner to corner. **The cap is on the drawing only**: the gating
 the thresholds, the counts and everything written to a file are over every
 selected object, and the line under the plot says so.
 
-**Keep** chooses which side of the bounds a gate keeps. *Inside* is a window
-round what you want — a size range that picks cells out of debris. *Outside* is a
-window round what you do not, which is much the easier thing to place when there
-is one contaminant to throw away, and on a bounded measurement (a solidity, a
-normalised signal) the outside of a window cannot be written as a window at all.
+**These objects** says what the bounds are naming. They pick out the same set
+either way — the objects whose value falls between them — and this says what
+becomes of that set:
 
-A blank abstains under both. Inverting the unjudged objects along with the values
-is the obvious way to write *outside*, and it makes such a gate keep every
+| Mode | The bounds name | Table says |
+|---|---|---|
+| **keep the objects in the bounds** | what you want: a size range that picks cells out of debris | `keep` |
+| **exclude the objects in the bounds** | what you do not: put the window over the debris, or over one contaminating population, and those objects go while everything else stays | `exclude` |
+
+Excluding is one decision. Saying the same thing as what to keep takes two bounds
+round everything that *is not* debris, and on a bounded measurement — a solidity,
+a normalised signal — it cannot be written as one window at all.
+
+A gate reads as what it points at: `exclude Voxels in [0, 120]`, not
+`Voxels not in [0, 120]`. The negated form is a claim about every object the gate
+is not pointing at, which is the harder sentence and the wrong one.
+
+A blank abstains under both modes: an object with no value is no more outside the
+bounds than inside them. Inverting the unjudged along with the values is the
+obvious way to write an exclude, and it would make such a gate keep every
 unmeasured object — on a 4i plate, most of them.
 
 #### Combining gates: and / or / xor

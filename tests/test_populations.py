@@ -1023,8 +1023,25 @@ def test_a_gate_can_keep_the_outside() -> None:
         "and each knows which way round it is",
     )
     check(
-        "not in" in outside.describe() and "not in" not in inside.describe(),
-        f"which it says: {outside.describe()!r} against {inside.describe()!r}",
+        outside.describe() == "exclude A in [3, 7]" and inside.describe() == "A in [3, 7]",
+        f"and says it in terms of the objects it points at: "
+        f"{outside.describe()!r} against {inside.describe()!r}",
+    )
+    check(
+        "not in" not in outside.describe(),
+        "not as a negation, which reads as a claim about everything it is not "
+        "pointing at",
+    )
+    check(
+        pop.MODE_WORDS[pop.MODE_INCLUDE] == "keep"
+        and pop.MODE_WORDS[pop.MODE_EXCLUDE] == "exclude",
+        "with one word each for a table column",
+    )
+    check(
+        "in the bounds" in pop.MODE_LABELS[pop.MODE_INCLUDE]
+        and "in the bounds" in pop.MODE_LABELS[pop.MODE_EXCLUDE],
+        f"and both labels name the same set, the objects in the bounds: "
+        f"{tuple(pop.MODE_LABELS.values())}",
     )
 
     # The blank is the subtle one. Inverting it along with the values is the

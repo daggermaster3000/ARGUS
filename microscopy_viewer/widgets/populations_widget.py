@@ -224,9 +224,9 @@ class PopulationAnalysisWidget(QWidget):
         suggest = QPushButton("Suggest")
         suggest.setToolTip(
             "Put the bounds at the 0.5 and 99.5 percentiles of what is selected — the "
-            "body of the distribution. As “keep what is inside” that cuts the tails, "
-            "which is where the debris and the fused objects are; as “keep what is "
-            "outside” it keeps only the tails."
+            "body of the distribution. Set to keep, that cuts the tails, which is "
+            "where the debris and the fused objects are; set to exclude, it throws "
+            "the body away and keeps only the tails."
         )
         suggest.clicked.connect(self.suggest_bounds)
         bounds_layout.addWidget(suggest)
@@ -236,17 +236,20 @@ class PopulationAnalysisWidget(QWidget):
         for mode in populations.MODES:
             self._gate_mode.addItem(populations.MODE_LABELS[mode], mode)
         self._gate_mode.setToolTip(
-            "Which side of the bounds this gate keeps.\n\n"
-            "“keep what is inside” is a window round what you want — a size range "
-            "that picks cells out of debris.\n\n"
-            "“keep what is outside” is a window round what you do not want, which is "
-            "much the easier thing to place when there is one contaminant to throw "
-            "away. On a bounded measurement — a solidity, a normalised signal — the "
-            "outside of a window cannot be written as a window at all, so this is the "
-            "only way to express it."
+            "What the bounds are naming. They pick out the same objects either way — "
+            "the ones whose value falls between them — and this says what becomes of "
+            "that set.\n\n"
+            "“keep the objects in the bounds” is a window round what you want: a size "
+            "range that picks cells out of debris.\n\n"
+            "“exclude the objects in the bounds” is a window round what you do not "
+            "want: put it over the debris, or over one contaminating population, and "
+            "those objects are thrown away while everything else stays. That is one "
+            "decision; saying the same thing as what to keep takes two bounds round "
+            "everything that is not debris, and on a bounded measurement — a "
+            "solidity, a normalised signal — it cannot be written as one window at all."
         )
         self._gate_mode.currentIndexChanged.connect(lambda _index: self.draw_gate_plot())
-        form.addRow("Keep", self._gate_mode)
+        form.addRow("These objects", self._gate_mode)
 
         self._gate_join = QComboBox()
         for join in populations.JOINS:
@@ -342,7 +345,7 @@ class PopulationAnalysisWidget(QWidget):
 
         self._gate_table = QTableWidget(0, 7)
         self._gate_table.setHorizontalHeaderLabels(
-            ["Feature", "join", "keep", "from", "to", "removed", "blank"]
+            ["Feature", "join", "bounds", "from", "to", "removed", "blank"]
         )
         self._gate_table.setToolTip(
             "The gates, in the order they are applied — top to bottom, each joined to "
@@ -357,6 +360,8 @@ class PopulationAnalysisWidget(QWidget):
             "not measure it. A gate cannot judge those, so they count as a pass for "
             "“and” and as a fail for “or” and “xor” — either way they leave the "
             "running answer alone.\n\n"
+            "“bounds” says what the two numbers name: the objects to keep, or "
+            "the objects to throw away. They pick out the same set either way.\n\n"
             "Untick a row to switch that gate off; click one to load it into the boxes."
         )
         self._gate_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1018,7 +1023,7 @@ class PopulationAnalysisWidget(QWidget):
                     # Blank on the first row: it is joined to nothing, and showing
                     # "and" there reads as a rule that was chosen.
                     (1, "" if row == 0 else str(gate.join)),
-                    (2, "outside" if gate.excluding else "inside"),
+                    (2, populations.MODE_WORDS[gate.mode]),
                     (3, f"{gate.low:.4g}"),
                     (4, f"{gate.high:.4g}"),
                     (

@@ -221,25 +221,29 @@ JOIN_LABELS = {
 #: everything: one unmeasured feature and the union is the whole plate.
 JOIN_IDENTITY = {JOIN_AND: True, JOIN_OR: False, JOIN_XOR: False}
 
-#: Which side of its bounds a gate keeps.
+#: What the bounds are naming: the objects to keep, or the objects to throw away.
 #:
-#: ``include`` keeps the objects inside, which is how a size window picks cells
-#: out of debris. ``exclude`` keeps the objects outside, which is how you throw a
-#: contaminant away: a bound round the thing you do not want is far easier to
-#: place than two bounds round everything you do.
+#: **The bounds mean the same thing either way** — the objects whose value falls
+#: between them. The mode says what is done with that set: ``include`` keeps it
+#: and drops the rest, ``exclude`` drops it and keeps the rest.
 #:
-#: They are not redundant with each other. A single window can be inverted by
-#: hand — two gates, below and above, ORed — but that is three decisions to
-#: express one, and on a bounded feature (a solidity, a normalised signal) the
-#: outside of a window is not expressible as a window at all.
+#: Both framings describe the same masks, and the choice between them is the
+#: whole point. Drawing a box round the debris and binning it is one decision;
+#: expressing the same thing as what to keep is two bounds round everything that
+#: is not debris, which on a bounded measurement — a solidity, a normalised
+#: signal — cannot be written as one window at all. Asking which objects you are
+#: pointing at is the question a microscopist can answer by looking at the plot.
 MODE_INCLUDE = "include"
 MODE_EXCLUDE = "exclude"
 MODES = (MODE_INCLUDE, MODE_EXCLUDE)
 
 MODE_LABELS = {
-    MODE_INCLUDE: "keep what is inside",
-    MODE_EXCLUDE: "keep what is outside",
+    MODE_INCLUDE: "keep the objects in the bounds",
+    MODE_EXCLUDE: "exclude the objects in the bounds",
 }
+
+#: One word for each, for a table column.
+MODE_WORDS = {MODE_INCLUDE: "keep", MODE_EXCLUDE: "exclude"}
 
 
 def _combine(running: np.ndarray, contribution: np.ndarray, join: str) -> np.ndarray:
@@ -265,7 +269,9 @@ class Gate:
     it — see :data:`JOINS`. It is ignored on the first enabled gate, which has
     nothing to combine with.
 
-    :attr:`mode` says which side of the bounds it keeps — see :data:`MODES`.
+    :attr:`mode` says whether the objects between the bounds are the ones to keep
+    or the ones to throw away — see :data:`MODES`. The bounds themselves mean the
+    same thing either way.
     """
 
     feature: str
@@ -280,13 +286,19 @@ class Gate:
         return self.mode == MODE_EXCLUDE
 
     def describe(self) -> str:
+        """The gate in the words of what it points at.
+
+        "exclude Voxels in [0, 120]" rather than "Voxels not in [0, 120]": the
+        bounds name the objects, and the first word says what becomes of them.
+        The negated form reads as a claim about every object that is *not* being
+        pointed at, which is the harder sentence and the wrong one.
+        """
         low = f"{self.low:.4g}" if np.isfinite(self.low) else "-inf"
         high = f"{self.high:.4g}" if np.isfinite(self.high) else "inf"
-        relation = "not in" if self.excluding else "in"
-        return (
-            f"{self.feature} {relation} [{low}, {high}]"
-            + ("" if self.enabled else " (off)")
-        )
+        text = f"{self.feature} in [{low}, {high}]"
+        if self.excluding:
+            text = f"exclude {text}"
+        return text + ("" if self.enabled else " (off)")
 
     def decide(self, values: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
         """``(passes, blank)`` — what this gate judges, and what it cannot judge.
@@ -301,8 +313,10 @@ class Gate:
         """
         array = np.asarray(values, dtype=float)
         blank = ~np.isfinite(array)
-        inside = (array >= float(self.low)) & (array <= float(self.high))
-        passes = ~inside if self.excluding else inside
+        # The bounds pick out one set of objects whichever mode this is. All the
+        # mode decides is whether being in that set is a pass or a failure.
+        selected = (array >= float(self.low)) & (array <= float(self.high))
+        passes = ~selected if self.excluding else selected
         return passes & ~blank, blank
 
     def contribution(self, values: Sequence[float], join: str = JOIN_AND) -> np.ndarray:
@@ -504,8 +518,9 @@ class FeatureHistogram:
         """A gate at the suggested bounds, as a starting point to be moved.
 
         The suggested bounds are the body of the distribution, so as an
-        ``include`` they cut the tails and as an ``exclude`` they keep only the
-        tails. Both are things people want; the caller says which.
+        ``include`` they keep it and cut the tails, and as an ``exclude`` they
+        throw the body away and keep only the tails. Both are things people want;
+        the caller says which.
         """
         return Gate(self.feature, self.suggested_low, self.suggested_high, True,
                     JOIN_AND, mode)

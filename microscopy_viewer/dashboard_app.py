@@ -1205,16 +1205,21 @@ def _prepare_subtab(source, samples, measurables):
         st.caption(
             f"The boxes start at the {pops.SUGGEST_LOW_PERCENTILE:g} and "
             f"{pops.SUGGEST_HIGH_PERCENTILE:g} percentiles of what is selected — the "
-            "body of the distribution. Kept inside, that cuts the tails, where the "
-            "debris and the fused objects are; kept outside, it keeps only the tails."
+            "body of the distribution. Set to keep, that cuts the tails, where the "
+            "debris and the fused objects are; set to exclude, it throws the body "
+            "away and keeps only the tails."
         )
         mode = st.selectbox(
-            "Keep", pops.MODES, format_func=lambda name: pops.MODE_LABELS[name],
+            "These objects", pops.MODES,
+            format_func=lambda name: pops.MODE_LABELS[name],
             key="pop-gate-mode",
-            help="A window round what you want, or round what you do not. The second "
-                 "is much the easier thing to place when there is one contaminant to "
-                 "throw away, and on a bounded measurement the outside of a window "
-                 "cannot be written as a window at all.",
+            help="What the bounds are naming. They pick out the same objects either "
+                 "way — the ones between them — and this says what becomes of "
+                 "that set: a window round what you want, or a window over the debris "
+                 "or one contaminating population that throws those objects away. The "
+                 "second is one decision where saying it as what to keep takes two "
+                 "bounds, and on a bounded measurement it cannot be said as one "
+                 "window at all.",
         )
         join = st.selectbox(
             "Join", pops.JOINS, format_func=lambda name: pops.JOIN_LABELS[name],
@@ -1296,7 +1301,7 @@ def _prepare_subtab(source, samples, measurables):
                     "feature": [gate.feature for gate in gates],
                     "join": ["" if index == 0 else gate.join
                              for index, gate in enumerate(gates)],
-                    "keep": ["outside" if gate.excluding else "inside" for gate in gates],
+                    "bounds": [pops.MODE_WORDS[gate.mode] for gate in gates],
                     "from": [gate.low for gate in gates],
                     "to": [gate.high for gate in gates],
                     "removed": [cost.n_removed for cost in report.costs],
@@ -1304,9 +1309,11 @@ def _prepare_subtab(source, samples, measurables):
                 }
             )
             st.caption(
-                "One row per gate, in the order they are applied. “removed” is that "
-                "gate on its own over the whole selection; “blank” is objects it "
-                "cannot judge, which leave the answer alone."
+                "One row per gate, in the order they are applied. “bounds” says "
+                "whether the two numbers name the objects to keep or the objects to "
+                "throw away. “removed” is that gate on its own over the whole "
+                "selection; “blank” is objects it cannot judge, which leave the "
+                "answer alone."
             )
             st.dataframe(rows, hide_index=True, width="stretch")
             values_csv(rows, "These gates (CSV)", "gates.csv", "pop-gates-csv")
