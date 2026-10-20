@@ -777,12 +777,16 @@ def test_every_object_gets_a_cluster(directory: Path) -> None:
     )
 
 
-def test_a_fresh_file_opens_clustered(directory: Path) -> None:
-    """The page a file is opened on draws something, without being pressed first.
+def test_a_fresh_file_is_not_clustered_for_you(directory: Path) -> None:
+    """Opening a file computes nothing, and the page still works.
 
-    A file the viewer has just exported has no clustering, and every tab reads
-    one. Requiring the button first meant the page opened on nothing at all,
-    which is the state this test exists to keep out.
+    Clustering a plate is the better part of a minute, and a page that spends it
+    because a file was opened has decided on the reader's behalf what they came
+    for. Nothing runs until **Cluster** is pressed.
+
+    The other half of the bargain is the part this test exists for: not
+    clustering must not mean an empty page. It used to ``st.stop()`` — six tabs
+    replaced by one sentence — and before that every tab clustered on its own.
     """
     print("opening a file that has never been clustered")
 
@@ -793,26 +797,60 @@ def test_a_fresh_file_opens_clustered(directory: Path) -> None:
     from streamlit.testing.v1 import AppTest
 
     path = _plate_file(directory, images=3, per_image=120)
-    check(not db.load_clustering(db.read(str(path))), "the file starts with no clustering")
-
-    page = AppTest.from_file(str(db.app_path()), default_timeout=600)
+    page = AppTest.from_file(str(db.app_path()), default_timeout=900)
     page.run()
     page.text_input[0].set_value(str(path)).run()
 
-    check(not page.exception, f"the page runs without raising: {[str(e.value)[:120] for e in page.exception]}")
-    charts = page.get("arrow_vega_lite_chart") + page.get("vega_lite_chart")
-    check(bool(charts), f"and draws its plots on the first view, unpressed ({len(charts)} chart(s))")
+    check(not page.exception, f"the page runs: {[str(e.value)[:140] for e in page.exception]}")
     check(
-        any(b.label == "Re-cluster" for b in page.button),
-        f"the button now offers to redo it, not to start it: {[b.label for b in page.button]}",
+        not db.load_clustering(db.read(str(path))),
+        "opening the file clustered nothing",
+    )
+    check(
+        [tab.label for tab in page.tabs]
+        == ["Plate", "Wells", "Space", "Features", "Statistics", "Table"],
+        "and every tab is still there rather than replaced by a message",
     )
 
+    captions = [str(c.value) for c in page.caption]
+    check(
+        any("not grouped yet" in text for text in captions),
+        f"the caption says so: {captions[0][:100] if captions else None!r}",
+    )
+    messages = [str(m.value) for m in page.info]
+    check(
+        sum("Cluster" in text for text in messages) >= 3,
+        f"and the tabs that need groups each say what to press ({len(messages)} message(s))",
+    )
+
+    # What has to keep working without a clustering: one well's positions, and
+    # the rows. Those are the two that need nothing but the file.
+    check(
+        bool(page.get("arrow_vega_lite_chart") + page.get("vega_lite_chart")),
+        "the well is still drawn, coloured by a measurement",
+    )
+    downloads = [b.label for b in page.get("download_button")]
+    check(
+        "These rows (CSV)" in downloads,
+        f"and the table is still a way out of the page: {downloads}",
+    )
+    check(
+        [b.label for b in page.button] == ["Cluster"],
+        f"the button offers to start it, not to redo it: {[b.label for b in page.button]}",
+    )
+
+    # And pressing it does the thing it says.
+    next(b for b in page.button if b.label == "Cluster").click().run()
+    check(not page.exception, f"pressing it runs clean: {[str(e.value)[:140] for e in page.exception]}")
     record = db.load_clustering(db.read(str(path)))
-    check(bool(record), "the clustering was stored on the file, so opening it again is instant")
+    check(bool(record), "the clustering is computed and stored on the file")
     check(
         record.get("n_objects") == 360,
-        f"and covers every object rather than the sample: {record.get('n_objects')}",
+        f"covering every object rather than the sample: {record.get('n_objects')}",
     )
+    check(not page.info, f"and nothing is still asking to be clustered: {len(page.info)}")
+    charts = page.get("arrow_vega_lite_chart") + page.get("vega_lite_chart")
+    check(len(charts) >= 5, f"with the plots drawn ({len(charts)} chart(s))")
 
 
 def test_the_page_skeleton(directory: Path) -> None:
@@ -839,6 +877,12 @@ def test_the_page_skeleton(directory: Path) -> None:
     page.run()
     page.text_input[0].set_value(str(path)).run()
     check(not page.exception, f"the page runs: {[str(e.value)[:160] for e in page.exception]}")
+
+    # Clustered first: the layout under test is the one a reader works in, and
+    # nothing is clustered just because a file was opened — see
+    # test_a_fresh_file_is_not_clustered_for_you.
+    next(b for b in page.button if b.label == "Cluster").click().run()
+    check(not page.exception, f"clustering runs: {[str(e.value)[:160] for e in page.exception]}")
 
     # -- the tabs -----------------------------------------------------------
     labels = [tab.label for tab in page.tabs]
@@ -967,7 +1011,7 @@ def main() -> int:
             ("oneclustering", test_one_clustering),
             ("assignall", test_every_object_gets_a_cluster),
             ("blanks", test_blanks_do_not_poison_the_pca),
-            ("freshfile", test_a_fresh_file_opens_clustered),
+            ("freshfile", test_a_fresh_file_is_not_clustered_for_you),
             ("skeleton", test_the_page_skeleton),
         ):
             case = directory / name

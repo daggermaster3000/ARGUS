@@ -1225,9 +1225,21 @@ the `.h5ad`, and read by every tab: the UMAP, the well display, one well's
 neighbourhood statistics, and the label set written back into the plate. A colour
 means the same thing everywhere, and cluster 3 is one thing rather than three.
 
-It is recomputed only when you press **Re-cluster**. Change a parameter and the
-sidebar says the settings have moved on; nothing is recomputed until you ask,
-because it is the one slow step on the page.
+**Nothing is clustered because a file was opened.** Clustering a plate is the
+better part of a minute, and a page that spends it before showing anything has
+decided for you that clusters are what you came for. Press **Cluster** in the
+sidebar; the console the shortcut opens says where it is up to. It is then stored
+in the `.h5ad`, so opening that file again is immediate.
+
+Until then the page is not empty, which is the other half of the bargain: the
+tabs that need a group per object say so and say what to press, while **Space**
+— coloured by any measurement — and **Table** work on nothing but the file.
+*The spatial statistics group by* → *Bins of one measurement* is the other way to
+get groups, and needs no clustering at all.
+
+Once there is one, it is recomputed only when you press **Re-cluster**. Change a
+parameter and the sidebar says the settings have moved on; nothing is recomputed
+until you ask, because it is the one slow step on the page.
 
 ```
 Objects per image             sampled from each image and clustered

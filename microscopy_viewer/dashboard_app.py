@@ -834,6 +834,128 @@ def _plate_tab(
 TABLE_ROWS = 2_000
 
 
+def _feature_plots(adata, groups, colours, feature: str, pair: str) -> None:
+    """One measurement per group, and two measurements against each other.
+
+    Both are per group, so both need a group per object. Its own function so
+    that saying so and stopping skips these two plots rather than every tab
+    written after them.
+    """
+    if not groups:
+        st.info(
+            "Both plots here are per group. Press **Cluster** in the sidebar, or "
+            "set *The spatial statistics group by* to bins of one measurement."
+        )
+        return
+
+    figure = _figure()
+    axes = figure.add_subplot(111)
+    data = [db.values_of(adata, feature)[(adata.obs[db.CLUSTER_KEY] == g).to_numpy()]
+            for g in groups]
+    # The ticks are set afterwards rather than passed in: matplotlib
+    # renamed boxplot's `labels` to `tick_labels` in 3.9 and removed the
+    # old spelling, and this has to draw on both sides of that.
+    drawn = axes.boxplot(data, showfliers=False, patch_artist=True)
+    # Painted to match: a box plot beside a scatter of the same groups in
+    # different colours is two plots the reader has to reconcile by hand.
+    for patch, group in zip(drawn["boxes"], groups):
+        patch.set_facecolor(colours.get(str(group), db.OVERFLOW_COLOUR))
+        patch.set_alpha(0.85)
+        # The house style's black edge, in matplotlib: the same figure
+        # read the same way whichever library drew it.
+        patch.set_edgecolor(db.OUTLINE)
+    for median in drawn["medians"]:
+        median.set_color(db.OUTLINE)
+    axes.set_xticks(range(1, len(groups) + 1), [str(g) for g in groups], rotation=45)
+    axes.set_ylabel(feature, fontsize=8)
+    axes.set_title(f"{feature} by group", fontsize=9)
+    axes.tick_params(labelsize=7)
+    show(figure)
+    st.caption(
+        "Scaled values: the features were z-scored before clustering, so zero is "
+        "the image's mean and the units are standard deviations. Whiskers to 1.5 "
+        "IQR, outliers not drawn."
+    )
+
+    x, y = db.values_of(adata, feature), db.values_of(adata, pair)
+    frame = _points(adata, x, y, db.CLUSTER_KEY, extra=_tooltip_columns(adata, feature))
+    drawn_pair, note = _scatter(
+        frame,
+        db.CLUSTER_KEY,
+        colours,
+        feature,
+        pair,
+        _tooltip_columns(adata, db.CLUSTER_KEY) + ["x", "y"],
+        height=HEIGHT_SECOND,
+    )
+    chart(drawn_pair, points=len(frame))
+    st.caption(
+        f"{feature} against {pair}, one dot per object, coloured by group."
+        + (f" {note}" if note else "")
+    )
+    values_csv(
+        frame.rename(columns={"x": feature, "y": pair}),
+        "These values (CSV)",
+        f"{feature}_vs_{pair}.csv".replace(" ", "_").replace("/", "_"),
+        "features-csv",
+    )
+
+
+def _tally(adata, colours: dict[str, str], image: str, grouped: bool) -> None:
+    """How many objects are in each group, and the numbers behind the bars.
+
+    Its own function because of the guard: without groups there is nothing to
+    count, and an early return inside the tab body would skip every tab written
+    after it.
+    """
+    st.subheader("How many of each")
+    if not grouped:
+        st.info(
+            "Counting the objects of each group needs groups. Press **Cluster** in "
+            "the sidebar, or group by bins of one measurement — either fills this in."
+        )
+        return
+
+    counts = adata.obs[db.CLUSTER_KEY].value_counts().sort_index()
+    tally = counts.rename("objects").reset_index()
+    tally.columns = [db.CLUSTER_KEY, "objects"]
+    tally[db.CLUSTER_KEY] = tally[db.CLUSTER_KEY].astype(str)
+    tally["share"] = tally["objects"] / tally["objects"].sum()
+    domain, scheme = db.scale_for(colours)
+    st.caption(
+        f"One bar per group, in the order the clustering numbered them. "
+        f"{int(tally['objects'].sum()):,} object(s) in {len(tally)} group(s)."
+    )
+    chart(
+        alt.Chart(tally)
+        .mark_bar()
+        .encode(
+            x=alt.X(f"{db.CLUSTER_KEY}:N", sort=domain, title="cluster"),
+            y=alt.Y("objects:Q", title="objects"),
+            color=alt.Color(
+                f"{db.CLUSTER_KEY}:N",
+                scale=alt.Scale(domain=domain, range=scheme),
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip(f"{db.CLUSTER_KEY}:N", title="cluster"),
+                alt.Tooltip("objects:Q", format=",d"),
+                alt.Tooltip("share:Q", format=".1%"),
+            ],
+        )
+        .properties(height=HEIGHT_SMALL),
+    )
+    st.dataframe(
+        tally.style.format({"objects": "{:,.0f}", "share": "{:.1%}"}),
+        hide_index=True,
+        width="stretch",
+    )
+    values_csv(
+        tally, "These counts (CSV)",
+        f"{(image or 'image').replace('/', '_')}_counts.csv", "space-counts-csv",
+    )
+
+
 def _table_tab(adata, image: str, colours: dict[str, str]) -> None:
     """The objects as rows, and a CSV of them.
 
@@ -860,9 +982,17 @@ def _table_tab(adata, image: str, colours: dict[str, str]) -> None:
     left, right = st.columns([1, 3])
     with left:
         st.subheader("Rows")
-        wanted = st.multiselect(
-            "Clusters", list(colours), default=list(colours), key="table-clusters",
-            help="Filtering removes rows; nothing is selected in. All of them to start.",
+        # Only offered when there is something to filter by: a file nobody has
+        # clustered has one group, everything, and a cluster filter on it would be
+        # a control that can only remove every row.
+        wanted = (
+            st.multiselect(
+                "Clusters", list(colours), default=list(colours), key="table-clusters",
+                help="Filtering removes rows; nothing is selected in. All of them to "
+                     "start.",
+            )
+            if colours
+            else None
         )
         columns = st.multiselect(
             "Columns",
@@ -873,12 +1003,13 @@ def _table_tab(adata, image: str, colours: dict[str, str]) -> None:
                  "a script can be narrowed before it is written.",
         )
         st.caption(
-            "The clusters are the plate-wide ones. The measurements are scaled — "
-            "z-scores, as everything was clustered on — not grey levels."
+            ("The clusters are the plate-wide ones. " if colours else "")
+            + "The measurements are scaled — z-scores, as everything was clustered "
+            "on — not grey levels."
         )
 
     shown = frame
-    if db.CLUSTER_KEY in shown.columns:
+    if wanted is not None and db.CLUSTER_KEY in shown.columns:
         shown = shown[shown[db.CLUSTER_KEY].isin([str(name) for name in wanted])]
     shown = shown[[name for name in columns if name in shown.columns]]
 
@@ -914,10 +1045,6 @@ def _table_tab(adata, image: str, colours: dict[str, str]) -> None:
             f"{(image or 'objects').replace('/', '_')}_objects.csv", "table-csv",
         )
 
-
-#: Set to the file whose first clustering raised, so a failure shows the error
-#: once instead of being retried on every re-run of the page.
-_FAILED_KEY = "_clustering_failed"
 
 #: Where the user's own colours live, as ``{kind: {value: hex}}``.
 COLOUR_KEY = "_colour_overrides"
@@ -1141,7 +1268,6 @@ def main() -> None:
         )
 
         if recluster:
-            st.session_state.pop(_FAILED_KEY, None)
             if _cluster_now(adata, path, wanted, keep, st.empty()):
                 st.rerun()
 
@@ -1182,29 +1308,11 @@ def main() -> None:
         )
 
 
-    if not stored:
-        # A file the viewer has just exported has no clustering, and every tab on
-        # this page reads one — so without it there is nothing here at all. It is
-        # computed on the first view rather than waiting for the button: the page
-        # is opened to look at the clusters, and an empty page with a button on it
-        # is a worse answer than a minute of work that is then stored on the file
-        # and never repeated. The button is for changing it.
-        if st.session_state.get(_FAILED_KEY) == str(path):
-            st.error(
-                "The first clustering failed — the error is above. Change the settings "
-                "in the sidebar and press **Cluster** to try again."
-            )
-            st.stop()
-        st.info(
-            f"Clustering this file for the first time — {wanted.describe()}. "
-            "It is then stored on the file and every tab reads it; change it in the "
-            "sidebar and press **Re-cluster**."
-        )
-        if _cluster_now(adata, path, wanted, keep, st.empty()):
-            st.rerun()
-        st.session_state[_FAILED_KEY] = str(path)
-        st.stop()
-
+    # Nothing is computed because a file was opened. Clustering a plate is the
+    # better part of a minute, and a page that spends it before showing anything
+    # has decided on the reader's behalf that clusters are what they came for.
+    # Press **Cluster** in the sidebar. The tabs that need one say so; the ones
+    # that do not — the objects, one well's positions, the table — work now.
     stamp = str(stored.get("created", ""))
     try:
         adata, method = _prepared(path, mtime, image, limit, grouping, bins, stamp)
@@ -1212,19 +1320,29 @@ def main() -> None:
         st.error(f"The objects of this image could not be read: {exc}")
         st.stop()
 
-    groups = list(adata.obs[db.CLUSTER_KEY].cat.categories)
+    # Groups can come from somewhere other than the clustering: binning a
+    # measurement writes the same column, so choosing that in the sidebar makes
+    # the spatial statistics work on a file nobody has clustered.
+    grouped = db.CLUSTER_KEY in adata.obs
+    groups = list(adata.obs[db.CLUSTER_KEY].cat.categories) if grouped else []
     # From the stored record, so the well display, the UMAP and the plate's own
     # label set are all painted the same, and then through paint() so the
     # sidebar's pickers reach every one of them.
-    base = db.clustering_palette(stored) if grouping == "cluster" else db.group_colours(adata)
+    base = db.clustering_palette(stored) if (stored and grouping == "cluster") \
+        else (db.group_colours(adata) if grouped else {})
     base = {name: base.get(name, db.OVERFLOW_COLOUR) for name in map(str, groups)}
     colours = _colour_pickers(colour_slot, base)
 
     st.caption(
         f"{adata.n_obs:,} of {facts['objects']:,} object(s)"
         + (f" from {image}" if image else "")
-        + f", {facts['features']} feature(s) measured · grouped by {method} "
-        f"into {len(groups)} group(s)."
+        + f", {facts['features']} feature(s) measured · "
+        + (
+            f"grouped by {method} into {len(groups)} group(s)."
+            if grouped
+            else "not grouped yet — press **Cluster** in the sidebar, or group by bins "
+                 "of one measurement."
+        )
     )
 
     plate_tab, wells_tab, space_tab, features_tab, stats_tab, table_tab = st.tabs(
@@ -1247,9 +1365,12 @@ def main() -> None:
         left, right = st.columns([1, 3])
         with left:
             st.subheader("The well")
+            # The cluster is only on the list once there is one to colour by.
             colour = st.selectbox(
                 "Colour by",
-                [db.CLUSTER_KEY] + db.feature_names(adata) + db.obs_columns(adata, numeric_only=True),
+                ([db.CLUSTER_KEY] if grouped else [])
+                + db.feature_names(adata)
+                + db.obs_columns(adata, numeric_only=True),
                 key="space-colour",
             )
             xy = np.asarray(adata.obsm["spatial"])
@@ -1288,53 +1409,11 @@ def main() -> None:
                 hint += f"Colour scale: {scale_note}. "
             st.caption(hint + note)
 
-            st.subheader("How many of each")
-            counts = adata.obs[db.CLUSTER_KEY].value_counts().sort_index()
-
-            tally = counts.rename("objects").reset_index()
-            tally.columns = [db.CLUSTER_KEY, "objects"]
-            tally[db.CLUSTER_KEY] = tally[db.CLUSTER_KEY].astype(str)
-            tally["share"] = tally["objects"] / tally["objects"].sum()
-            domain, scheme = db.scale_for(colours)
-            st.caption(
-                f"One bar per group, in the order the clustering numbered them. "
-                f"{int(tally['objects'].sum()):,} object(s) in {len(tally)} group(s)."
+            _tally(adata, colours, image, grouped)
+            values_csv(
+                points, "These points (CSV)",
+                f"{(image or 'image').replace('/', '_')}_points.csv", "space-points-csv",
             )
-            chart(
-                alt.Chart(tally)
-                .mark_bar()
-                .encode(
-                    x=alt.X(f"{db.CLUSTER_KEY}:N", sort=domain, title="cluster"),
-                    y=alt.Y("objects:Q", title="objects"),
-                    color=alt.Color(
-                        f"{db.CLUSTER_KEY}:N",
-                        scale=alt.Scale(domain=domain, range=scheme),
-                        legend=None,
-                    ),
-                    tooltip=[
-                        alt.Tooltip(f"{db.CLUSTER_KEY}:N", title="cluster"),
-                        alt.Tooltip("objects:Q", format=",d"),
-                        alt.Tooltip("share:Q", format=".1%"),
-                    ],
-                )
-                .properties(height=HEIGHT_SMALL),
-            )
-            left_numbers, right_numbers = st.columns([3, 2])
-            with left_numbers:
-                st.dataframe(
-                    tally.style.format({"objects": "{:,.0f}", "share": "{:.1%}"}),
-                    hide_index=True,
-                    width="stretch",
-                )
-            with right_numbers:
-                values_csv(
-                    tally, "These counts (CSV)",
-                    f"{(image or 'image').replace('/', '_')}_counts.csv", "space-counts-csv",
-                )
-                values_csv(
-                    points, "These points (CSV)",
-                    f"{(image or 'image').replace('/', '_')}_points.csv", "space-points-csv",
-                )
 
     # -- what -----------------------------------------------------------------
     with features_tab:
@@ -1356,57 +1435,14 @@ def main() -> None:
             )
 
         with right:
-            figure = _figure()
-            axes = figure.add_subplot(111)
-            data = [db.values_of(adata, feature)[(adata.obs[db.CLUSTER_KEY] == g).to_numpy()]
-                    for g in groups]
-            # The ticks are set afterwards rather than passed in: matplotlib
-            # renamed boxplot's `labels` to `tick_labels` in 3.9 and removed the
-            # old spelling, and this has to draw on both sides of that.
-            drawn = axes.boxplot(data, showfliers=False, patch_artist=True)
-            # Painted to match: a box plot beside a scatter of the same groups in
-            # different colours is two plots the reader has to reconcile by hand.
-            for patch, group in zip(drawn["boxes"], groups):
-                patch.set_facecolor(colours.get(str(group), db.OVERFLOW_COLOUR))
-                patch.set_alpha(0.85)
-                # The house style's black edge, in matplotlib: the same figure
-                # read the same way whichever library drew it.
-                patch.set_edgecolor(db.OUTLINE)
-            for median in drawn["medians"]:
-                median.set_color(db.OUTLINE)
-            axes.set_xticks(range(1, len(groups) + 1), [str(g) for g in groups], rotation=45)
-            axes.set_ylabel(feature, fontsize=8)
-            axes.set_title(f"{feature} by group", fontsize=9)
-            axes.tick_params(labelsize=7)
-            show(figure)
-            st.caption(
-                "Scaled values: the features were z-scored before clustering, so zero is "
-                "the image's mean and the units are standard deviations. Whiskers to 1.5 "
-                "IQR, outliers not drawn."
-            )
+            _feature_plots(adata, groups, colours, feature, pair)
 
-            x, y = db.values_of(adata, feature), db.values_of(adata, pair)
-            frame = _points(adata, x, y, db.CLUSTER_KEY, extra=_tooltip_columns(adata, feature))
-            drawn_pair, note = _scatter(
-                frame,
-                db.CLUSTER_KEY,
-                colours,
-                feature,
-                pair,
-                _tooltip_columns(adata, db.CLUSTER_KEY) + ["x", "y"],
-                height=HEIGHT_SECOND,
-            )
-            chart(drawn_pair, points=len(frame))
-            st.caption(
-                f"{feature} against {pair}, one dot per object, coloured by group."
-                + (f" {note}" if note else "")
-            )
-            values_csv(
-                frame.rename(columns={"x": feature, "y": pair}),
-                "These values (CSV)",
-                f"{feature}_vs_{pair}.csv".replace(" ", "_").replace("/", "_"),
-                "features-csv",
-            )
+    # -- the way out, filled before the statistics below it: those stop the
+    # script when they have no groups to compare, and a tab filled after that
+    # point would be left empty. The order on screen is st.tabs()'s, not this.
+    # -- the way out ----------------------------------------------------------
+    with table_tab:
+        _table_tab(adata, image, colours)
 
     # -- does it mean anything ------------------------------------------------
     with stats_tab:
@@ -1415,6 +1451,13 @@ def main() -> None:
             "permutation test per plot — so each runs when you ask for it and is "
             "remembered afterwards."
         )
+        if not grouped:
+            st.info(
+                "Every statistic here compares groups of objects, so it needs a "
+                "group per object. Press **Cluster** in the sidebar, or set *The "
+                "spatial statistics group by* to bins of one measurement."
+            )
+            st.stop()
         graph_controls, graph_result = st.columns([1, 3])
         with graph_controls:
             st.subheader("Neighbours")
@@ -1603,9 +1646,6 @@ def main() -> None:
                     "stats-centrality-csv",
                 )
 
-    # -- the way out ----------------------------------------------------------
-    with table_tab:
-        _table_tab(adata, image, colours)
 
 
 if __name__ == "__main__":
