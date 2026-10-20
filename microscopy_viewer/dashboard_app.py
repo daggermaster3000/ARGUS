@@ -1141,6 +1141,14 @@ GATES_KEY = "pop_gates"
 #: The calls, kept because they cost real time and must not be recomputed by a
 #: click on an unrelated control.
 CALLS_KEY = "pop_calls"
+#: Bumped every time the gates change, and spliced into the table's widget key.
+#:
+#: ``st.data_editor`` keeps the edits made to it separately from the data it was
+#: given, and replays them onto whatever it is handed next. Once an edit has been
+#: folded into the gates, that replay is the same edit applied twice — and after
+#: a deleted row, applied to the wrong gate. A new key is a new widget with no
+#: edits pending, which is the only way to tell it the edit has landed.
+EPOCH_KEY = "pop_gate_epoch"
 
 
 def _gates() -> list:
@@ -1149,10 +1157,106 @@ def _gates() -> list:
 
 def _set_gates(gates) -> None:
     st.session_state[GATES_KEY] = list(gates)
+    st.session_state[EPOCH_KEY] = int(st.session_state.get(EPOCH_KEY, 0)) + 1
     # The thresholds were pooled over the old gating, so they are no longer the
     # thresholds of what is on screen. Dropping them is the honest move; keeping
     # them beside changed gates is the dishonest one.
     st.session_state.pop(CALLS_KEY, None)
+
+
+#: The table's columns, in the order they are shown.
+GATE_COLUMNS = ("on", "feature", "join", "bounds", "from", "to", "removed", "blank")
+#: The two the gating computes rather than the user, so they cannot be typed in.
+GATE_READ_ONLY = ("removed", "blank")
+
+_WORD_MODES = {word: mode for mode, word in pops.MODE_WORDS.items()}
+
+
+def _bound(value, default: float) -> float:
+    """One cell of the ``from``/``to`` columns as a bound.
+
+    A cleared cell is a missing bound rather than a zero, so it reads as the
+    infinity on that side: a gate with nothing typed in it removes nothing.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return default if np.isnan(number) else number
+
+
+def _gates_from_rows(frame, suggest=None) -> list:
+    """The edited table as gates, row order kept.
+
+    A row whose feature has not been chosen yet is not a gate and is skipped
+    rather than guessed at; the empty row ``st.data_editor`` adds at the bottom
+    is exactly that row, and guessing would make clicking the ``+`` change the
+    answer.
+
+    *suggest* is called for a row that names a feature but has **both** bounds
+    empty — a row that has just been added — and returns the pair to start it at.
+    One empty bound is left empty, because a gate open at one end is a thing
+    people mean.
+
+    The feature is not checked against the file. A gate on a measurement this
+    file does not carry is reported as missing and skipped at apply time, and it
+    has to survive a pass through the table to be reported at all.
+    """
+    gates = []
+    for _, row in frame.iterrows():
+        feature = row.get("feature")
+        if not isinstance(feature, str) or not feature.strip():
+            continue
+        low = _bound(row.get("from"), float("-inf"))
+        high = _bound(row.get("to"), float("inf"))
+        if suggest is not None and not np.isfinite(low) and not np.isfinite(high):
+            low, high = suggest(feature)
+        join = row.get("join")
+        mode = _WORD_MODES.get(row.get("bounds"), pops.MODE_INCLUDE)
+        enabled = row.get("on")
+        gates.append(
+            pops.Gate(
+                str(feature),
+                float(low),
+                float(high),
+                True if enabled is None or (isinstance(enabled, float) and np.isnan(enabled))
+                else bool(enabled),
+                join if join in pops.JOINS else pops.JOIN_AND,
+                mode,
+            )
+        )
+    return gates
+
+
+def _gate_rows(gates, report):
+    """The gates as the table shows them, one row each.
+
+    The inverse of :func:`_gates_from_rows`, which has to be exact: the page
+    writes the gates back on every rerun, so a round trip that is not the
+    identity is a page that rewrites its own state forever.
+    """
+    import pandas as pd
+
+    costs = list(report.costs)
+    return pd.DataFrame(
+        {
+            "on": pd.Series([bool(gate.enabled) for gate in gates], dtype=bool),
+            "feature": pd.Series([str(gate.feature) for gate in gates], dtype=object),
+            "join": pd.Series([str(gate.join) for gate in gates], dtype=object),
+            "bounds": pd.Series(
+                [pops.MODE_WORDS[gate.mode] for gate in gates], dtype=object
+            ),
+            "from": pd.Series([float(gate.low) for gate in gates], dtype=float),
+            "to": pd.Series([float(gate.high) for gate in gates], dtype=float),
+            "removed": pd.Series(
+                [int(cost.n_removed) for cost in costs[: len(gates)]], dtype="Int64"
+            ),
+            "blank": pd.Series(
+                [int(cost.n_blank) for cost in costs[: len(gates)]], dtype="Int64"
+            ),
+        },
+        columns=list(GATE_COLUMNS),
+    )
 
 
 def _populations_tab(path: str, mtime: float) -> None:
@@ -1179,150 +1283,140 @@ def _prepare_subtab(source, samples, measurables):
         "Which samples go into the analysis, and which objects are not cells. "
         "Everything below reads the result, so this is the first decision."
     )
-    left, right = st.columns([1, 3])
 
-    with left:
-        st.subheader("Samples")
-        chosen = st.multiselect(
-            "In the analysis", samples, default=samples, key="pop-samples",
-            help="Filtering removes samples; nothing is selected in. All of them to "
-                 "start. An empty list is nothing, not everything.",
-        )
-
-        st.subheader("A gate")
-        feature = st.selectbox("Feature", measurables, key="pop-gate-feature")
-        suggestion = pops.feature_histogram(
-            source, feature, within=pops.sample_mask(source, chosen)
-        )
-        low = st.number_input(
-            "Keep from", value=float(suggestion.suggested_low), format="%.4g",
-            key="pop-gate-low",
-        )
-        high = st.number_input(
-            "to", value=float(suggestion.suggested_high), format="%.4g",
-            key="pop-gate-high",
-        )
-        st.caption(
-            f"The boxes start at the {pops.SUGGEST_LOW_PERCENTILE:g} and "
-            f"{pops.SUGGEST_HIGH_PERCENTILE:g} percentiles of what is selected — the "
-            "body of the distribution. Set to keep, that cuts the tails, where the "
-            "debris and the fused objects are; set to exclude, it throws the body "
-            "away and keeps only the tails."
-        )
-        mode = st.selectbox(
-            "These objects", pops.MODES,
-            format_func=lambda name: pops.MODE_LABELS[name],
-            key="pop-gate-mode",
-            help="What the bounds are naming. They pick out the same objects either "
-                 "way — the ones between them — and this says what becomes of "
-                 "that set: a window round what you want, or a window over the debris "
-                 "or one contaminating population that throws those objects away. The "
-                 "second is one decision where saying it as what to keep takes two "
-                 "bounds, and on a bounded measurement it cannot be said as one "
-                 "window at all.",
-        )
-        join = st.selectbox(
-            "Join", pops.JOINS, format_func=lambda name: pops.JOIN_LABELS[name],
-            key="pop-gate-join",
-            help="How this gate combines with the ones already in the list. The gates "
-                 "apply top to bottom with no brackets and no precedence, so "
-                 "“A or B and C” means “(A or B) and C”; the rule is written out "
-                 "under the plot.",
-        )
-        if st.button("Add gate", key="pop-gate-add"):
-            _set_gates(
-                _gates()
-                + [pops.Gate(feature, float(low), float(high), True, join, mode)]
-            )
-            st.rerun()
-
-        gates = _gates()
-        if gates:
-            drop = st.multiselect(
-                "Remove",
-                list(range(len(gates))),
-                format_func=lambda index: f"{index + 1}. {gates[index].describe()}",
-                key="pop-gate-drop",
-            )
-            if drop and st.button("Remove these", key="pop-gate-remove"):
-                _set_gates([g for i, g in enumerate(gates) if i not in set(drop)])
-                st.rerun()
-            if st.button("Remove every gate", key="pop-gate-clear"):
-                _set_gates([])
-                st.rerun()
+    chosen = st.multiselect(
+        "Samples in the analysis", samples, default=samples, key="pop-samples",
+        help="Filtering removes samples; nothing is selected in. All of them to "
+             "start. An empty list is nothing, not everything.",
+    )
 
     selection = pops.sample_mask(source, chosen)
     gates = _gates()
     report = pops.gate_report(source, gates, within=selection)
     keep = pops.gate_mask(source, gates, within=selection)
 
-    with right:
-        if not chosen:
-            st.warning(
-                "No samples chosen. Put one back in the list on the left — an empty "
-                "list is nothing, not everything."
-            )
-            return chosen, keep, report
+    if not chosen:
+        st.warning(
+            "No samples chosen. Put one back in the list above — an empty list is "
+            "nothing, not everything."
+        )
+        return chosen, keep, report
 
+    st.caption(
+        f"{report.n_kept:,} of {report.n_objects:,} object(s) kept across "
+        f"{len(chosen)} sample(s). Rule, applied in order: {report.expression}"
+    )
+    if report.combined:
         st.caption(
-            f"{report.n_kept:,} of {report.n_objects:,} object(s) kept across "
-            f"{len(chosen)} sample(s). Rule, applied in order: {report.expression}"
+            "“removed” below is each gate on its own, so with or / xor in the rule, "
+            "or two excludes side by side, it does not add up to the total kept."
         )
-        if report.combined:
-            st.caption(
-                "“removed” below is each gate on its own, so with or / xor in the rule "
-                "it does not add up to the total kept."
-            )
-        if report.missing:
-            st.warning(
-                "Not in this file, so not applied: " + ", ".join(report.missing)
-            )
+    if report.missing:
+        st.warning("Not in this file, so not applied: " + ", ".join(report.missing))
 
-        view = st.radio(
-            "View", ["Distribution", "Against another feature"],
-            horizontal=True, key="pop-view",
+    view = st.radio(
+        "View", ["Distribution", "Against another feature"],
+        horizontal=True, key="pop-view",
+    )
+    axes = st.columns(2)
+    with axes[0]:
+        feature = st.selectbox(
+            "Feature", measurables, key="pop-feature",
+            help="Which measurement the plot below is of. The gates are set in the "
+                 "table, not here — this only chooses what is drawn.",
         )
-        if view.startswith("Distribution"):
-            _gate_histogram(source, feature, selection, float(low), float(high))
-        else:
-            other = st.selectbox(
-                "Against",
-                [name for name in measurables if name != feature] or measurables,
-                key="pop-against",
-            )
-            _gate_scatter(source, feature, other, gates, selection, float(low), float(high))
+    with axes[1]:
+        others = [name for name in measurables if name != feature] or measurables
+        other = st.selectbox(
+            "Against", others, key="pop-against",
+            disabled=view.startswith("Distribution"),
+        )
 
-        if gates:
-            import pandas as pd
+    if view.startswith("Distribution"):
+        _gate_histogram(source, feature, gates, selection)
+    else:
+        _gate_scatter(source, feature, other, gates, selection)
 
-            rows = pd.DataFrame(
-                {
-                    "#": [index + 1 for index in range(len(gates))],
-                    "feature": [gate.feature for gate in gates],
-                    "join": ["" if index == 0 else gate.join
-                             for index, gate in enumerate(gates)],
-                    "bounds": [pops.MODE_WORDS[gate.mode] for gate in gates],
-                    "from": [gate.low for gate in gates],
-                    "to": [gate.high for gate in gates],
-                    "removed": [cost.n_removed for cost in report.costs],
-                    "blank": [cost.n_blank for cost in report.costs],
-                }
-            )
-            st.caption(
-                "One row per gate, in the order they are applied. “bounds” says "
-                "whether the two numbers name the objects to keep or the objects to "
-                "throw away. “removed” is that gate on its own over the whole "
-                "selection; “blank” is objects it cannot judge, which leave the "
-                "answer alone."
-            )
-            st.dataframe(rows, hide_index=True, width="stretch")
-            values_csv(rows, "These gates (CSV)", "gates.csv", "pop-gates-csv")
-
+    _gate_table(source, gates, report, measurables, selection)
     return chosen, keep, report
 
 
-def _gate_histogram(source, feature: str, selection, low: float, high: float) -> None:
-    """The feature binned, with the bounds across it."""
+def _gate_table(source, gates, report, measurables, selection) -> None:
+    """The gates, in a table that is also how they are set.
+
+    One table rather than a table beside a column of boxes. A bound typed into a
+    form has to be read twice — once where it is typed and once where it ends up
+    — and the two can disagree; here there is one place, and the plot above
+    redraws against it.
+    """
+    rows = _gate_rows(gates, report)
+    # A feature the file does not carry still has to be offered, or choosing it
+    # would be the one edit the table cannot represent and the gate would vanish
+    # on the next rerun.
+    options = list(measurables) + [
+        gate.feature for gate in gates if gate.feature not in set(measurables)
+    ]
+
+    st.subheader("The gates")
+    st.caption(
+        "One row per gate, applied top to bottom. Type in a bound to move it, "
+        "clear it to open that end, untick “on” to set a gate aside, and use the "
+        "+ at the bottom to add one — a new row starts at the "
+        f"{pops.SUGGEST_LOW_PERCENTILE:g} and {pops.SUGGEST_HIGH_PERCENTILE:g} "
+        "percentiles of the chosen feature, the body of its distribution. "
+        "“bounds” says whether the two numbers name the objects to keep or the "
+        "objects to throw away; the join of the first row is ignored, because it "
+        "has nothing above it to join to. “removed” is that gate on its own over "
+        "the whole selection and “blank” is what it cannot judge, so neither can "
+        "be typed in."
+    )
+
+    edited = st.data_editor(
+        rows,
+        key=f"pop-gate-table-{int(st.session_state.get(EPOCH_KEY, 0))}",
+        num_rows="dynamic",
+        hide_index=True,
+        width="stretch",
+        disabled=list(GATE_READ_ONLY),
+        column_config={
+            "on": st.column_config.CheckboxColumn("on", default=True),
+            "feature": st.column_config.SelectboxColumn("feature", options=options),
+            "join": st.column_config.SelectboxColumn(
+                "join", options=list(pops.JOINS), default=pops.JOIN_AND
+            ),
+            "bounds": st.column_config.SelectboxColumn(
+                "bounds",
+                options=[pops.MODE_WORDS[mode] for mode in pops.MODES],
+                default=pops.MODE_WORDS[pops.MODE_INCLUDE],
+            ),
+            "from": st.column_config.NumberColumn("from", format="%.4g"),
+            "to": st.column_config.NumberColumn("to", format="%.4g"),
+            "removed": st.column_config.NumberColumn("removed", format="%d"),
+            "blank": st.column_config.NumberColumn("blank", format="%d"),
+        },
+    )
+
+    def suggest(name: str) -> tuple[float, float]:
+        try:
+            histogram = pops.feature_histogram(source, name, within=selection)
+        except Exception:  # noqa: BLE001 - a feature we cannot bin opens both ends
+            return float("-inf"), float("inf")
+        return float(histogram.suggested_low), float(histogram.suggested_high)
+
+    updated = _gates_from_rows(edited, suggest)
+    if updated != gates:
+        _set_gates(updated)
+        st.rerun()
+
+    if gates:
+        values_csv(rows, "These gates (CSV)", "gates.csv", "pop-gates-csv")
+        if st.button("Remove every gate", key="pop-gate-clear"):
+            _set_gates([])
+            st.rerun()
+
+
+def _gate_histogram(source, feature: str, gates, selection) -> None:
+    """The feature binned, with the bounds of every gate on it across it."""
     import pandas as pd
 
     histogram = pops.feature_histogram(source, feature, within=selection)
@@ -1346,12 +1440,21 @@ def _gate_histogram(source, feature: str, selection, low: float, high: float) ->
         )
         .properties(height=HEIGHT_SECOND)
     )
-    bounds = (
-        alt.Chart(pd.DataFrame({"bound": [low, high]}))
-        .mark_rule(strokeDash=[6, 4], size=2, color=db.NEUTRAL)
-        .encode(x="bound:Q")
-    )
-    chart(bars + bounds, points=len(frame))
+    drawn = [
+        value
+        for gate in gates
+        if gate.enabled and gate.feature == feature
+        for value in (float(gate.low), float(gate.high))
+        if np.isfinite(value)
+    ]
+    layers = bars
+    if drawn:
+        layers = bars + (
+            alt.Chart(pd.DataFrame({"bound": drawn}))
+            .mark_rule(size=2, color=db.NEUTRAL)
+            .encode(x="bound:Q")
+        )
+    chart(layers, points=len(frame))
     blank = f", {histogram.n_blank:,} with no value" if histogram.n_blank else ""
     st.caption(
         f"{histogram.n_finite:,} object(s) binned{blank}. The end bins hold everything "
@@ -1359,7 +1462,7 @@ def _gate_histogram(source, feature: str, selection, low: float, high: float) ->
     )
 
 
-def _gate_scatter(source, x_name: str, y_name: str, gates, selection, low, high) -> None:
+def _gate_scatter(source, x_name: str, y_name: str, gates, selection) -> None:
     """Two features, the bounds of both, and the rule in the colour."""
     import pandas as pd
 
@@ -1381,29 +1484,27 @@ def _gate_scatter(source, x_name: str, y_name: str, gates, selection, low, high)
 
     finite = [value for pair in view.x_bounds for value in pair if np.isfinite(value)]
     across = [value for pair in view.y_bounds for value in pair if np.isfinite(value)]
-    editing = [value for value in (low, high) if np.isfinite(value)]
 
     if len(frame) > HOVER_POINT_LIMIT:
         # A picture rather than a Vega chart: Vega holds every point in the page,
         # and at this many the whole app slows on each rerun, not just this plot.
-        _static_gate_scatter(frame, view, finite, across, editing)
+        _static_gate_scatter(frame, view, finite, across)
         static = (
             f" Drawn as a picture: {len(frame):,} points is more than the page can "
             f"hold for hovering ({HOVER_POINT_LIMIT:,}); the CSV has every value."
         )
     else:
-        _interactive_gate_scatter(frame, view, finite, across, editing)
+        _interactive_gate_scatter(frame, view, finite, across)
         static = ""
     st.caption(
-        f"{view.n_kept:,} of {len(view.x):,} drawn objects kept. Solid lines are the "
-        "bounds of the gates on these two axes; the dashed pair is what is in the "
-        "boxes on the left, so a bound can be seen against the cloud before it is "
-        f"added. {view.describe()}{static}"
+        f"{view.n_kept:,} of {len(view.x):,} drawn objects kept. The lines are the "
+        "bounds of the gates on these two axes, so an edit in the table below moves "
+        f"them. {view.describe()}{static}"
     )
     values_csv(frame, "These points (CSV)", "gate_points.csv", "pop-scatter-csv")
 
 
-def _interactive_gate_scatter(frame, view, finite, across, editing) -> None:
+def _interactive_gate_scatter(frame, view, finite, across) -> None:
     """The gate scatter in Vega, hoverable. Only for as many points as stay fast."""
     import pandas as pd
 
@@ -1438,17 +1539,10 @@ def _interactive_gate_scatter(frame, view, finite, across, editing) -> None:
             .mark_rule(size=2, color=db.NEUTRAL)
             .encode(y="bound:Q")
         )
-    if editing:
-        layers.append(
-            alt.Chart(pd.DataFrame({"bound": editing}))
-            .mark_rule(strokeDash=[6, 4], size=2, color=db.NEUTRAL)
-            .encode(x="bound:Q")
-        )
-
     chart(alt.layer(*layers), points=len(frame))
 
 
-def _static_gate_scatter(frame, view, finite, across, editing) -> None:
+def _static_gate_scatter(frame, view, finite, across) -> None:
     """The same scatter, colours and lines, as a matplotlib picture."""
     figure = _figure(FIGURE_WIDTH * 1.6, FIGURE_HEIGHT)
     axes = figure.add_subplot(111)
@@ -1465,8 +1559,6 @@ def _static_gate_scatter(frame, view, finite, across, editing) -> None:
         axes.axvline(value, color=db.NEUTRAL, linewidth=1.5)
     for value in across:
         axes.axhline(value, color=db.NEUTRAL, linewidth=1.5)
-    for value in editing:
-        axes.axvline(value, color=db.NEUTRAL, linewidth=1.5, linestyle=(0, (6, 4)))
     axes.set_xlabel(view.x_feature, fontsize=8)
     axes.set_ylabel(view.y_feature, fontsize=8)
     axes.tick_params(labelsize=7)

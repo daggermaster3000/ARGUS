@@ -1036,23 +1036,45 @@ def test_the_two_top_level_tabs(directory: Path) -> None:
     def box(kind, key):
         return next(widget for widget in getattr(page, kind) if widget.key == key)
 
-    # Gating, through the page's own controls.
-    feature = box("selectbox", "pop-gate-feature").value
-    box("button", "pop-gate-add").click().run()
-    gates = page.session_state["pop_gates"]
+    from microscopy_viewer import dashboard_app as app
+
+    # The gates are set in the table, so there is no column of boxes beside it.
+    keys = set()
+    for kind in ("number_input", "selectbox", "button"):
+        keys |= {widget.key for widget in getattr(page, kind)}
+    gone = {"pop-gate-low", "pop-gate-high", "pop-gate-add", "pop-gate-mode",
+            "pop-gate-join", "pop-gate-drop", "pop-gate-remove"}
     check(
-        len(gates) == 1 and gates[0].feature == feature,
-        f"Add gate adds one, on the chosen feature: {[g.describe() for g in gates]}",
+        not (keys & gone),
+        f"no gate is typed in beside the table any more: {sorted(keys & gone)}",
     )
 
-    # A second window on the same feature, ORed -- which is the case the napari
-    # panel grew the joins for, and has to work here too.
-    box("selectbox", "pop-gate-join").set_value(pops.JOIN_OR).run()
-    box("button", "pop-gate-add").click().run()
+    feature = box("selectbox", "pop-feature").value
+    check(bool(feature), f"the plot still chooses its own feature: {feature}")
+
+    # st.data_editor cannot be driven by AppTest, so the editing itself is
+    # checked on the conversion in test_the_gate_table_is_the_editor. What this
+    # can check is that the gates reach the table and the page reads them back.
+    tables = len(page.dataframe)
+    page.session_state["pop_gates"] = [
+        pops.Gate(feature, 10.0, 900.0),
+        pops.Gate(feature, 0.0, 5.0, join=pops.JOIN_OR),
+    ]
+    page.run()
+    check(not page.exception, f"the page takes them: {[str(e.value)[:140] for e in page.exception]}")
+    check(
+        len(page.dataframe) == tables and page.dataframe[-1].value.shape[0] == 2,
+        f"both gates are rows in the table: {page.dataframe[-1].value.shape}",
+    )
+    check(
+        list(page.dataframe[-1].value.columns) == list(app.GATE_COLUMNS),
+        f"with the columns the editor edits: {list(page.dataframe[-1].value.columns)}",
+    )
     gates = page.session_state["pop_gates"]
     check(
         len(gates) == 2 and gates[1].join == pops.JOIN_OR,
-        f"and a second, joined with or: {[(g.feature, g.join) for g in gates]}",
+        f"and reading the table back has not rewritten them: "
+        f"{[(g.feature, g.join) for g in gates]}",
     )
     rule_lines = [str(c.value) for c in page.caption if "Rule, applied in order" in str(c.value)]
     check(
@@ -1101,6 +1123,110 @@ def test_the_two_top_level_tabs(directory: Path) -> None:
     check(not page.exception, "and the page survives it")
 
 
+def test_the_gate_table_is_the_editor() -> None:
+    """Gates to rows and back, which is the whole of how the table is edited.
+
+    ``st.data_editor`` is not one of the elements ``AppTest`` can drive, so the
+    editing is checked where it actually happens: on the two functions the page
+    puts either side of the widget. The round trip has to be the identity or the
+    page writes its own state back on every rerun and never settles.
+    """
+    print("editing the gates in the table")
+
+    import pandas as pd
+
+    # Imported here rather than at the top of the file: importing the page starts
+    # its warm-up thread, which would take the once-per-process flag before
+    # test_the_warm_up can measure what the warm-up bought.
+    from microscopy_viewer import dashboard_app as app
+
+    class Report:
+        def __init__(self, count):
+            self.costs = [
+                type("Cost", (), {"n_removed": index, "n_blank": 0})()
+                for index in range(count)
+            ]
+
+    gates = [
+        pops.Gate("Voxels", 100.0, 900.0),
+        pops.Gate("Solidity", 0.8, 1.0, join=pops.JOIN_OR, mode=pops.MODE_EXCLUDE),
+        pops.Gate("Mean intensity", -np.inf, 50.0, enabled=False, join=pops.JOIN_XOR),
+        pops.Gate("Not in this file", 0.0, np.inf),
+    ]
+    rows = app._gate_rows(gates, Report(len(gates)))
+
+    check(
+        list(rows.columns) == list(app.GATE_COLUMNS),
+        f"the table has the columns the editor configures: {list(rows.columns)}",
+    )
+    check(
+        app._gates_from_rows(rows) == gates,
+        "gates -> rows -> gates is the identity, so the page settles",
+    )
+    check(
+        app._gates_from_rows(app._gate_rows([], Report(0))) == [],
+        "and so is the empty table, which is what a fresh page shows",
+    )
+
+    # A gate on a feature the file has lost still has to survive the table, or
+    # it could never be reported as missing.
+    check(
+        app._gates_from_rows(rows)[-1].feature == "Not in this file",
+        "a gate on a feature this file does not carry survives the round trip",
+    )
+
+    # The row st.data_editor adds at the bottom: nothing filled in.
+    blank = pd.concat(
+        [rows, pd.DataFrame([{name: None for name in app.GATE_COLUMNS}])],
+        ignore_index=True,
+    )
+    check(
+        app._gates_from_rows(blank) == gates,
+        "the empty row the + adds is not yet a gate, so clicking + changes nothing",
+    )
+
+    # The same row once a feature is picked, which is when it becomes one.
+    started = blank.copy()
+    started.loc[started.index[-1], "feature"] = "Voxels"
+    made = app._gates_from_rows(started, lambda name: (1.0, 2.0))
+    check(
+        len(made) == len(gates) + 1 and (made[-1].low, made[-1].high) == (1.0, 2.0),
+        f"choosing a feature starts the row at the suggested bounds: {made[-1]}",
+    )
+    one_sided = started.copy()
+    one_sided.loc[one_sided.index[-1], "to"] = 5.0
+    half = app._gates_from_rows(one_sided, lambda name: (1.0, 2.0))[-1]
+    check(
+        half.low == -np.inf and half.high == 5.0,
+        f"a bound typed on one side only stays open on the other: {half}",
+    )
+
+    # Typing in the table.
+    edited = rows.copy()
+    edited.loc[0, "from"] = 250.0
+    edited.loc[0, "bounds"] = pops.MODE_WORDS[pops.MODE_EXCLUDE]
+    edited.loc[1, "on"] = False
+    changed = app._gates_from_rows(edited)
+    check(
+        changed[0].low == 250.0 and changed[0].excluding,
+        f"a bound and a mode typed into the row are the gate: {changed[0].describe()}",
+    )
+    check(not changed[1].enabled, "and unticking “on” sets that gate aside")
+    check(
+        len(app._gates_from_rows(rows.drop(index=1).reset_index(drop=True))) == 3,
+        "deleting the row deletes the gate",
+    )
+
+    # A cleared cell is a missing bound, not a zero: a gate that removes nothing
+    # is recoverable, a gate that silently clamps at zero is not.
+    cleared = rows.copy()
+    cleared.loc[0, "from"] = np.nan
+    check(
+        app._gates_from_rows(cleared)[0].low == -np.inf,
+        "a cleared bound opens that end rather than reading as zero",
+    )
+
+
 def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-dashboard-"))
     try:
@@ -1113,6 +1239,8 @@ def main() -> int:
         test_the_neighbour_graph_is_reused()
         print()
         test_colours_are_shared()
+        print()
+        test_the_gate_table_is_the_editor()
         print()
         for name, test in (
             ("slice", test_reading_and_slicing),

@@ -1350,6 +1350,17 @@ panel, driving the same `populations.py`. Nine tabs abreast asked a reader to
 hold two unrelated questions at once; a threshold means the same thing in either
 place because there is one implementation of it.
 
+Its **Prepare** differs in one way, and deliberately. The gates are not typed
+into a column of boxes and then added to a table: the table *is* how they are
+set. Type in a bound to move it, clear a cell to open that end, untick `on` to
+set a gate aside, use the `+` at the bottom to add one — a new row starts at the
+0.5 and 99.5 percentiles of the feature it names — and delete the row to remove
+it. A bound typed into a form has to be read in two places, where it is typed
+and where it ends up, and the two can disagree; here there is one place and the
+plot above redraws against it, so there is no dashed "about to be added" pair to
+draw either. The `removed` and `blank` columns are what the gating computed and
+cannot be typed in.
+
 **2. Positive** — what counts as a positive cell. The headline metric is
 **median + 3·sd** of a chosen measurement; mean + k·sd and a percentile are
 there too, and k is yours. **Signal** chooses raw or normalised, over the same
