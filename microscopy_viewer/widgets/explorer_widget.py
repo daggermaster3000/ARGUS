@@ -388,13 +388,17 @@ class FileExplorerWidget(QWidget):
             logger.exception("could not open %s", path)
             self._status.setText(f"Could not open that table: {exc}")
             return
-        dock = (getattr(self._app, "docks", {}) or {}).get("measurement_analysis")
-        if dock is not None:
+        panel = (getattr(self._app, "panels", {}) or {}).get("measurement_analysis")
+        if panel is not None:
+            # Through reveal(): the panel is inside a scroll area now, and a dock
+            # raised with the table scrolled out of sight looks like nothing was
+            # opened at all.
+            from .. import docks as dk
+
             try:
-                dock.setVisible(True)
-                dock.raise_()
+                dk.reveal(panel)
             except Exception:  # pragma: no cover - a dock that has never been shown
-                logger.debug("could not raise the analysis dock", exc_info=True)
+                logger.debug("could not reveal the analysis panel", exc_info=True)
         self._status.setText(f"Opened {path.name} in Measurement analysis.")
 
     # -- the miniature --------------------------------------------------------

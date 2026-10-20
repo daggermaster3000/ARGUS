@@ -35,7 +35,13 @@ class PanelSpec:
     tabify_with: str | None = None
     #: Lower numbers are created first.
     order: int = 100
-    #: Start collapsed; the user can reopen it from the Window menu.
+    #: Start closed, to be opened from the **Panels** menu.
+    #:
+    #: Most panels are. Nine open docks is a column of nine tabs where only one
+    #: can be read at a time, and before the panels scrolled it was also a window
+    #: taller than the screen. Closed is not unbuilt: the panel exists, keeps its
+    #: state, and the shortcuts and toolbar buttons that work through it keep
+    #: working — so opening one is instant and nothing is lost by closing it.
     start_hidden: bool = False
     #: Extra keyword arguments passed to ``add_dock_widget``.
     dock_kwargs: dict = field(default_factory=dict)
@@ -148,6 +154,7 @@ def _register_builtin_panels() -> None:
             attribute="intensity_widget",
             tabify_with="measurements",
             order=30,
+            start_hidden=True,
         )
     )
     register_panel(
@@ -160,6 +167,7 @@ def _register_builtin_panels() -> None:
             # panel is one row of buttons and would waste a whole right-hand dock.
             area="bottom",
             order=35,
+            start_hidden=True,
         )
     )
     register_panel(
@@ -170,6 +178,7 @@ def _register_builtin_panels() -> None:
             attribute="registration_widget",
             tabify_with="intensity_comparison",
             order=40,
+            start_hidden=True,
         )
     )
     register_panel(
@@ -180,6 +189,7 @@ def _register_builtin_panels() -> None:
             attribute="segmentation_widget",
             tabify_with="intensity_comparison",
             order=50,
+            start_hidden=True,
         )
     )
     register_panel(
@@ -192,6 +202,7 @@ def _register_builtin_panels() -> None:
             # Before the panels it feeds: scanning a plate fills the batch picker
             # and the analysis panel's folder list, and both have to exist by then.
             order=55,
+            start_hidden=True,
         )
     )
     register_panel(
@@ -203,6 +214,7 @@ def _register_builtin_panels() -> None:
             tabify_with="segmentation",
             # After the panels that write the tables it reads.
             order=70,
+            start_hidden=True,
         )
     )
     register_panel(
@@ -214,6 +226,7 @@ def _register_builtin_panels() -> None:
             tabify_with="segmentation",
             # After the Segmentation panel, which it reads its settings from.
             order=60,
+            start_hidden=True,
         )
     )
 

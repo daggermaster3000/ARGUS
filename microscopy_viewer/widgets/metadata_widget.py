@@ -51,9 +51,12 @@ class MetadataWidget(QWidget):
         layout.setSpacing(4)
 
         self._heading = QLabel("No image selected")
-        heading_font = QFont(self._heading.font())
-        heading_font.setBold(True)
-        self._heading.setFont(heading_font)
+        # Through a stylesheet, not setFont: napari applies its own stylesheet
+        # after the widget is built and overrides the font, so a heading set with
+        # a QFont comes out the same size as the rest and the call looks ignored.
+        from .. import docks as dk
+
+        dk.emphasise(self._heading, size=13)
         self._heading.setWordWrap(True)
         layout.addWidget(self._heading)
 

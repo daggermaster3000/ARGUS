@@ -1,4 +1,21 @@
-"""Assembles the customised napari viewer: docks, toolbar, shortcuts, file opening."""
+"""Assembles the customised napari viewer: docks, toolbar, shortcuts, file opening.
+
+Nine panels on one window is a layout problem, and :mod:`microscopy_viewer.docks`
+holds the rules it is solved by. The three that decide how this file is written:
+
+* **Every panel goes into its dock inside a scroll area.** A ``QMainWindow``
+  cannot shrink below the sum of its docks' minimum sizes, and this window's
+  panels added up to 1517 px on a 1392 px screen — a window that opens taller
+  than the display, cannot be dragged smaller, and feels frozen. Wrapped, each
+  dock's minimum is a scroll area's; the panel scrolls instead of the window
+  growing.
+* **The panel is the inner widget, not the dock's widget.** ``app.panels[...]``
+  and ``app.segmentation_widget`` are what every other module, the shortcuts and
+  the tests talk to, so they keep pointing at the panel itself.
+* **Panels start hidden and are opened from our own Panels menu.** Hidden is not
+  unbuilt: a shortcut or a toolbar button that works through a panel keeps
+  working while its dock is closed.
+"""
 
 from __future__ import annotations
 
@@ -74,6 +91,7 @@ class MicroscopyViewer:
         self._build_docks()
         self._bind_shortcuts()
         self._install_dragdrop()
+        self._keep_window_on_screen()
 
         # Must exist before any image is added: it registers each pyramid the
         # first time it sees the layer.
@@ -95,12 +113,17 @@ class MicroscopyViewer:
         optional dependency, say) is logged and skipped rather than taking the
         whole window down with it.
         """
+        from . import docks as dk
         from .widgets import ViewerToolbar
         from .widgets.registry import iter_panels
 
         self.toolbar = ViewerToolbar(self)
-        self.viewer.window.add_dock_widget(
-            self.toolbar, name="Tools", area="top", tabify=False
+        # Sideways rather than down: a toolbar is one row, and a window narrower
+        # than the row should scroll it, not grow a second one or clip the last
+        # button. It is also 1258 px of the window's minimum width otherwise.
+        self._toolbar_dock = self.viewer.window.add_dock_widget(
+            dk.scrollable(self.toolbar, vertical=False),
+            name="Tools", area="top", tabify=False,
         )
 
         self.panels: dict[str, object] = {}
@@ -117,13 +140,20 @@ class MicroscopyViewer:
             try:
                 widget = spec.factory(self)
                 dock = self.viewer.window.add_dock_widget(
-                    widget, name=spec.title, area=spec.area, **spec.dock_kwargs
+                    dk.scrollable(widget),
+                    name=spec.title,
+                    area=spec.area,
+                    **spec.dock_kwargs,
                 )
             except Exception:
                 logger.exception("could not build the %r panel", spec.identifier)
                 continue
+            # The panel, not the scroll area around it: everything else on the
+            # app — the toolbar, the shortcuts, the tests — talks to the panel.
             self.panels[spec.identifier] = widget
             self.docks[spec.identifier] = dock
+            dk.relax(dock)
+            dk.pack_to_top(dock, widget)
             if spec.attribute:
                 setattr(self, spec.attribute, widget)
             if spec.start_hidden:
@@ -131,6 +161,9 @@ class MicroscopyViewer:
 
         self._tabify_panels(specs)
         self._metadata_dock = self.docks.get("metadata")
+        self._build_panels_menu(specs)
+        dk.relax_napari_docks(self.viewer)
+        self._size_docks()
 
     def _tabify_panels(self, specs) -> None:
         """Stack panels that asked to share a tab bar with another panel."""
@@ -147,6 +180,62 @@ class MicroscopyViewer:
                 target.raise_()  # keep the original panel in front
             except Exception:
                 logger.debug("could not tabify %s", spec.identifier, exc_info=True)
+
+    def _build_panels_menu(self, specs) -> None:
+        """A Panels menu of our own, listing every panel that was built.
+
+        Our own rather than an addition to napari's Window menu: those are
+        app-model menus rebuilt from the command registry, and an action added by
+        hand disappears the next time one is rebuilt.
+        """
+        from . import docks as dk
+
+        window = self.viewer.window
+        entries = [
+            (spec.title, self.docks.get(spec.identifier))
+            for spec in specs
+            if self.docks.get(spec.identifier) is not None
+        ]
+        self.panels_menu = dk.panels_menu(
+            window, entries, before=getattr(window, "window_menu", None)
+        )
+
+    def _size_docks(self) -> None:
+        """Hand each column its share of the window, once Qt has laid it out.
+
+        Needed because the panels scroll: a dock that no longer insists on its
+        height is one Qt will give a sliver to. The left column is napari's own
+        and wants little; the right is where the work is done.
+        """
+        from . import docks as dk
+
+        window = getattr(self.viewer.window, "_qt_window", None)
+        if window is None:
+            return
+        qt_viewer = getattr(self.viewer.window, "_qt_viewer", None)
+        left = [
+            getattr(qt_viewer, name, None)
+            for name in ("dockLayerControls", "dockLayerList")
+        ]
+        # Whichever panel of the right-hand stack is in front, not a fixed one:
+        # the stack's size is the stack's, and the identifier that happens to be
+        # on top changes with what the user opened.
+        showing = [
+            dock for identifier, dock in self.docks.items()
+            if dock is not None and not dock.isHidden()
+            and str(getattr(dock, "objectName", lambda: "")()).find("bottom") < 0
+        ]
+        columns = []
+        if all(dock is not None for dock in left):
+            columns.append((left, (0.45, 0.55), "vertical"))
+        if showing:
+            columns.append(([showing[0]], (0.3,), "horizontal"))
+        dk.size_docks(window, columns)
+
+        # The transport bar is a row of buttons under the canvas. Sized to that
+        # row, because a dock with nothing demanding its height is a dock Qt
+        # gives a quarter of the window to.
+        dk.size_bottom_bar(window, self.docks.get("timeseries"), self.panels.get("timeseries"))
 
     def _bind_shortcuts(self) -> None:
         """Keyboard equivalents for the toolbar buttons."""
@@ -174,6 +263,27 @@ class MicroscopyViewer:
         from . import dragdrop
 
         self._drop_filter = dragdrop.install(self.open_paths)
+
+    def _keep_window_on_screen(self) -> None:
+        """Fit the window to the screen it is opening on.
+
+        napari restores the size and position it was last closed at, which may
+        come from a monitor this machine does not have today — a window that
+        opens partly off-screen with its resize corner out of reach, which is the
+        state that reads as "the window is frozen".
+
+        A one-time fit, not :func:`docks.keep_fitting`'s permanent watcher: an
+        event filter left installed on napari's main window crashes the process
+        at interpreter exit. See that function for the measurements. The cost of
+        doing it once is that dragging the window to a smaller screen, or leaving
+        fullscreen, is not re-fitted.
+        """
+        from . import docks as dk
+
+        window = getattr(self.viewer.window, "_qt_window", None)
+        if window is None:
+            return
+        dk.fit_to_screen(window)
 
     # -- file opening ---------------------------------------------------------
 

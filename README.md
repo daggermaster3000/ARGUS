@@ -94,6 +94,51 @@ make a `.desktop` entry pointing at the `microscopy-viewer` command.
 Several datasets can be open at once; each channel becomes its own layer, blended
 additively, so you can toggle and compare them from napari's layer list.
 
+### The window and the Panels menu
+
+The viewer opens with the canvas, napari's own layer list and controls, the
+toolbar, and two panels: **Acquisition metadata** and **Measurements**. Everything
+else is in a **Panels** menu of its own in the menu bar, between *Plugins* and
+*Window* — tick one to open it, untick it or use its close button to put it away.
+
+Closed is not unbuilt. A panel keeps its settings while it is closed, opening one
+is instant, and the toolbar buttons and shortcuts that work through a panel keep
+working either way. The close button hides the dock rather than destroying it,
+which is napari's default and the reason a closed panel used to take the menu
+entry pointing at it down with it.
+
+Nine panels open at once was the previous behaviour, and it had a concrete cost:
+
+```
+screen available : 2560 x 1392
+window minimum   : 1258 x 1517      <- 125 px taller than the screen
+```
+
+A `QMainWindow` cannot shrink below the sum of its docks' minimum sizes, and a
+tab stack contributes the largest minimum in it — here *Measurement analysis* at
+1083 px, in a stack of six. The window therefore opened taller than the display,
+could not be dragged smaller, had its resize corner somewhere below the bottom
+edge, and fought every attempt to resize it. It reads as a frozen window rather
+than a layout problem.
+
+Every panel now goes into its dock inside a scroll area, so a dock's minimum is a
+scroll area's rather than the whole form's. The panel scrolls; the window does
+not grow:
+
+```
+window minimum   : 359 x 585        <- fits any screen it is likely to meet
+```
+
+The window is also fitted to the screen it opens on, because napari restores the
+size and position it was last closed at — which may come from a monitor this
+machine does not have today. It is fitted once, at startup. Dragging the window
+to a smaller screen afterwards, or leaving fullscreen, is **not** re-fitted: the
+permanent event-filter version of that crashes the process at interpreter exit,
+and the function is in `docks.py` with the measurements but is not installed. See
+`microscopy_viewer/docks.py` for the rest of the rules — dock proportions, the
+one-row toolbar that scrolls sideways, and why a heading is styled with a
+stylesheet rather than `setFont`.
+
 ### Channel colours
 
 Fluorescence channels use the display colour stored in the file, or the next entry
