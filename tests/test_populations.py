@@ -168,8 +168,9 @@ def test_the_rule_is_a_rule() -> None:
         "the default is median + 3 sd, which is the rule this exists to apply",
     )
     check(
-        "median + 3 sd" in pop.PositiveRule("Marker").describe(),
-        f"and it says so in words: {pop.PositiveRule('Marker').describe()!r}",
+        "median + 3 population sd" in pop.PositiveRule("Marker").describe(),
+        f"and it says so in words, naming the deviation it used: "
+        f"{pop.PositiveRule('Marker').describe()!r}",
     )
     check(
         all(name in pop.STATISTIC_LABELS for name in pop.STATISTICS),
@@ -1077,6 +1078,108 @@ def test_a_gate_can_keep_the_outside() -> None:
     )
 
 
+def test_the_deviation_is_a_choice() -> None:
+    """Population or sample standard deviation, and what turns on it.
+
+    Both claims get made about a plate — "three deviations above the median of
+    the objects in this image" is about those objects, "three deviations above
+    the median of cells like these" is an inference about the cell type — and
+    they are different numbers on a small pool.
+    """
+    print("population or sample deviation")
+
+    rng = np.random.default_rng(0)
+    sizes = {}
+    for n in (20, 200, 50_000):
+        values = rng.normal(100.0, 10.0, n)
+        spreads = {}
+        for basis in pop.SD_BASES:
+            rule = pop.PositiveRule("x", k=3.0, sd_basis=basis)
+            _centre, spread, _threshold = pop.threshold_of_pool(values, rule)
+            spreads[basis] = spread
+        sizes[n] = spreads
+        check(
+            spreads[pop.SD_SAMPLE] > spreads[pop.SD_POPULATION],
+            f"n={n}: the sample deviation is the larger of the two "
+            f"({spreads[pop.SD_SAMPLE]:.4f} against {spreads[pop.SD_POPULATION]:.4f})",
+        )
+
+    small = sizes[20][pop.SD_SAMPLE] / sizes[20][pop.SD_POPULATION]
+    large = sizes[50_000][pop.SD_SAMPLE] / sizes[50_000][pop.SD_POPULATION]
+    check(
+        abs(small - np.sqrt(20 / 19)) < 1e-9,
+        f"the ratio on twenty objects is exactly sqrt(n/(n-1)) ({small:.5f})",
+    )
+    check(
+        small > 1.02 and large < 1.0001,
+        f"so it moves a small pool and not a large one ({100 * (small - 1):.2f} % "
+        f"against {100 * (large - 1):.4f} %) — which is why it is a choice and not "
+        "a constant",
+    )
+
+    # It really is numpy's ddof, not a correction applied twice or not at all.
+    values = rng.normal(0.0, 1.0, 37)
+    for basis in pop.SD_BASES:
+        rule = pop.PositiveRule("x", k=2.0, sd_basis=basis)
+        centre, spread, threshold = pop.threshold_of_pool(values, rule)
+        check(
+            abs(spread - float(np.std(values, ddof=pop.SD_DDOF[basis]))) < 1e-12,
+            f"{basis} is np.std(ddof={pop.SD_DDOF[basis]})",
+        )
+        check(
+            abs(threshold - (centre + 2.0 * spread)) < 1e-12,
+            f"and the threshold is the centre plus k of them ({basis})",
+        )
+
+    # A pool of one has no sample deviation. NaN would read as "could not be
+    # computed"; what is true is that there is no spread.
+    one = pop.PositiveRule("x", k=3.0, sd_basis=pop.SD_SAMPLE)
+    centre, spread, threshold = pop.threshold_of_pool([5.0], one)
+    check(
+        centre == 5.0 and spread == 0.0 and threshold == 5.0,
+        f"a pool of one object has a spread of zero, not a NaN "
+        f"({centre}, {spread}, {threshold})",
+    )
+    check(
+        np.isfinite(pop.threshold_of_pool([5.0], pop.PositiveRule("x"))[1]),
+        "and the population deviation of one object was always zero",
+    )
+
+    # It is in the described rule, because a description that cannot be
+    # reproduced from is not a description.
+    check(
+        "population sd" in pop.PositiveRule("x").describe()
+        and "sample sd" in pop.PositiveRule("x", sd_basis=pop.SD_SAMPLE).describe(),
+        f"the rule names which one it used: "
+        f"{pop.PositiveRule('x', sd_basis=pop.SD_SAMPLE).describe()!r}",
+    )
+    check(
+        pop.PositiveRule("x").sd_basis == pop.SD_POPULATION,
+        "population stays the default, so a stored rule means what it meant",
+    )
+    check(
+        pop.PositiveRule.from_attrs({"feature": "x"}).sd_basis == pop.SD_POPULATION,
+        "including a rule written before this was a choice",
+    )
+    roundtrip = pop.PositiveRule("x", sd_basis=pop.SD_SAMPLE)
+    check(
+        pop.PositiveRule.from_attrs(roundtrip.as_attrs()) == roundtrip,
+        "and the choice survives being written to a file and read back",
+    )
+
+    # A percentile threshold has no deviation in it at all.
+    flat = pop.PositiveRule("x", statistic=pop.STAT_PERCENTILE)
+    check(not flat.uses_spread, "a percentile rule reports that it uses no spread")
+    first = pop.threshold_of_pool(values, flat)
+    second = pop.threshold_of_pool(
+        values, pop.PositiveRule("x", statistic=pop.STAT_PERCENTILE, sd_basis=pop.SD_SAMPLE)
+    )
+    check(
+        first[2] == second[2],
+        "and the choice cannot change its threshold, which is why the box is disabled",
+    )
+
+
 def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-populations-"))
     try:
@@ -1089,6 +1192,8 @@ def main() -> int:
         test_a_blank_abstains_rather_than_voting()
         print()
         test_a_gate_can_keep_the_outside()
+        print()
+        test_the_deviation_is_a_choice()
         print()
         for name, test in (
             ("gates", test_samples_and_gates),

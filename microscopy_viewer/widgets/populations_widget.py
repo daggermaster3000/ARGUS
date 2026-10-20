@@ -411,6 +411,24 @@ class PopulationAnalysisWidget(QWidget):
         self._k_box.setToolTip("Standard deviations above the centre. Three is the rule.")
         form.addRow("k", self._k_box)
 
+        self._sd_box = QComboBox()
+        for basis in populations.SD_BASES:
+            self._sd_box.addItem(populations.SD_LABELS[basis], basis)
+        self._sd_box.setToolTip(
+            "Which standard deviation the “+ k sd” is counted in.\n\n"
+            "“population” divides by n and describes the objects in the pool. "
+            "“sample” divides by n - 1 and estimates the deviation of the "
+            "larger population they were drawn from.\n\n"
+            "Which one is right depends on the claim: “three deviations above the "
+            "median of the objects in this image” is population, “three "
+            "deviations above the median of cells like these” is sample.\n\n"
+            "On tens of thousands of objects the difference is in the fifth decimal. "
+            "On a pool of twenty — a per-image threshold on a sparse well — "
+            "sample is 2.6 % larger, which moves the count. Not used by a percentile "
+            "threshold, which has no deviation in it."
+        )
+        form.addRow("Deviation", self._sd_box)
+
         self._percentile_box = QDoubleSpinBox()
         self._percentile_box.setRange(50.0, 100.0)
         self._percentile_box.setDecimals(2)
@@ -654,6 +672,9 @@ class PopulationAnalysisWidget(QWidget):
                     self._statistic_box.setCurrentIndex(index)
                 self._k_box.setValue(float(rule.k))
                 self._percentile_box.setValue(float(rule.percentile))
+                basis = self._sd_box.findData(rule.sd_basis)
+                if basis >= 0:
+                    self._sd_box.setCurrentIndex(basis)
                 self._signal_box.setCurrentIndex(
                     max(0, self._signal_box.findData(rule.normalise_scope if rule.normalised else ""))
                 )
@@ -1084,8 +1105,10 @@ class PopulationAnalysisWidget(QWidget):
     def _statistic_changed(self, _index: int = 0) -> None:
         """Show only the number the chosen statistic uses."""
         statistic = self._statistic_box.currentData()
-        self._k_box.setEnabled(statistic != populations.STAT_PERCENTILE)
-        self._percentile_box.setEnabled(statistic == populations.STAT_PERCENTILE)
+        spread = statistic != populations.STAT_PERCENTILE
+        self._k_box.setEnabled(spread)
+        self._sd_box.setEnabled(spread)
+        self._percentile_box.setEnabled(not spread)
 
     def rule(self) -> populations.PositiveRule:
         """The rule the boxes currently describe."""
@@ -1098,6 +1121,7 @@ class PopulationAnalysisWidget(QWidget):
             scope=str(self._scope_box.currentData()),
             normalised=bool(normalise_scope),
             normalise_scope=str(normalise_scope or analysis.SCOPE_IMAGE),
+            sd_basis=str(self._sd_box.currentData()),
         )
 
     def apply_rule(self) -> None:

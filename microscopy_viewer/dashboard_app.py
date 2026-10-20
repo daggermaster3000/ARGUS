@@ -1379,6 +1379,34 @@ def _gate_scatter(source, x_name: str, y_name: str, gates, selection, low, high)
     if db.IMAGE_KEY in source.obs:
         frame["sample"] = source.obs[db.IMAGE_KEY].astype(str).to_numpy()[view.rows]
 
+    finite = [value for pair in view.x_bounds for value in pair if np.isfinite(value)]
+    across = [value for pair in view.y_bounds for value in pair if np.isfinite(value)]
+    editing = [value for value in (low, high) if np.isfinite(value)]
+
+    if len(frame) > HOVER_POINT_LIMIT:
+        # A picture rather than a Vega chart: Vega holds every point in the page,
+        # and at this many the whole app slows on each rerun, not just this plot.
+        _static_gate_scatter(frame, view, finite, across, editing)
+        static = (
+            f" Drawn as a picture: {len(frame):,} points is more than the page can "
+            f"hold for hovering ({HOVER_POINT_LIMIT:,}); the CSV has every value."
+        )
+    else:
+        _interactive_gate_scatter(frame, view, finite, across, editing)
+        static = ""
+    st.caption(
+        f"{view.n_kept:,} of {len(view.x):,} drawn objects kept. Solid lines are the "
+        "bounds of the gates on these two axes; the dashed pair is what is in the "
+        "boxes on the left, so a bound can be seen against the cloud before it is "
+        f"added. {view.describe()}{static}"
+    )
+    values_csv(frame, "These points (CSV)", "gate_points.csv", "pop-scatter-csv")
+
+
+def _interactive_gate_scatter(frame, view, finite, across, editing) -> None:
+    """The gate scatter in Vega, hoverable. Only for as many points as stay fast."""
+    import pandas as pd
+
     # Grey for excluded, which is what grey means on this page: not a group.
     points = (
         alt.Chart(frame)
@@ -1398,21 +1426,18 @@ def _gate_scatter(source, x_name: str, y_name: str, gates, selection, low, high)
     )
 
     layers = [points]
-    finite = [value for pair in view.x_bounds for value in pair if np.isfinite(value)]
     if finite:
         layers.append(
             alt.Chart(pd.DataFrame({"bound": finite}))
             .mark_rule(size=2, color=db.NEUTRAL)
             .encode(x="bound:Q")
         )
-    across = [value for pair in view.y_bounds for value in pair if np.isfinite(value)]
     if across:
         layers.append(
             alt.Chart(pd.DataFrame({"bound": across}))
             .mark_rule(size=2, color=db.NEUTRAL)
             .encode(y="bound:Q")
         )
-    editing = [value for value in (low, high) if np.isfinite(value)]
     if editing:
         layers.append(
             alt.Chart(pd.DataFrame({"bound": editing}))
@@ -1421,13 +1446,33 @@ def _gate_scatter(source, x_name: str, y_name: str, gates, selection, low, high)
         )
 
     chart(alt.layer(*layers), points=len(frame))
-    st.caption(
-        f"{view.n_kept:,} of {len(view.x):,} drawn objects kept. Solid lines are the "
-        "bounds of the gates on these two axes; the dashed pair is what is in the "
-        "boxes on the left, so a bound can be seen against the cloud before it is "
-        f"added. {view.describe()}"
-    )
-    values_csv(frame, "These points (CSV)", "gate_points.csv", "pop-scatter-csv")
+
+
+def _static_gate_scatter(frame, view, finite, across, editing) -> None:
+    """The same scatter, colours and lines, as a matplotlib picture."""
+    figure = _figure(FIGURE_WIDTH * 1.6, FIGURE_HEIGHT)
+    axes = figure.add_subplot(111)
+    kept = (frame["kept"] == "kept").to_numpy()
+    x, y = frame["x"].to_numpy(), frame["y"].to_numpy()
+    # Excluded underneath, so the grey never hides what the rule keeps.
+    for mask, colour, label in ((~kept, db.NEUTRAL, "excluded"), (kept, db.PALETTE[0], "kept")):
+        if mask.any():
+            axes.scatter(
+                x[mask], y[mask], s=4, c=colour, alpha=0.8, label=label,
+                edgecolors=db.OUTLINE, linewidths=0.1,
+            )
+    for value in finite:
+        axes.axvline(value, color=db.NEUTRAL, linewidth=1.5)
+    for value in across:
+        axes.axhline(value, color=db.NEUTRAL, linewidth=1.5)
+    for value in editing:
+        axes.axvline(value, color=db.NEUTRAL, linewidth=1.5, linestyle=(0, (6, 4)))
+    axes.set_xlabel(view.x_feature, fontsize=8)
+    axes.set_ylabel(view.y_feature, fontsize=8)
+    axes.tick_params(labelsize=7)
+    axes.legend(title="the whole rule", fontsize=7, title_fontsize=7, markerscale=3)
+    figure.tight_layout()
+    show(figure)
 
 
 def _positive_subtab(source, keep, measurables, chosen) -> None:
@@ -1453,6 +1498,18 @@ def _positive_subtab(source, keep, measurables, chosen) -> None:
             disabled=statistic == pops.STAT_PERCENTILE,
             help="How many standard deviations above the centre. Three is the usual "
                  "choice and the one this panel leads with.",
+        )
+        sd_basis = st.selectbox(
+            "Deviation", pops.SD_BASES,
+            format_func=lambda name: pops.SD_LABELS[name],
+            key="pop-sd-basis", disabled=statistic == pops.STAT_PERCENTILE,
+            help="Which standard deviation the “+ k sd” is counted in. "
+                 "“population” divides by n and describes the objects in the pool; "
+                 "“sample” divides by n − 1 and estimates the deviation of the larger "
+                 "population they came from.\n\n"
+                 "On tens of thousands of objects the difference is in the fifth "
+                 "decimal. On a pool of twenty — a per-image threshold on a sparse "
+                 "well — sample is 2.6 % larger, which moves the count.",
         )
         percentile = st.number_input(
             "Percentile", 50.0, 100.0, pops.DEFAULT_PERCENTILE, step=0.5,
@@ -1482,6 +1539,7 @@ def _positive_subtab(source, keep, measurables, chosen) -> None:
         scope=str(scope),
         normalised=bool(signal),
         normalise_scope=str(signal or mva.SCOPE_IMAGE),
+        sd_basis=str(sd_basis),
     )
 
     with right:
@@ -1655,18 +1713,28 @@ def _signal_histogram(calls, keep) -> None:
     low, high = mva.value_range(
         values[finite], pops.SUGGEST_LOW_PERCENTILE, pops.SUGGEST_HIGH_PERCENTILE
     )
+    # Binned here rather than by Vega: handed the raw values, Vega holds one row
+    # per kept object in the page, which on a plate slows the whole app.
+    signal = np.clip(values[finite], low, high)
+    called = positive[finite]
+    edges = np.histogram_bin_edges(signal, bins=pops.DEFAULT_BINS)
     frame = pd.DataFrame(
         {
-            "signal": np.clip(values[finite], low, high),
-            "call": np.where(positive[finite], "positive", "negative"),
+            "start": np.tile(edges[:-1], 2),
+            "end": np.tile(edges[1:], 2),
+            "call": np.repeat(["negative", "positive"], len(edges) - 1),
+            "objects": np.concatenate(
+                [np.histogram(signal[~called], edges)[0], np.histogram(signal[called], edges)[0]]
+            ),
         }
     )
     bars = (
         alt.Chart(frame)
         .mark_bar()
         .encode(
-            x=alt.X("signal:Q", bin=alt.Bin(maxbins=pops.DEFAULT_BINS), title=calls.rule.feature),
-            y=alt.Y("count():Q", title="objects", stack=True),
+            x=alt.X("start:Q", title=calls.rule.feature, scale=alt.Scale(zero=False, nice=False)),
+            x2="end:Q",
+            y=alt.Y("objects:Q", title="objects", stack=True),
             color=alt.Color(
                 "call:N",
                 scale=alt.Scale(
@@ -1674,7 +1742,12 @@ def _signal_histogram(calls, keep) -> None:
                 ),
                 legend=alt.Legend(title="call"),
             ),
-            tooltip=["call:N", alt.Tooltip("count():Q", format=",d")],
+            tooltip=[
+                "call:N",
+                alt.Tooltip("start:Q", format=".4g"),
+                alt.Tooltip("end:Q", format=".4g"),
+                alt.Tooltip("objects:Q", format=",d"),
+            ],
         )
         .properties(height=HEIGHT_MAIN)
     )

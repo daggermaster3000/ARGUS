@@ -245,6 +245,35 @@ MODE_LABELS = {
 #: One word for each, for a table column.
 MODE_WORDS = {MODE_INCLUDE: "keep", MODE_EXCLUDE: "exclude"}
 
+#: Which standard deviation the ``+ k sd`` is counted in.
+#:
+#: ``population`` divides by *n* and treats the objects in the pool as the whole
+#: of what is being described. ``sample`` divides by *n - 1* — Bessel's
+#: correction — and treats them as a sample drawn from a larger population whose
+#: deviation is being estimated.
+#:
+#: Which is right depends on the claim being made, and both claims get made about
+#: a plate. "Three deviations above the median of the objects in this image" is a
+#: statement about those objects: population. "Three deviations above the median
+#: of cells like these, as estimated from the ones I imaged" is an inference about
+#: the cell type: sample. Neither is a default that suits the other.
+#:
+#: The size of the difference is the reason this is a choice rather than a detail.
+#: On tens of thousands of objects it is in the fifth decimal and nothing turns on
+#: it. On a pool of twenty — which is what a per-image threshold on a sparse well
+#: is — ``sample`` is 2.6 % larger, and that moves the count.
+SD_POPULATION = "population"
+SD_SAMPLE = "sample"
+SD_BASES = (SD_POPULATION, SD_SAMPLE)
+
+#: Degrees of freedom numpy is asked to subtract, which is the whole difference.
+SD_DDOF = {SD_POPULATION: 0, SD_SAMPLE: 1}
+
+SD_LABELS = {
+    SD_POPULATION: "population (divide by n)",
+    SD_SAMPLE: "sample (divide by n - 1)",
+}
+
 
 def _combine(running: np.ndarray, contribution: np.ndarray, join: str) -> np.ndarray:
     if join == JOIN_OR:
@@ -758,6 +787,10 @@ class PositiveRule:
     through :func:`~microscopy_viewer.analysis.scope_range` — the same "normalise
     over" the viewer's colour scales use. See the module docstring for what that
     does and does not change.
+
+    *sd_basis* is which standard deviation the ``+ k sd`` is counted in; see
+    :data:`SD_BASES`. It does nothing for a percentile threshold, which has no
+    spread in it.
     """
 
     feature: str
@@ -767,6 +800,17 @@ class PositiveRule:
     scope: str = analysis.DEFAULT_SCOPE
     normalised: bool = False
     normalise_scope: str = analysis.SCOPE_IMAGE
+    sd_basis: str = SD_POPULATION
+
+    @property
+    def ddof(self) -> int:
+        """Degrees of freedom for the deviation, 0 or 1."""
+        return int(SD_DDOF.get(self.sd_basis, 0))
+
+    @property
+    def uses_spread(self) -> bool:
+        """Whether this rule has a deviation in it at all."""
+        return self.statistic != STAT_PERCENTILE
 
     def as_attrs(self) -> dict[str, Any]:
         return {
@@ -777,6 +821,7 @@ class PositiveRule:
             "scope": str(self.scope),
             "normalised": bool(self.normalised),
             "normalise_scope": str(self.normalise_scope),
+            "sd_basis": str(self.sd_basis),
         }
 
     @classmethod
@@ -789,6 +834,9 @@ class PositiveRule:
             scope=str(block.get("scope", analysis.DEFAULT_SCOPE)),
             normalised=bool(block.get("normalised", False)),
             normalise_scope=str(block.get("normalise_scope", analysis.SCOPE_IMAGE)),
+            # The population deviation was the only behaviour before this was a
+            # choice, so that is what a file written then meant.
+            sd_basis=str(block.get("sd_basis", SD_POPULATION)),
         )
 
     def describe(self) -> str:
@@ -796,7 +844,10 @@ class PositiveRule:
             rule = f"{self.percentile:g}th percentile"
         else:
             centre = "median" if self.statistic == STAT_MEDIAN_SD else "mean"
-            rule = f"{centre} + {self.k:g} sd"
+            # Which deviation is named, because the number it produces differs and
+            # a described rule that leaves it out cannot be reproduced from the
+            # description.
+            rule = f"{centre} + {self.k:g} {self.sd_basis} sd"
         signal = (
             "normalised over "
             + analysis.SCOPE_LABELS.get(self.normalise_scope, self.normalise_scope)
@@ -876,11 +927,15 @@ def threshold_of_pool(
         centre = float(np.percentile(finite, float(rule.percentile)))
         return centre, float("nan"), centre
     centre = float(np.mean(finite) if rule.statistic == STAT_MEAN_SD else np.median(finite))
-    # The population deviation, not the sample-corrected one. On tens of thousands
-    # of objects the difference is in the fifth decimal, but it has to be the same
-    # fifth decimal every time: a threshold that moves when the plate is re-exported
-    # is a threshold nobody can explain.
-    spread = float(np.std(finite))
+    # Population or sample deviation, as the rule asks; see SD_BASES for why it is
+    # a question rather than a constant. A pool of one has no sample deviation at
+    # all — numpy would divide by zero and hand back a NaN that reads as "could
+    # not be computed" rather than "there is one object here" — so it falls back
+    # to a spread of zero, and the threshold is then the centre itself.
+    if finite.size <= rule.ddof:
+        spread = 0.0
+    else:
+        spread = float(np.std(finite, ddof=rule.ddof))
     return centre, spread, centre + float(rule.k) * spread
 
 

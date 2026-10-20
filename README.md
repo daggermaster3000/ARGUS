@@ -1333,6 +1333,24 @@ with the centre and the spread they came from.
 Gated-out objects do not set the threshold. The debris is what a median is most
 easily dragged by, so excluding it first is the point of doing Prepare first.
 
+**Deviation** chooses which standard deviation the `+ k·sd` is counted in:
+*population* divides by *n* and describes the objects in the pool; *sample*
+divides by *n − 1* and estimates the deviation of the larger population they were
+drawn from. Which is right depends on the claim being made, and both get made
+about a plate — "three deviations above the median of the objects in this image"
+is population, "three deviations above the median of cells like these" is sample.
+
+It is a choice rather than a detail because of how much turns on it. On tens of
+thousands of objects the two differ in the fifth decimal; on a pool of twenty —
+which is what a per-image threshold on a sparse well is — *sample* is 2.6 %
+larger, and that moves the count. Population stays the default, so a rule stored
+before this existed still means what it meant. A pool of one object has a spread
+of zero rather than a NaN, and a percentile threshold has no deviation in it at
+all, so the box is disabled for it.
+
+The rule names the deviation it used — `median + 3 population sd` — because a
+description that cannot be reproduced from is not a description.
+
 **3. Explore** — percent positive per sample and per well, the kept-and-excluded
 counts, and the pooled signal histogram split into negative and positive with the
 thresholds drawn on. That last one is the plot worth looking at before believing
