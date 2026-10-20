@@ -494,16 +494,156 @@ def feature_histogram(
             str(feature), np.zeros(edges.size - 1, dtype=int), edges, 0, n_blank, 0.0, 1.0
         )
 
-    low, high = (float(value) for value in np.percentile(finite, [low_percentile, high_percentile]))
-    if high <= low:
-        low, high = float(finite.min()), float(finite.max())
-    if high <= low:  # every object has the same value
-        high = low + 1.0
+    # Through analysis.value_range rather than a percentile call of its own: it is
+    # the same question the Measurement analysis panel asks of a column, it
+    # already handles a feature whose percentiles coincide and one where every
+    # object has the same value, and two implementations of "the range of this
+    # column" in one application is two answers waiting to differ. The
+    # percentiles are this panel's; see SUGGEST_LOW_PERCENTILE.
+    low, high = analysis.value_range(finite, low_percentile, high_percentile)
     counts, edges = np.histogram(
         np.clip(finite, low, high), bins=int(max(2, bins)), range=(low, high)
     )
     return FeatureHistogram(
         str(feature), counts, edges, int(finite.size), n_blank, low, high
+    )
+
+
+@dataclass(frozen=True)
+class FeatureScatter:
+    """Two features against each other, and what the gates do to them.
+
+    The companion of :class:`FeatureHistogram`, and for the same reason: the
+    widget draws what it is handed. Nothing here is computed in a paint method,
+    so the same numbers can be checked headless.
+
+    A gate is a window on *one* feature, so on these axes it is a pair of lines —
+    vertical for a gate on *x*, horizontal for one on *y*. Two gates, one on each
+    axis, make a rectangle, which is the shape the drawing ends up being read as.
+    Gates on neither axis still apply to :attr:`kept`, and :attr:`elsewhere`
+    counts them so the panel can say that the colours are decided partly by
+    bounds the reader cannot see.
+
+    *rows* is which objects these points are, so a selection in the plot can be
+    taken back to the objects it chose.
+    """
+
+    x_feature: str
+    y_feature: str
+    x: np.ndarray
+    y: np.ndarray
+    kept: np.ndarray
+    rows: np.ndarray
+    #: ``(low, high)`` of every enabled gate on each axis, in gate order.
+    x_bounds: tuple[tuple[float, float], ...] = ()
+    y_bounds: tuple[tuple[float, float], ...] = ()
+    #: Enabled gates on neither axis, by name.
+    elsewhere: tuple[str, ...] = ()
+    #: Objects in the selection, before the plot was capped.
+    n_selected: int = 0
+    #: Objects dropped from the drawing only — never from the gating.
+    n_undrawn: int = 0
+    #: Objects with no value for one of the two features. They are plotted only
+    #: if both are finite, so they are absent from the picture while still being
+    #: gated; see the module docstring on blanks.
+    n_blank: int = 0
+
+    @property
+    def n_kept(self) -> int:
+        return int(np.asarray(self.kept, dtype=bool).sum())
+
+    def describe(self) -> str:
+        text = f"{len(self.x):,} point(s)"
+        if self.n_undrawn:
+            text += (
+                f" — a random sample of {self.n_selected:,}, drawn so the plot stays "
+                "usable; the gating is over all of them"
+            )
+        if self.n_blank:
+            text += f"; {self.n_blank:,} not drawn for want of both measurements"
+        if self.elsewhere:
+            text += (
+                "; also gated on " + ", ".join(self.elsewhere)
+                + ", which these axes do not show"
+            )
+        return text
+
+
+def feature_scatter(
+    adata,
+    x_feature: str,
+    y_feature: str,
+    gates: Sequence[Gate] = (),
+    within: np.ndarray | None = None,
+    limit: int = analysis.MAX_SCATTER_POINTS,
+) -> FeatureScatter | None:
+    """Two features of the selected objects, with the gates' bounds alongside.
+
+    ``None`` when either feature is not in the file — the caller is expected to
+    say so rather than to draw empty axes.
+
+    The point cap goes through :func:`analysis.scatter_sample`, which is the same
+    cap, the same limit and the same seed the Measurement analysis panel's
+    scatter uses: a plot of half a million points is a dock that stops
+    responding, and a random sample rather than the first N because a table is
+    written in label order, which on a plate runs corner to corner. **It caps
+    the drawing only.** The gating, the counts and everything written to a file
+    are over every selected object.
+    """
+    known = set(measurable_names(adata))
+    if x_feature not in known or y_feature not in known:
+        return None
+
+    selection = (
+        np.ones(int(adata.n_obs), dtype=bool)
+        if within is None
+        else np.asarray(within, dtype=bool)
+    )
+    x_all = np.asarray(values_of(adata, x_feature), dtype=float)
+    y_all = np.asarray(values_of(adata, y_feature), dtype=float)
+    keep_all = gate_mask(adata, gates, within=selection)
+
+    # Drawn only where both measurements exist: a point with one coordinate has
+    # no place on these axes. It is still gated, and still counted below.
+    drawable = selection & np.isfinite(x_all) & np.isfinite(y_all)
+    rows = np.flatnonzero(drawable)
+    n_selected = int(selection.sum())
+    n_blank = int(selection.sum() - drawable.sum())
+
+    sample = analysis.scatter_sample(rows.size, limit=limit)
+    n_undrawn = 0
+    if sample is not None:
+        n_undrawn = int(rows.size - len(sample))
+        rows = np.sort(rows[np.asarray(sample)])
+
+    applied = [gate for gate in applicable(adata, gates)]
+    x_bounds = tuple(
+        (float(gate.low), float(gate.high)) for gate in applied if gate.feature == x_feature
+    )
+    y_bounds = tuple(
+        (float(gate.low), float(gate.high)) for gate in applied if gate.feature == y_feature
+    )
+    elsewhere = tuple(
+        dict.fromkeys(
+            gate.feature
+            for gate in applied
+            if gate.feature not in (x_feature, y_feature)
+        )
+    )
+
+    return FeatureScatter(
+        x_feature=str(x_feature),
+        y_feature=str(y_feature),
+        x=x_all[rows],
+        y=y_all[rows],
+        kept=keep_all[rows],
+        rows=rows,
+        x_bounds=x_bounds,
+        y_bounds=y_bounds,
+        elsewhere=elsewhere,
+        n_selected=n_selected,
+        n_undrawn=n_undrawn,
+        n_blank=n_blank,
     )
 
 

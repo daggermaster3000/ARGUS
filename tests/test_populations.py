@@ -804,6 +804,186 @@ def test_the_report_owns_up_to_or(directory: Path) -> None:
     )
 
 
+def test_the_two_feature_view(directory: Path) -> None:
+    """Two features, the gates' bounds on them, and the rule in the colour.
+
+    A bound chosen on a histogram can sit in a dip of one feature and straight
+    through a cloud in two. This is the view that shows that, so what it has to
+    get right is: the bounds belong to the axes they are drawn on, the colour is
+    the whole rule and not just the two gates in the picture, and anything the
+    picture cannot show is said out loud.
+    """
+    print("two features, with the bounds on them")
+
+    if not _has("anndata"):
+        print("  skip anndata is not installed")
+        return
+
+    import anndata as ad
+
+    matrix = np.array(
+        [
+            [1.0, 90.0],      # in the x window, in the y window
+            [1.0, 10.0],      # in x, out of y
+            [9.0, 90.0],      # out of x, in y
+            [9.0, 10.0],      # out of both
+            [np.nan, 50.0],   # no x at all
+        ]
+    )
+    source = ad.AnnData(X=matrix)
+    source.var_names = ["A", "B"]
+    source.obs_names = ["in_both", "in_x", "in_y", "in_neither", "no_x"]
+
+    gates = [pop.Gate("A", 0.0, 3.0), pop.Gate("B", 50.0, np.inf)]
+    view = pop.feature_scatter(source, "A", "B", gates)
+
+    check(view is not None, "a view is built for two features the file has")
+    check(
+        view.x_feature == "A" and view.y_feature == "B",
+        "it knows which feature is on which axis",
+    )
+    check(
+        view.x_bounds == ((0.0, 3.0),) and view.y_bounds == ((50.0, np.inf),),
+        f"each gate's bounds go to the axis its feature is on: "
+        f"x={view.x_bounds} y={view.y_bounds}",
+    )
+    check(
+        [str(name) for name in source.obs_names[view.rows]]
+        == ["in_both", "in_x", "in_y", "in_neither"],
+        f"an object with no value for an axis is not drawn: "
+        f"{[str(n) for n in source.obs_names[view.rows]]}",
+    )
+    check(view.n_blank == 1, f"and is counted as undrawable rather than lost ({view.n_blank})")
+    check(
+        [bool(k) for k in view.kept] == [True, False, False, False],
+        f"the colour is the whole rule, so only the object in both windows is kept: "
+        f"{[bool(k) for k in view.kept]}",
+    )
+    check(view.n_kept == 1, f"and the count agrees ({view.n_kept})")
+
+    # A gate on neither axis still gates, and the view says so.
+    third = gates + [pop.Gate("A", -np.inf, np.inf)]
+    plain = pop.feature_scatter(source, "A", "B", third)
+    check(
+        plain.elsewhere == (),
+        "a third gate on a feature already on an axis is not called elsewhere",
+    )
+    source.obs["extra"] = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
+    hidden = pop.feature_scatter(
+        source, "A", "B", gates + [pop.Gate("extra", 5.0, 6.0)]
+    )
+    check(
+        hidden.elsewhere == ("extra",),
+        f"a gate on neither axis is named: {hidden.elsewhere}",
+    )
+    check(
+        "which these axes do not show" in hidden.describe(),
+        f"and the line under the plot says so: {hidden.describe()}",
+    )
+    check(
+        not any(hidden.kept),
+        "while still being applied — it excludes everything here, and the colour "
+        "shows that even though the bound is off the picture",
+    )
+
+    check(
+        pop.feature_scatter(source, "A", "not measured", gates) is None,
+        "a feature the file does not have gives no view, rather than empty axes",
+    )
+
+
+def test_it_filters_the_way_the_analysis_panel_does(directory: Path) -> None:
+    """The shared seams, checked rather than assumed.
+
+    Two panels drawing the same measurements have to agree about what "all the
+    points" and "the range of this column" mean, or the same data reads two ways
+    in one application. These are the three places that could drift.
+    """
+    print("filtering the way the measurement analysis panel does")
+
+    if not _has("anndata"):
+        print("  skip anndata is not installed")
+        return
+
+    source = db.read(_plate_file(directory))
+    feature = "Voxels"
+
+    # 1. The same cap, limit and seed as the Measurement analysis scatter.
+    small = pop.feature_scatter(source, feature, "Solidity", [], limit=7)
+    check(
+        len(small.x) == 7 and small.n_undrawn == source.n_obs - 7,
+        f"the plot is capped and says how much it dropped "
+        f"({len(small.x)} drawn, {small.n_undrawn} not)",
+    )
+    again = pop.feature_scatter(source, feature, "Solidity", [], limit=7)
+    check(
+        bool(np.array_equal(small.rows, again.rows)),
+        "the sample is seeded, so the same data draws the same picture twice",
+    )
+    check(
+        bool(np.array_equal(
+            np.sort(small.rows),
+            np.sort(np.flatnonzero(np.ones(source.n_obs, dtype=bool))[
+                analysis.scatter_sample(source.n_obs, limit=7)
+            ]),
+        )),
+        "and it is analysis.scatter_sample that chose them, not a second sampler",
+    )
+    check(
+        "random sample" in small.describe() and "gating is over all of them" in small.describe(),
+        f"the note says it is a sample and that the gating is not: {small.describe()}",
+    )
+
+    # 2. Capping the drawing must not change a single number.
+    gates = [pop.Gate(feature, 300.0, 900.0)]
+    full = pop.gate_report(source, gates)
+    check(
+        pop.feature_scatter(source, feature, "Solidity", gates, limit=5).n_selected
+        == full.n_objects,
+        "the view reports the whole selection, not the sample it drew",
+    )
+    check(
+        int(pop.gate_mask(source, gates).sum()) == full.n_kept,
+        "and the gating itself is over every object either way",
+    )
+
+    # 3. One answer to "the range of this column".
+    values = np.asarray(pop.values_of(source, feature), dtype=float)
+    low, high = analysis.value_range(
+        values, pop.SUGGEST_LOW_PERCENTILE, pop.SUGGEST_HIGH_PERCENTILE
+    )
+    histogram = pop.feature_histogram(source, feature)
+    check(
+        abs(histogram.suggested_low - low) < 1e-9
+        and abs(histogram.suggested_high - high) < 1e-9,
+        f"the suggested bounds are analysis.value_range at this panel's percentiles "
+        f"({histogram.suggested_low:.4g}, {histogram.suggested_high:.4g} vs "
+        f"{low:.4g}, {high:.4g})",
+    )
+    check(
+        pop.SUGGEST_LOW_PERCENTILE < analysis.DEFAULT_LOW_PERCENTILE
+        and pop.SUGGEST_HIGH_PERCENTILE > analysis.DEFAULT_HIGH_PERCENTILE,
+        f"deliberately tighter than a colour scale's "
+        f"({pop.SUGGEST_LOW_PERCENTILE}/{pop.SUGGEST_HIGH_PERCENTILE} against "
+        f"{analysis.DEFAULT_LOW_PERCENTILE}/{analysis.DEFAULT_HIGH_PERCENTILE}): a "
+        "colour scale clips the tails, a gate is chosen by looking at them",
+    )
+
+    # 4. Blanks: the same test for "no value", in both modules.
+    blanks = np.asarray([1.0, np.nan, np.inf, 3.0])
+    check(
+        bool(np.array_equal(
+            np.isfinite(blanks),
+            ~pop.Gate("x", -np.inf, np.inf).decide(blanks)[1],
+        )),
+        "a blank is np.isfinite in both, so neither counts an infinity as a value",
+    )
+    check(
+        analysis.value_range(blanks)[1] > analysis.value_range(blanks)[0],
+        "and value_range survives a column with blanks and infinities in it",
+    )
+
+
 def main() -> int:
     directory = Path(tempfile.mkdtemp(prefix="mv-populations-"))
     try:
@@ -818,6 +998,8 @@ def main() -> int:
         for name, test in (
             ("gates", test_samples_and_gates),
             ("joins", test_the_report_owns_up_to_or),
+            ("scatter", test_the_two_feature_view),
+            ("shared", test_it_filters_the_way_the_analysis_panel_does),
             ("histogram", test_the_histogram),
             ("positives", test_calling_positives),
             ("summary", test_the_summary),

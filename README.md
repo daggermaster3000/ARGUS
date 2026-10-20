@@ -1230,6 +1230,30 @@ selection. On its own rather than in sequence: in sequence the second gate looks
 cheap because the first already took what they share, and the order the gates
 happen to be listed in is not information about the data.
 
+**View** switches the plot between the one feature binned and two features
+against each other. The second is the one to check a bound on: a bound that sits
+in a dip of one histogram can run straight through the middle of a cloud in two
+dimensions, and only the scatter shows that. On it,
+
+- the vertical lines are the bounds of the gates on the x feature, the horizontal
+  ones the gates on y, and the shaded corner is where both keep an object;
+- the pair being edited in the spin boxes is drawn dashed, so a bound can be seen
+  against the cloud before it is added;
+- every point is coloured by whether the **whole rule** keeps it — grey is
+  excluded — not by the two gates in the picture, so an `or` three gates long is
+  visible here even though its third bound is on neither axis. Any such gate is
+  named in the line under the plot, because a colour decided by a bound the
+  reader cannot see has to be accounted for;
+- an object with no value for either axis cannot be placed, so it is not drawn.
+  It is still gated, and the line under the plot counts it.
+
+The plot is capped at the same hundred thousand points the Measurement analysis
+panel's scatter is capped at, by the same function and the same seed — a random
+sample rather than the first N, because a table is written in label order, which
+on a plate runs corner to corner. **The cap is on the drawing only**: the gating,
+the thresholds, the counts and everything written to a file are over every
+selected object, and the line under the plot says so.
+
 #### Combining gates: and / or / xor
 
 Each gate after the first carries a **join** saying how it combines with the

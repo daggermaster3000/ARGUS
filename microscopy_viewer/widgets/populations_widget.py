@@ -69,6 +69,17 @@ from .analysis_widget import FrameModel, _figure_canvas
 
 logger = get_logger("populations_widget")
 
+#: The two ways of looking at a gate. One feature binned, or two against each
+#: other — the second is the one that shows whether a bound separates two clouds
+#: or runs through the middle of one.
+VIEW_HISTOGRAM = "histogram"
+VIEW_SCATTER = "scatter"
+
+#: Dot size in the two-feature view, and the size above which they are made
+#: smaller and fainter. Matches the Measurement analysis panel's scatter.
+DOT_SIZE = 6
+DOT_FADE_ABOVE = 2_000
+
 FILE_FILTER = "AnnData (*.h5ad);;All files (*)"
 
 #: What the Explore tab can draw. Few on purpose: this panel is for getting to an
@@ -235,6 +246,32 @@ class PopulationAnalysisWidget(QWidget):
             "Ignored on the first gate, which has nothing to combine with."
         )
         form.addRow("Join", self._gate_join)
+
+        view = QWidget()
+        view_layout = QHBoxLayout(view)
+        view_layout.setContentsMargins(0, 0, 0, 0)
+        self._gate_view = QComboBox()
+        self._gate_view.addItem("distribution", VIEW_HISTOGRAM)
+        self._gate_view.addItem("against", VIEW_SCATTER)
+        self._gate_view.setToolTip(
+            "“distribution” is the feature on its own, binned, with the bounds across "
+            "it — the view for choosing one bound.\n\n"
+            "“against” plots it against a second measurement, with the bounds of both "
+            "drawn on and every object coloured by whether the whole rule keeps it. "
+            "That is the view for seeing whether a gate is cutting through a cloud or "
+            "between two, which a histogram of either feature alone cannot show."
+        )
+        self._gate_view.currentIndexChanged.connect(self._gate_view_changed)
+        view_layout.addWidget(self._gate_view)
+        # Set here as well as on change: the combo starts on the histogram, and
+        # setting the index it is already on fires nothing, so the second axis
+        # would be left enabled in the view that has no second axis.
+        self._gate_view.setCurrentIndex(0)
+        self._gate_y = QComboBox()
+        self._gate_y.setToolTip("The second measurement, on the vertical axis.")
+        self._gate_y.currentTextChanged.connect(lambda _text: self.draw_gate_plot())
+        view_layout.addWidget(self._gate_y, stretch=1)
+        form.addRow("View", view)
         gates_layout.addLayout(form)
 
         from matplotlib.figure import Figure
@@ -244,10 +281,22 @@ class PopulationAnalysisWidget(QWidget):
         self._gate_canvas = canvas_class(self._gate_figure)
         self._gate_canvas.setMinimumHeight(170)
         self._gate_canvas.setToolTip(
-            "The feature's distribution over the selected objects, with the bounds "
-            "drawn on it. The end bins hold everything beyond them."
+            "The selected objects, with the gates' bounds drawn on them — one feature "
+            "binned, or two against each other, as chosen in “View”.\n\n"
+            "In the distribution the end bins hold everything beyond them. In the "
+            "two-feature view a grey point is an object the rule excludes, the lines "
+            "are the bounds of the gates on these two axes, and the shaded corner is "
+            "where both of them keep an object."
         )
         gates_layout.addWidget(self._gate_canvas, stretch=1)
+
+        self._gate_plot_note = QLabel("—")
+        self._gate_plot_note.setWordWrap(True)
+        self._gate_plot_note.setToolTip(
+            "What is in the picture, and what is not: how many points were drawn, "
+            "whether they are a sample, and any gate whose feature is on neither axis."
+        )
+        gates_layout.addWidget(self._gate_plot_note)
 
         actions = QHBoxLayout()
         add = QPushButton("Add gate")
@@ -560,9 +609,13 @@ class PopulationAnalysisWidget(QWidget):
             self._file_summary.setText(
                 f"{adata.n_obs:,} objects, {adata.n_vars} features, {len(samples)} samples"
             )
-            for box in (self._gate_feature, self._rule_feature):
+            for box in (self._gate_feature, self._rule_feature, self._gate_y):
                 box.clear()
                 box.addItems(names)
+            # A different measurement from the first by default: two axes showing
+            # one feature against itself is a diagonal line and no information.
+            if len(names) > 1:
+                self._gate_y.setCurrentIndex(1)
 
             self._sample_list.clear()
             for name in samples:
@@ -620,6 +673,126 @@ class PopulationAnalysisWidget(QWidget):
         self._update_sample_count()
         self._recompute_gates()
 
+    def _gate_view_changed(self, _index: int = 0) -> None:
+        """Enable the second axis only for the view that has one."""
+        scatter = self._gate_view.currentData() == VIEW_SCATTER
+        self._gate_y.setEnabled(scatter)
+        self.draw_gate_plot()
+
+    def draw_gate_plot(self) -> None:
+        """Draw whichever view is chosen. Everything calls this, not either one."""
+        scatter = self._gate_view.currentData() == VIEW_SCATTER
+        # Disabled rather than hidden, so the row does not change height when the
+        # view changes.
+        self._gate_y.setEnabled(scatter)
+        if scatter:
+            self.draw_scatter()
+        else:
+            self.draw_histogram()
+
+    def draw_scatter(self) -> None:
+        """Two features, with the gates' bounds on them and the rule in the colour.
+
+        The bounds are drawn from the gates that exist, and the pair in the spin
+        boxes is drawn too — dashed, like the histogram's — so a bound being
+        dragged can be seen against the cloud before it is added.
+        """
+        self._gate_figure.clear()
+        axes = self._gate_figure.add_subplot(111)
+        x_name = self._gate_feature.currentText()
+        y_name = self._gate_y.currentText()
+
+        scatter = None
+        if self._adata is not None and x_name and y_name:
+            try:
+                scatter = populations.feature_scatter(
+                    self._adata, x_name, y_name, self._gates, within=self._selection_mask()
+                )
+            except Exception:
+                logger.exception("could not build the two-feature view")
+                scatter = None
+
+        if scatter is None or len(scatter.x) == 0:
+            axes.text(
+                0.5,
+                0.5,
+                "pick two measurements the file has"
+                if x_name != y_name
+                else "pick a different second measurement",
+                ha="center",
+                va="center",
+                color=dashboard.INK,
+                transform=axes.transAxes,
+            )
+            axes.set_axis_off()
+            self._gate_canvas.draw_idle()
+            self._gate_plot_note.setText("—")
+            return
+
+        kept = np.asarray(scatter.kept, dtype=bool)
+        faint = len(scatter.x) > DOT_FADE_ABOVE
+        # Grey for the excluded, which is what grey means everywhere here: not a
+        # group. The kept objects take the first palette colour, as they do in
+        # every other plot in this panel.
+        for mask, colour, label, alpha in (
+            (~kept, dashboard.NEUTRAL, "excluded", 0.45 if faint else 0.6),
+            (kept, dashboard.PALETTE[0], "kept", 0.6 if faint else 0.9),
+        ):
+            if not mask.any():
+                continue
+            axes.scatter(
+                scatter.x[mask],
+                scatter.y[mask],
+                s=DOT_SIZE,
+                c=colour,
+                alpha=alpha,
+                linewidths=0,
+                label=label,
+            )
+
+        # The gates that exist, solid; the pair being edited, dashed.
+        for low, high in scatter.x_bounds:
+            for bound in (low, high):
+                if np.isfinite(bound):
+                    axes.axvline(bound, color=dashboard.NEUTRAL, linewidth=1.4)
+        for low, high in scatter.y_bounds:
+            for bound in (low, high):
+                if np.isfinite(bound):
+                    axes.axhline(bound, color=dashboard.NEUTRAL, linewidth=1.4)
+        for bound in (self._gate_low.value(), self._gate_high.value()):
+            axes.axvline(bound, color=dashboard.NEUTRAL, linestyle="--", linewidth=1.4)
+
+        # Where a gate on each axis both keep an object: the rectangle the pair of
+        # them reads as, shaded rather than outlined so it cannot be mistaken for
+        # a bound of its own.
+        if scatter.x_bounds and scatter.y_bounds:
+            (x_low, x_high), (y_low, y_high) = scatter.x_bounds[0], scatter.y_bounds[0]
+            limits_x, limits_y = axes.get_xlim(), axes.get_ylim()
+            axes.axvspan(
+                max(x_low, limits_x[0]), min(x_high, limits_x[1]),
+                ymin=0, ymax=1, color=dashboard.PALETTE[0], alpha=0.06, linewidth=0,
+            )
+            axes.axhspan(
+                max(y_low, limits_y[0]), min(y_high, limits_y[1]),
+                color=dashboard.PALETTE[0], alpha=0.06, linewidth=0,
+            )
+            axes.set_xlim(limits_x)
+            axes.set_ylim(limits_y)
+
+        axes.set_xlabel(scatter.x_feature, color=dashboard.INK)
+        axes.set_ylabel(scatter.y_feature, color=dashboard.INK)
+        axes.tick_params(colors=dashboard.INK, labelsize=8)
+        axes.grid(True, color=dashboard.GRID, linewidth=0.6)
+        axes.set_axisbelow(True)
+        axes.legend(fontsize=7, frameon=False, labelcolor=dashboard.INK, loc="best")
+        axes.set_title(
+            f"{scatter.n_kept:,} of {len(scatter.x):,} drawn objects kept",
+            color=dashboard.INK,
+            fontsize=9,
+        )
+        self._gate_canvas.draw_idle()
+        self._gate_plot_note.setText(scatter.describe())
+
     def _gate_feature_changed(self, _text: str = "") -> None:
         """Put the suggested bounds for a newly chosen feature in the boxes.
 
@@ -634,11 +807,11 @@ class PopulationAnalysisWidget(QWidget):
             self._set_bounds(existing.low, existing.high)
         else:
             self.suggest_bounds()
-        self.draw_histogram()
+        self.draw_gate_plot()
 
     def _bounds_changed(self, _value: float = 0.0) -> None:
         if not self._updating:
-            self.draw_histogram()
+            self.draw_gate_plot()
 
     def _set_bounds(self, low: float, high: float) -> None:
         was = self._updating
@@ -655,7 +828,7 @@ class PopulationAnalysisWidget(QWidget):
         if histogram is None:
             return
         self._set_bounds(histogram.suggested_low, histogram.suggested_high)
-        self.draw_histogram()
+        self.draw_gate_plot()
 
     def _selection_mask(self) -> np.ndarray | None:
         if self._adata is None:
@@ -691,6 +864,7 @@ class PopulationAnalysisWidget(QWidget):
             )
             axes.set_axis_off()
             self._gate_canvas.draw_idle()
+            self._gate_plot_note.setText("—")
             return
 
         widths = np.diff(histogram.edges)
@@ -715,6 +889,11 @@ class PopulationAnalysisWidget(QWidget):
             f"{histogram.n_finite:,} objects{blank}", color=dashboard.INK, fontsize=9
         )
         self._gate_canvas.draw_idle()
+        self._gate_plot_note.setText(
+            f"{histogram.n_finite:,} object(s) binned"
+            + (f", {histogram.n_blank:,} with no value for this feature" if histogram.n_blank else "")
+            + "; every object is binned, so this is not a sample."
+        )
 
     def _gate_from_boxes(self) -> populations.Gate | None:
         """The gate the editor currently describes, or None if it cannot make one."""
@@ -794,7 +973,7 @@ class PopulationAnalysisWidget(QWidget):
         finally:
             self._updating = False
         self._set_bounds(gate.low, gate.high)
-        self.draw_histogram()
+        self.draw_gate_plot()
 
     def _fill_gate_table(self, report: populations.GateReport | None = None) -> None:
         was = self._updating
@@ -854,7 +1033,7 @@ class PopulationAnalysisWidget(QWidget):
         if report.missing:
             lines.append("Not in this file: " + ", ".join(report.missing))
         self._gate_status.setText("\n".join(lines))
-        self.draw_histogram()
+        self.draw_gate_plot()
         # The thresholds were computed over the previous gating, so they are no
         # longer the thresholds of what is on screen.
         if self._calls is not None:
@@ -1022,9 +1201,16 @@ class PopulationAnalysisWidget(QWidget):
         if not finite.any():
             axes.set_axis_off()
             return
-        low, high = (float(v) for v in np.percentile(values[finite], [0.5, 99.5]))
-        if high <= low:
-            high = low + 1.0
+        # Through the same helper the Measurement analysis panel paints with, so
+        # "the range of this measurement" means one thing in the application
+        # rather than one thing per plot. Its percentiles are this panel's, which
+        # are tighter than a colour scale's for the same reason the suggested
+        # bounds are: a threshold is read against the tails.
+        low, high = analysis.value_range(
+            values[finite],
+            populations.SUGGEST_LOW_PERCENTILE,
+            populations.SUGGEST_HIGH_PERCENTILE,
+        )
         edges = np.linspace(low, high, populations.DEFAULT_BINS + 1)
         axes.hist(
             [np.clip(values[finite & ~positive], low, high), np.clip(values[finite & positive], low, high)],
