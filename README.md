@@ -1212,6 +1212,88 @@ was measured.
 `pip install "microscopy-viewer[analysis]"` for the writer; squidpy is left to
 you, since what it pulls in depends on the analysis.
 
+### Population analysis
+
+**Panels → Population analysis.** Takes the combined `.h5ad` a batch run or the
+Measurement analysis panel wrote, and answers one question across every sample at
+once: *what fraction of the cells is positive, and where*. Three sub-tabs, in the
+order the decisions are made.
+
+**1. Prepare** — which samples are in, and which objects are not cells. Tick the
+samples; then gate on any measurement, with the feature's distribution drawn and
+the bounds on it, so a bound is chosen by looking rather than by guessing.
+**Suggest** puts them at the 0.5 and 99.5 percentiles — the tails, which is where
+the debris and the fused objects are.
+
+Each gate's row says what *it* removed, applied on its own to the whole
+selection. On its own rather than in sequence: in sequence the second gate looks
+cheap because the first already took what they share, and the order the gates
+happen to be listed in is not information about the data.
+
+#### Combining gates: and / or / xor
+
+Each gate after the first carries a **join** saying how it combines with the
+result of the gates above it:
+
+| Join | Keeps |
+|---|---|
+| **and** | objects that pass this gate *as well* — narrows |
+| **or** | objects that pass this gate *instead* — widens |
+| **xor** | objects that pass an odd number of the gates; over two, one or the other but not both |
+
+`or` is what makes two gates on one feature useful, and that is now allowed:
+`Voxels in [0, 100] or Voxels in [900, inf]` keeps the debris and the fused
+objects and nothing in between — a rule that could not be written at all while
+every gate was ANDed, because the two windows are disjoint and ANDed they keep
+nothing. `xor` is for asking what two markers disagree about.
+
+**There is no precedence and there are no brackets.** The gates apply top to
+bottom, so `A or B and C` here means `(A or B) and C`, not what boolean algebra
+would make of it. Precedence would be indefensible in a table whose row order is
+the only thing on screen; the rule as it will be applied is written out in full
+under the table, bracketed the way it is applied.
+
+**A blank abstains.** An object with no value for a gated feature — a 4i cycle
+that never measured it — is something the gate cannot judge, so it contributes
+the *identity* of the operator it meets: a pass for `and`, a fail for `or` and
+`xor`. Either way it leaves the running answer exactly as it was. This matters
+because treating a blank as a pass regardless, which is right for `and` and was
+all that was needed when `and` was the only option, makes `or` keep everything:
+one unmeasured feature and the union is the whole plate. A single gate on its own
+still keeps what it cannot judge — one gate should not throw away a whole cycle.
+
+With `or` or `xor` in the rule the per-gate "removed" counts no longer add up to
+the total kept, and the line under the table says so rather than leaving the
+arithmetic looking broken.
+
+**2. Positive** — what counts as a positive cell. The headline metric is
+**median + 3·sd** of a chosen measurement; mean + k·sd and a percentile are
+there too, and k is yours. **Signal** chooses raw or normalised, over the same
+scopes the rest of the application uses (`this image`, `this well, every cycle`,
+`this cycle, every well`, `the whole plate`), and **Pooled over** chooses the
+scope the threshold itself is computed over — per image, per well, or one
+threshold for the plate. The thresholds land in a table, one row per sample,
+with the centre and the spread they came from.
+
+Gated-out objects do not set the threshold. The debris is what a median is most
+easily dragged by, so excluding it first is the point of doing Prepare first.
+
+**3. Explore** — percent positive per sample and per well, the kept-and-excluded
+counts, and the pooled signal histogram split into negative and positive with the
+thresholds drawn on. That last one is the plot worth looking at before believing
+any of it: it says whether the threshold sits in a gap or straight through the
+middle of a single mode.
+
+**Export the summary as CSV** writes the per-sample table as it is on screen.
+**Write into the .h5ad** re-runs the whole definition and stores it — the gates
+with their joins, the rule, and a positive flag per object — so the file carries
+what was done to it and the panel restores it when the file is opened again.
+
+The analysis itself is in `microscopy_viewer/populations.py`, which has no Qt in
+it and is tested headless — so the spatial dashboard can grow the same analysis
+by importing it rather than by writing a second copy of the arithmetic, and a
+threshold will then mean the same thing in both. That is not built yet.
+
 ### Spatial dashboard
 
 `.h5ad` in hand, **Spatial dashboard…** in the Measurement analysis panel opens a

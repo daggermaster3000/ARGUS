@@ -114,6 +114,13 @@ def _register_builtin_panels() -> None:
         # which plate was scanned.
         return FileExplorerWidget(app)
 
+    def _populations(app):
+        from .populations_widget import PopulationAnalysisWidget
+
+        # Takes the app: it lists the combined .h5ad files beside whichever plate
+        # the File explorer last scanned.
+        return PopulationAnalysisWidget(app)
+
     def _batch(app):
         from .batch_widget import BatchSegmentationWidget
 
@@ -214,6 +221,19 @@ def _register_builtin_panels() -> None:
             tabify_with="segmentation",
             # After the panels that write the tables it reads.
             order=70,
+            start_hidden=True,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="populations",
+            title="Population analysis",
+            factory=_populations,
+            attribute="populations_widget",
+            tabify_with="measurement_analysis",
+            # After the Measurement analysis panel: this one reads the combined
+            # .h5ad that panel writes, and shares its tab stack.
+            order=80,
             start_hidden=True,
         )
     )
