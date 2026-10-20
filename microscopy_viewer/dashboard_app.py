@@ -1642,7 +1642,9 @@ def _positive_subtab(source, keep, measurables, chosen) -> None:
             with st.spinner("Thresholding…"):
                 try:
                     calls = pops.call_positives(source, rule, keep=keep)
-                    summary = pops.sample_summary(source, calls, keep=keep)
+                    summary = pops.sample_summary(
+                        source, calls, keep=keep, samples=chosen
+                    )
                 except Exception as exc:  # noqa: BLE001 - shown on the page
                     st.error(f"The rule could not be applied: {exc}")
                     return

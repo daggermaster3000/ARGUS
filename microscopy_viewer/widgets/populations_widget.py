@@ -1142,7 +1142,9 @@ class PopulationAnalysisWidget(QWidget):
 
         try:
             calls = populations.call_positives(self._adata, rule, keep=keep)
-            summary = populations.sample_summary(self._adata, calls, keep=keep)
+            summary = populations.sample_summary(
+                self._adata, calls, keep=keep, samples=self.selected_samples()
+            )
         except Exception as error:
             logger.exception("could not apply %s", rule.describe())
             self._rule_status.setText(f"Could not apply the rule: {error}")

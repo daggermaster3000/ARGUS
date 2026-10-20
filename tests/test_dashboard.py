@@ -1112,6 +1112,27 @@ def test_the_two_top_level_tabs(directory: Path) -> None:
             f"{plot!r} draws: {[str(e.value)[:140] for e in page.exception]}",
         )
 
+    # A sample taken out of the analysis is out of the plots as well. Left in,
+    # it draws a full bar of exclusions in the colour the gates use, for a
+    # sample no gate ever judged.
+    every = box("multiselect", "pop-samples").value
+    box("multiselect", "pop-samples").set_value(list(every[:2])).run()
+    box("button", "pop-apply").click().run()
+    _calls, summary, _attrs = page.session_state["pop_calls"]
+    check(
+        list(summary["sample"]) == list(every[:2]),
+        f"the dropped sample is not a row: {list(summary['sample'])}",
+    )
+    specs = " ".join(
+        str(c.proto.spec)
+        for c in page.get("arrow_vega_lite_chart") + page.get("vega_lite_chart")
+    )
+    check(
+        every[2] not in specs,
+        f"nor is it anywhere in what the plots draw: {every[2]}",
+    )
+    box("multiselect", "pop-samples").set_value(list(every)).run()
+
     # And the thing that would otherwise lie: thresholds pooled over a gating
     # that has since changed.
     box("button", "pop-gate-clear").click().run()

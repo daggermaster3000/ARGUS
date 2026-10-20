@@ -1373,6 +1373,12 @@ with the centre and the spread they came from.
 Gated-out objects do not set the threshold. The debris is what a median is most
 easily dragged by, so excluding it first is the point of doing Prepare first.
 
+A sample unticked in **Prepare** gets no row and appears in no plot. Left in, it
+would read "300 objects, 0 kept, 300 excluded" — a full bar of exclusions, in the
+colour the gates use, for a sample no gate ever judged. A sample that *was* in
+the analysis and lost every object to the gates does keep its row: it looks the
+same and is not, because that row says what the gates did.
+
 **Deviation** chooses which standard deviation the `+ k·sd` is counted in:
 *population* divides by *n* and describes the objects in the pool; *sample*
 divides by *n − 1* and estimates the deviation of the larger population they were

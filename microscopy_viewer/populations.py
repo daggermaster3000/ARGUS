@@ -1132,8 +1132,13 @@ def call_positives(
 # ---------------------------------------------------------------------------
 
 
-def sample_summary(adata, calls: PositiveCalls, keep: np.ndarray | None = None):
-    """One row per sample: objects, objects kept, positives, percent positive.
+def sample_summary(
+    adata,
+    calls: PositiveCalls,
+    keep: np.ndarray | None = None,
+    samples: Sequence[str] | None = None,
+):
+    """One row per sample in the analysis: objects, kept, positives, percent.
 
     The table the plots are drawn from and the one that gets exported, so the
     numbers in a figure and the numbers in the CSV beside it cannot disagree.
@@ -1141,6 +1146,18 @@ def sample_summary(adata, calls: PositiveCalls, keep: np.ndarray | None = None):
     ``objects`` counts everything in the sample and ``kept`` what survived the
     gates, both of them: a percentage computed over a tenth of a well is a
     percentage that needs its denominator printed next to it.
+
+    *samples* is the selection — the samples the analysis was asked for. A sample
+    left out of it gets **no row**, because it has not been measured against
+    anything: every one of its objects is outside *keep*, so a row for it reads
+    "150 objects, 0 kept, 150 excluded", and a plot of that draws a full bar of
+    exclusions for a sample no gate ever judged. That is a statement about the
+    gates, and it is false. A sample that *was* in the analysis and lost every
+    object to the gates keeps its row, which is the thing that looks the same and
+    is not: it says what the gates did.
+
+    Left at ``None`` every sample is summarised, which is what a caller with no
+    selection to apply means.
     """
     import pandas as pd
 
@@ -1149,9 +1166,12 @@ def sample_summary(adata, calls: PositiveCalls, keep: np.ndarray | None = None):
     labels = sample_of(adata).astype(str)
     positive = np.asarray(calls.positive, dtype=bool)
     signal = np.asarray(calls.values, dtype=float)
+    wanted = None if samples is None else {str(name) for name in samples}
 
     rows: list[dict[str, Any]] = []
     for name in sample_labels(adata):
+        if wanted is not None and name not in wanted:
+            continue
         mine = labels == name
         if not mine.any():
             continue
@@ -1246,7 +1266,7 @@ def run_populations(
     report = gate_report(source, gates, within=chosen)
     keep = gate_mask(source, gates, within=chosen)
     calls = call_positives(source, rule, keep=keep)
-    summary = sample_summary(source, calls, keep=keep)
+    summary = sample_summary(source, calls, keep=keep, samples=samples)
 
     source.obs[KEPT_COLUMN] = keep
     source.obs[POSITIVE_COLUMN] = np.asarray(calls.positive, dtype=bool)

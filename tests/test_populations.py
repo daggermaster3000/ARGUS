@@ -496,6 +496,50 @@ def test_the_summary(directory: Path) -> None:
         f"the well and the cycle are split out, ready to plot: {list(summary['well'])}",
     )
 
+    # A sample taken out in Prepare is not in the analysis, so it is not in the
+    # answer. Left in, every one of its objects is outside *keep* and the row
+    # reads "300 objects, 0 kept, 300 excluded" -- a full bar of exclusions, in
+    # the colour the gates use, for a sample no gate ever judged.
+    some = COMPONENTS[:2]
+    chosen = pop.sample_mask(source, some)
+    part_keep = pop.gate_mask(source, gates, within=chosen)
+    part_calls = pop.call_positives(
+        source, pop.PositiveRule("Marker", scope=analysis.SCOPE_IMAGE), keep=part_keep
+    )
+    part = pop.sample_summary(source, part_calls, keep=part_keep, samples=some)
+    check(
+        list(part["sample"]) == list(some),
+        f"only the chosen samples get a row: {list(part['sample'])}",
+    )
+    check(
+        int(part["excluded"].sum()) == int(part["objects"].sum() - part["kept"].sum()),
+        "so nothing is counted as excluded that the gates did not exclude",
+    )
+    check(
+        len(pop.well_summary(part)) == 1,
+        f"and the well pooling follows: {list(pop.well_summary(part)['well'])}",
+    )
+
+    # The case that looks the same and is not: in the analysis, and the gates
+    # took everything. That row stays, because it is what the gates did.
+    nothing = pop.sample_summary(
+        source,
+        part_calls,
+        keep=np.zeros(int(source.n_obs), dtype=bool),
+        samples=some,
+    )
+    check(
+        len(nothing) == len(some) and int(nothing["kept"].sum()) == 0,
+        f"a chosen sample the gates emptied keeps its row: {len(nothing)} row(s)",
+    )
+
+    # No selection to apply means every sample, which is what the old callers
+    # meant and what a file read back with no sample list means.
+    check(
+        len(pop.sample_summary(source, calls, keep=keep)) == len(COMPONENTS),
+        "and with no samples given, every sample is summarised",
+    )
+
     wells = pop.well_summary(summary)
     check(len(wells) == 2, f"pooled to one row per well, the cycles added ({len(wells)})")
     check(
