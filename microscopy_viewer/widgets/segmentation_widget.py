@@ -68,6 +68,8 @@ NO_NUCLEI = "— none —"
 NO_MEMBRANE = "— none —"
 #: Shown in the training tab when the viewer holds no Labels layer to learn from.
 NO_MASKS = "— no corrected masks in the viewer —"
+#: Train on every pixel of every plane, the default.
+WHOLE_IMAGE = "— the whole image —"
 
 
 def _short_name(layer) -> str:
@@ -503,6 +505,26 @@ class SegmentationWidget(QWidget):
         )
         form.addRow("Corrected masks", self._masks_box)
 
+        self._region_box = QComboBox()
+        self._region_box.setToolTip(
+            "A Shapes layer whose rectangles mark the part of the image that has "
+            "been corrected. Training then sees those boxes and nothing else.\n\n"
+            "Add a Shapes layer in napari, draw a rectangle over the patch you "
+            "fixed, and pick the layer here. Several rectangles are several "
+            "training examples, which is better than one: the network sees the "
+            "same kind of correction in more than one place."
+        )
+        form.addRow("Region", self._region_box)
+
+        self._region_every = QCheckBox("through every plane")
+        self._region_every.setToolTip(
+            "A rectangle is drawn on one plane and belongs to it. Ticked, the same "
+            "box is cut from every plane of the stack — right when the correction "
+            "holds all the way through, wrong when it was made on one plane, "
+            "because the other planes have not been corrected."
+        )
+        form.addRow("", self._region_every)
+
         self._train_min_masks = QSpinBox()
         self._train_min_masks.setRange(1, 1000)
         self._train_min_masks.setValue(sg.DEFAULT_MIN_TRAIN_MASKS)
@@ -564,6 +586,11 @@ class SegmentationWidget(QWidget):
 
         return [layer for layer in self._viewer.layers if isinstance(layer, Labels)]
 
+    def _shapes_layers(self) -> list:
+        from napari.layers import Shapes
+
+        return [layer for layer in self._viewer.layers if isinstance(layer, Shapes)]
+
     def refresh_training(self) -> None:
         """Rebuild the masks list and restate what Setup has chosen."""
         previous = self._masks_box.currentData()
@@ -578,6 +605,17 @@ class SegmentationWidget(QWidget):
             )
         index = self._masks_box.findData(previous) if previous else -1
         self._masks_box.setCurrentIndex(max(index, 0))
+
+        chosen_region = self._region_box.currentData()
+        self._region_box.clear()
+        self._region_box.addItem(WHOLE_IMAGE, "")
+        for layer in self._shapes_layers():
+            self._region_box.addItem(_short_name(layer), str(layer.name))
+            self._region_box.setItemData(
+                self._region_box.count() - 1, str(layer.name), Qt.ToolTipRole
+            )
+        index = self._region_box.findData(chosen_region) if chosen_region else -1
+        self._region_box.setCurrentIndex(max(index, 0))
 
         channel = str(self._channel_box.currentData() or "") or "no channel"
         model = str(self._model_box.currentData() or "") or "no model"
@@ -921,19 +959,66 @@ class SegmentationWidget(QWidget):
         if labels is None:
             return [], [], labels_problem or f"“{masks_name}” could not be read."
 
+        regions, notes, problem = self._regions(image)
+        if problem:
+            return [], notes, problem
+
         try:
             examples, skipped = sg.training_examples(
-                image, labels, min_masks=int(self._train_min_masks.value())
+                image,
+                labels,
+                min_masks=int(self._train_min_masks.value()),
+                regions=regions,
             )
         except ValueError as error:
-            return [], [], str(error)
+            return [], notes, str(error)
+        skipped = notes + skipped
         if not examples:
             kept = "; ".join(skipped[:3])
+            where = " inside the region" if regions else ""
             return [], skipped, (
-                "No plane carried enough corrected objects to train on. "
-                f"Lower “Fewest objects”, or correct more masks. {kept}"
+                f"No plane carried enough corrected objects to train on{where}. "
+                f"Lower “Fewest objects”, draw a bigger region, or correct more "
+                f"masks. {kept}"
             )
         return examples, skipped, ""
+
+    def _regions(self, image) -> tuple[tuple, list[str], str]:
+        """``(regions, notes, problem)`` from the chosen Shapes layer.
+
+        Both layers' scale and translate go into the conversion. A Shapes layer
+        added in napari starts unscaled whatever the image under it is scaled
+        by, so taking its vertices as pixels puts the box out by the pixel size
+        — a factor of three on a 0.3 µm pixel, and still a plausible-looking
+        crop.
+        """
+        name = str(self._region_box.currentData() or "")
+        if not name:
+            return (), [], ""
+        shapes = self._layer_named(name)
+        drawn = list(getattr(shapes, "data", []) or []) if shapes is not None else []
+        if not drawn:
+            return (), [], (
+                f"“{name}” holds no shapes yet. Draw a rectangle over the part you "
+                "corrected, or set Region back to the whole image."
+            )
+
+        source = self._layer_named(str(self._channel_box.currentData() or ""))
+        regions, notes = sg.boxes_from_shapes(
+            drawn,
+            image.shape,
+            shape_scale=getattr(shapes, "scale", None),
+            shape_translate=getattr(shapes, "translate", None),
+            image_scale=getattr(source, "scale", None),
+            image_translate=getattr(source, "translate", None),
+            every_plane=bool(self._region_every.isChecked()),
+        )
+        if not regions:
+            return (), notes, (
+                "None of the drawn shapes gave a region to train on. "
+                + "; ".join(notes[:2])
+            )
+        return tuple(regions), notes, ""
 
     def _training_said(self, text: str) -> None:
         """One line of cellpose's training log, on the main thread."""
@@ -965,14 +1050,16 @@ class SegmentationWidget(QWidget):
         )
         device = sg.compute_device(settings.use_gpu)
         n_objects = sum(int(example.n_objects) for example in examples)
-        left_out = f", {len(skipped)} plane(s) left out" if skipped else ""
+        left_out = f", {len(skipped)} left out" if skipped else ""
+        region_name = str(self._region_box.currentData() or "")
+        inside = f" inside “{region_name}”" if region_name else ""
         for note in skipped:
             logger.info("training: skipped %s", note)
 
         self._train_button.setEnabled(False)
         self._train_status.setText(
             f"Training {settings.resolved_name()} from {Path(settings.model).name or settings.model} "
-            f"on {len(examples)} plane(s), {n_objects:,} object(s){left_out}, "
+            f"on {len(examples)} example(s){inside}, {n_objects:,} object(s){left_out}, "
             f"on {device.describe()}…"
         )
 

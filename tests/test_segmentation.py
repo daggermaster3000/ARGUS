@@ -1283,6 +1283,167 @@ def test_one_object_in_two_places_becomes_two() -> None:
     )
 
 
+def test_a_drawn_box_becomes_image_pixels() -> None:
+    """Shapes are in world units; the image is in pixels. The gap is the bug.
+
+    A Shapes layer added in napari starts at scale (1, 1, 1) whatever the image
+    under it is scaled by, so its vertices are µm and the image's are pixels.
+    Taking one for the other puts the box out by exactly the pixel size — on a
+    0.3 µm pixel, a factor of three — and the crop that comes back still looks
+    like a plausible region, which is what makes it worth a check.
+    """
+    print("a drawn box in the image's own pixels")
+
+    # 3 to 40 µm on a 0.3 µm pixel is rows 10 to 134.
+    drawn = np.array(
+        [[1.0, 3.0, 3.0], [1.0, 3.0, 40.0], [1.0, 40.0, 40.0], [1.0, 40.0, 3.0]]
+    )
+    regions, notes = seg.boxes_from_shapes(
+        [drawn], (4, 192, 192), image_scale=(1.0, 0.3, 0.3)
+    )
+    check(len(regions) == 1 and not notes, f"one shape, one region: {notes}")
+    box = regions[0]
+    check(
+        (box.y0, box.y1, box.x0, box.x1) == (10, 134, 10, 134),
+        f"the µm box lands on the right pixels: {(box.y0, box.y1, box.x0, box.x1)}",
+    )
+    check(
+        box.height == 124 and box.width == 124,
+        f"37 µm at 0.3 µm/px, rounded outwards, is 124 px: {box.height}x{box.width}",
+    )
+
+    unscaled, _notes = seg.boxes_from_shapes([drawn], (4, 192, 192))
+    check(
+        (unscaled[0].y0, unscaled[0].y1) == (3, 40),
+        "and with no scale the vertices are already pixels, so nothing moves",
+    )
+    check(
+        unscaled[0].height != box.height,
+        "the two differ, which is the whole reason the conversion is not optional",
+    )
+
+    shifted, _notes = seg.boxes_from_shapes(
+        [drawn], (4, 192, 192), image_scale=(1.0, 0.3, 0.3), image_translate=(0.0, 3.0, 0.0)
+    )
+    check(
+        shifted[0].y0 == 0 and shifted[0].x0 == 10,
+        f"an image offset moves the box in y and not in x: {shifted[0]}",
+    )
+
+    # A rectangle belongs to the plane it was drawn on, unless asked otherwise.
+    check(
+        list(box.planes(4)) == [1],
+        f"a box drawn on one plane is cut from that plane: {list(box.planes(4))}",
+    )
+    every, _notes = seg.boxes_from_shapes(
+        [drawn], (4, 192, 192), image_scale=(1.0, 0.3, 0.3), every_plane=True
+    )
+    check(
+        list(every[0].planes(4)) == [0, 1, 2, 3],
+        f"and through every plane when that is what is wanted: {list(every[0].planes(4))}",
+    )
+
+    # Clamping, and the two things that are not regions.
+    outside = np.array([[0.0, -50.0, -50.0], [0.0, -50.0, 90.0], [0.0, 90.0, 90.0],
+                        [0.0, 90.0, -50.0]])
+    clamped, _notes = seg.boxes_from_shapes(
+        [outside], (4, 192, 192), image_scale=(1.0, 0.3, 0.3)
+    )
+    check(
+        (clamped[0].y0, clamped[0].y1) == (0, 192),
+        f"a box drawn off the edge is clamped to the image: {clamped[0]}",
+    )
+    click = np.array([[0.0, 5.0, 5.0], [0.0, 5.0, 5.2], [0.0, 5.2, 5.2], [0.0, 5.2, 5.0]])
+    none, notes = seg.boxes_from_shapes(
+        [click], (4, 192, 192), image_scale=(1.0, 0.3, 0.3)
+    )
+    check(
+        not none and notes and "px a region needs" in notes[0],
+        f"a stray click is not a region, and is said so rather than dropped: {notes}",
+    )
+    stray, notes = seg.boxes_from_shapes([np.zeros((2, 3))], (4, 192, 192))
+    check(
+        not stray and "closed shape" in notes[0],
+        f"nor is a line: {notes}",
+    )
+
+
+def test_training_on_the_region_only() -> None:
+    """Corrections are made on a patch, so the patch is what is trained on.
+
+    Nobody corrects a whole field. A region says "this part is right and the
+    rest of the plane is not", and training on the plane would teach the
+    network that every uncorrected object elsewhere is background.
+    """
+    print("training on the drawn region only")
+
+    size = 96
+    yy, xx = np.mgrid[0:size, 0:size]
+    image = np.zeros((3, size, size), dtype=np.float32)
+    labels = np.zeros((3, size, size), dtype=np.int32)
+    ident = 1
+    for z in range(3):
+        for row in (1, 2, 3, 4):
+            for col in (1, 2, 3, 4):
+                disc = (yy - row * 18) ** 2 + (xx - col * 18) ** 2 <= 25
+                image[z][disc] = 1000.0
+                labels[z][disc] = ident
+                ident += 1
+
+    whole, _skipped = seg.training_examples(image, labels, min_masks=4)
+    check(
+        len(whole) == 3 and whole[0].image.shape == (size, size),
+        f"with no region it is still the whole plane: {whole[0].image.shape}",
+    )
+
+    corner = seg.Region(y0=0, y1=48, x0=0, x1=48, z0=1, z1=2, name="region 1")
+    cropped, skipped = seg.training_examples(image, labels, min_masks=4, regions=[corner])
+    check(
+        len(cropped) == 1 and cropped[0].image.shape == (48, 48),
+        f"with one, the example is the crop: {[e.image.shape for e in cropped]}",
+    )
+    check(
+        cropped[0].source == "z = 1, region 1",
+        f"named by plane and region, so the status line can say where: {cropped[0].source}",
+    )
+    check(
+        cropped[0].n_objects == 4,
+        f"and it holds the objects inside the box, not the plane's 16: "
+        f"{cropped[0].n_objects}",
+    )
+    check(
+        float(cropped[0].image.max()) == 1000.0 and float(whole[0].image.max()) == 1000.0,
+        "the crop is the image's own values, not a rescaled copy",
+    )
+
+    # Two boxes on different planes are two examples.
+    pair = [
+        corner,
+        seg.Region(y0=48, y1=96, x0=48, x1=96, z0=2, z1=3, name="region 2"),
+    ]
+    both, _skipped = seg.training_examples(image, labels, min_masks=4, regions=pair)
+    check(
+        [example.source for example in both] == ["z = 1, region 1", "z = 2, region 2"],
+        f"two boxes are two examples: {[e.source for e in both]}",
+    )
+
+    # One box through the stack is one example per plane.
+    through = seg.Region(y0=0, y1=48, x0=0, x1=48, name="region 1")
+    stacked, _skipped = seg.training_examples(image, labels, min_masks=4, regions=[through])
+    check(
+        len(stacked) == 3 and {e.image.shape for e in stacked} == {(48, 48)},
+        f"a box with no plane of its own is cut from all of them: {len(stacked)}",
+    )
+
+    # The objects test is applied to the crop, which is the point of asking it.
+    thin = seg.Region(y0=0, y1=24, x0=0, x1=24, z0=0, z1=1, name="region 1")
+    none, skipped = seg.training_examples(image, labels, min_masks=4, regions=[thin])
+    check(
+        not none and "z = 0, region 1" in skipped[0],
+        f"a crop with too few objects is left out by name: {skipped}",
+    )
+
+
 def test_where_a_trained_model_lands() -> None:
     """A model nobody can select is a model nobody trained."""
     print("naming and placing a trained model")
@@ -1326,7 +1487,7 @@ def test_where_a_trained_model_lands() -> None:
         train_losses=(0.5, 0.25), skipped=("z = 3: 1 object(s)",),
     )
     words = result.describe()
-    for part in ("3 plane(s)", "27 object(s)", "cpsam", "1.5 min", "0.5000 -> 0.2500", "left out"):
+    for part in ("3 example(s)", "27 object(s)", "cpsam", "1.5 min", "0.5000 -> 0.2500", "left out"):
         check(part in words, f"the result says {part!r}: {words}")
 
 
@@ -1581,6 +1742,8 @@ def main() -> int:
         test_cellpose_call_shape,
         test_a_stack_becomes_2d_training_pairs,
         test_one_object_in_two_places_becomes_two,
+        test_a_drawn_box_becomes_image_pixels,
+        test_training_on_the_region_only,
         test_where_a_trained_model_lands,
         test_a_backend_that_cannot_train_says_so,
     ):

@@ -686,6 +686,37 @@ to the user:
   cells that touch are the case the network most needs to get right, and a
   connected-component pass over the whole plane would merge them.
 
+#### Training on a region rather than the whole field
+
+**Region** takes a Shapes layer and trains on the rectangles in it and nothing
+else. Add a Shapes layer in napari, draw a box over the patch you actually
+corrected, and pick the layer. Several rectangles are several training examples,
+which is better than one: the network sees the same kind of correction in more
+than one place.
+
+This is not only a convenience. Nobody corrects a whole field. A region is the
+claim *this patch is right and the rest of the plane is not*, and training on the
+whole plane instead teaches the network that every object you did not get to is
+background — the opposite of the correction being made.
+
+A rectangle is drawn on one plane and belongs to it. **through every plane** cuts
+the same box from all of them, which is right when the correction holds through
+the stack and wrong when it was made on one plane.
+
+Two details that would otherwise be silent:
+
+- **A Shapes layer starts unscaled whatever the image under it is scaled by**, so
+  its vertices are in µm and the image's are in pixels. Both layers' scale and
+  translate go through world coordinates before the box is cut. Taking one for
+  the other puts the crop out by exactly the pixel size — a factor of three on a
+  0.3 µm pixel — and what comes back still looks like a plausible region.
+- A box is **floored on the low edge and ceilinged on the high one**, so what was
+  drawn is inside what is cut; it is clamped to the image; and a shape under 16 px
+  on a side is named and left out rather than trained on. Clicking the rectangle
+  tool without dragging leaves a shape with no area, which is a slip, not a
+  region. Cellpose trains on tiles of 256 px and pads anything smaller, so a small
+  region is legitimate — it is only the degenerate one that is refused.
+
 **Epochs** (100) and **learning rate** (1e-5) are cellpose's own fine-tuning
 defaults. A higher rate pulls the model off the general solution it already has,
 which is the thing being kept. The new model is named after what it was trained

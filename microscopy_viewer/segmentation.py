@@ -1029,6 +1029,136 @@ DEFAULT_TRAIN_BATCH = 1
 DEFAULT_MIN_TRAIN_MASKS = 5
 
 
+#: The shortest side a drawn region may have, in pixels of the image.
+#:
+#: Clicking the rectangle tool without dragging leaves a shape with no area, and
+#: a box a few pixels across cannot hold an object at any plausible diameter.
+#: Both are mistakes rather than regions, and both are better named than trained
+#: on. Cellpose trains on tiles of 256 px and pads anything smaller, so a small
+#: region is legitimate — it is only the degenerate one that is refused.
+MIN_REGION_PX = 16
+
+
+@dataclass(frozen=True)
+class Region:
+    """A box of the image to train on, in its own pixels. Half-open.
+
+    Drawn as a rectangle or a polygon over the image; what is kept is the
+    bounding box, because that is what can be cut out and handed to a network
+    that takes rectangles.
+    """
+
+    y0: int
+    y1: int
+    x0: int
+    x1: int
+    #: The planes it covers. ``None`` means every plane in the stack.
+    z0: int | None = None
+    z1: int | None = None
+    name: str = "region"
+
+    @property
+    def height(self) -> int:
+        return int(self.y1 - self.y0)
+
+    @property
+    def width(self) -> int:
+        return int(self.x1 - self.x0)
+
+    def planes(self, n_planes: int) -> range:
+        """Which planes of a stack this region is cut from."""
+        if self.z0 is None or self.z1 is None:
+            return range(int(n_planes))
+        return range(max(0, int(self.z0)), min(int(n_planes), int(self.z1)))
+
+    def crop(self, plane: np.ndarray) -> np.ndarray:
+        return plane[self.y0 : self.y1, self.x0 : self.x1]
+
+    def describe(self) -> str:
+        return f"{self.name} ({self.height}x{self.width} px)"
+
+
+def boxes_from_shapes(
+    vertices: Sequence[np.ndarray],
+    image_shape: Sequence[int],
+    shape_scale: Sequence[float] | None = None,
+    shape_translate: Sequence[float] | None = None,
+    image_scale: Sequence[float] | None = None,
+    image_translate: Sequence[float] | None = None,
+    every_plane: bool = False,
+    minimum: int = MIN_REGION_PX,
+) -> tuple[list[Region], list[str]]:
+    """Drawn shapes as boxes in the image's own pixels.
+
+    Returns ``(regions, notes)``. A shape that cannot be used is left out and
+    said so rather than silently dropped.
+
+    The conversion is not optional. A Shapes layer added in napari starts at
+    scale ``(1, 1, 1)`` whatever the image under it is scaled by, so its
+    vertices are in world units and the image's are in pixels; using them
+    directly puts the box in the wrong place by exactly the pixel size, which on
+    a 0.3 µm pixel is a factor of three and still looks like a plausible crop.
+    Both layers' scale and translate go through world coordinates here.
+
+    The box is floored on the low edge and ceilinged on the high one, so what
+    was drawn is inside what is cut.
+    """
+    shape = tuple(int(n) for n in image_shape)
+    if len(shape) not in (2, 3):
+        raise ValueError(f"a region needs a 2D or 3D image, not {len(shape)}D")
+    n_planes = shape[0] if len(shape) == 3 else 1
+    height, width = shape[-2], shape[-1]
+
+    def axis(values, index: int, fallback: float) -> float:
+        if values is None:
+            return fallback
+        array = np.asarray(values, dtype=float).ravel()
+        return float(array[index]) if -array.size <= index < array.size else fallback
+
+    regions: list[Region] = []
+    notes: list[str] = []
+    for number, raw in enumerate(vertices, start=1):
+        points = np.asarray(raw, dtype=float)
+        name = f"region {number}"
+        if points.ndim != 2 or points.shape[0] < 3 or points.shape[1] < 2:
+            notes.append(f"{name}: not a closed shape, so there is no box to cut")
+            continue
+
+        # Layer coordinates -> world -> image pixels, one axis at a time, so a
+        # 2D shape over a 3D image uses the same code as a 3D one.
+        def pixels(column: int, index: int) -> np.ndarray:
+            world = points[:, column] * axis(shape_scale, index, 1.0) + axis(
+                shape_translate, index, 0.0
+            )
+            step = axis(image_scale, index, 1.0) or 1.0
+            return (world - axis(image_translate, index, 0.0)) / step
+
+        y = pixels(-2, -2)
+        x = pixels(-1, -1)
+        y0, y1 = int(np.floor(y.min())), int(np.ceil(y.max()))
+        x0, x1 = int(np.floor(x.min())), int(np.ceil(x.max()))
+        y0, y1 = max(0, y0), min(height, y1)
+        x0, x1 = max(0, x0), min(width, x1)
+        if y1 - y0 < int(minimum) or x1 - x0 < int(minimum):
+            notes.append(
+                f"{name}: {max(0, y1 - y0)}x{max(0, x1 - x0)} px inside the image, "
+                f"under the {int(minimum)} px a region needs"
+            )
+            continue
+
+        z0 = z1 = None
+        if len(shape) == 3 and not every_plane and points.shape[1] >= 3:
+            z = pixels(-3, -3)
+            z0 = max(0, int(np.floor(z.min())))
+            z1 = min(n_planes, max(z0 + 1, int(np.ceil(z.max()))))
+            if z0 >= n_planes:
+                notes.append(f"{name}: drawn outside the stack in z")
+                continue
+        regions.append(Region(y0=y0, y1=y1, x0=x0, x1=x1, z0=z0, z1=z1, name=name))
+
+    return regions, notes
+
+
 @dataclass(frozen=True)
 class TrainingExample:
     """One 2D image and the masks drawn on it."""
@@ -1089,14 +1219,14 @@ class TrainingResult:
     def describe(self) -> str:
         minutes = self.seconds / 60.0
         text = (
-            f"{self.name}: {self.epochs} epoch(s) on {self.n_examples} plane(s), "
+            f"{self.name}: {self.epochs} epoch(s) on {self.n_examples} example(s), "
             f"{self.n_objects:,} object(s), from {self.base_model}, "
             f"on {self.device}, in {minutes:.1f} min"
         )
         if self.train_losses:
             text += f"; loss {self.first_loss:.4f} -> {self.last_loss:.4f}"
         if self.skipped:
-            text += f"; {len(self.skipped)} plane(s) left out"
+            text += f"; {len(self.skipped)} left out"
         return text
 
 
@@ -1145,6 +1275,7 @@ def training_examples(
     image: np.ndarray,
     labels: np.ndarray,
     min_masks: int = DEFAULT_MIN_TRAIN_MASKS,
+    regions: Sequence[Region] = (),
 ) -> tuple[list[TrainingExample], list[str]]:
     """A corrected image and its masks as 2D training pairs.
 
@@ -1154,6 +1285,14 @@ def training_examples(
     A plane with fewer than *min_masks* objects is left out and named in
     *skipped*: most of a stack is empty at the top and bottom, and those planes
     teach the network that this kind of image contains nothing.
+
+    *regions* cuts the planes down to the boxes that were drawn, one pair per
+    box per plane. Correcting masks by hand is the expensive part of training a
+    model, and nobody corrects a whole field: a region says "this patch is right
+    and the rest of the plane is not", which is both the honest claim and the
+    only one worth training on. Everything outside the boxes is then never seen,
+    so an uncorrected object elsewhere cannot teach the network that it is
+    background.
     """
     image = np.asarray(image)
     labels = np.asarray(labels)
@@ -1165,9 +1304,25 @@ def training_examples(
     if image.ndim not in (2, 3):
         raise ValueError(f"training needs a 2D or 3D image, not {image.ndim}D")
 
-    planes = [(image, labels, "the plane")] if image.ndim == 2 else [
+    flat = [(image, labels, "the plane")] if image.ndim == 2 else [
         (image[index], labels[index], f"z = {index}") for index in range(image.shape[0])
     ]
+
+    planes: list[tuple[np.ndarray, np.ndarray, str]] = []
+    if not regions:
+        planes = flat
+    else:
+        n_planes = 1 if image.ndim == 2 else int(image.shape[0])
+        for region in regions:
+            for index in region.planes(n_planes):
+                plane_image, plane_labels, where = flat[index]
+                planes.append(
+                    (
+                        region.crop(plane_image),
+                        region.crop(plane_labels),
+                        f"{where}, {region.name}",
+                    )
+                )
 
     examples: list[TrainingExample] = []
     skipped: list[str] = []
