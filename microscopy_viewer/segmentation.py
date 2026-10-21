@@ -36,7 +36,10 @@ cellpose model folder — minus the ones the installed version cannot load.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -748,12 +751,12 @@ class CellposeBackend(Backend):
         )
 
         logger.info(
-            "training %s from %s: %d plane(s), %d object(s), %d epoch(s) on %s",
+            "training %s from %s: %d example(s), %d object(s), %d epoch(s) on %s",
             name, base, len(examples),
             sum(int(e.n_objects) for e in examples), int(settings.epochs), device.name,
         )
         started = time.perf_counter()
-        with _Relay(progress):
+        with _console(), _Relay(progress):
             outcome = cp_train.train_seg(model.net, **kwargs)
         seconds = time.perf_counter() - started
 
@@ -825,7 +828,8 @@ class CellposeBackend(Backend):
 
         if progress is not None:
             progress(f"cellpose {settings.mode}, batch {batch_size}")
-        outcome = model.eval(image, **kwargs)
+        with _console():
+            outcome = model.eval(image, **kwargs)
         masks = np.asarray(outcome[0])
 
         info: dict[str, Any] = {"batch_size": batch_size}
@@ -856,6 +860,44 @@ def _accepted(function, kwargs: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         return dict(kwargs)
     return {name: value for name, value in kwargs.items() if name in allowed}
+
+
+@contextlib.contextmanager
+def _console():
+    """Give cellpose somewhere to draw its progress bars.
+
+    tqdm writes to ``sys.stderr``. Started from a desktop shortcut, pythonw, or
+    anything else without a console, ``sys.stderr`` is ``None`` and tqdm's first
+    write raises ``'NoneType' object has no attribute 'write'`` from inside the
+    library — a tenth of a second into a run that is otherwise fine, and with a
+    message that says nothing about consoles.
+
+    It bites ``train_seg`` and not ``eval``: segmenting a 12000 x 12000 image in
+    the same process works, because that path never reaches a bare ``trange``.
+    Guarding both anyway, since which library call prints is the library's
+    business and not something to track.
+
+    Nothing here reads those bars — progress is reported through the log and
+    :class:`_Relay` — so they go to the null device. The streams are only
+    replaced when they are missing, so running from a terminal is untouched.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        yield
+        return
+
+    # A real file rather than a stub: tqdm probes isatty, fileno and flush as
+    # well as write, and a stub is a list of methods to keep up to date.
+    sink = open(os.devnull, "w", encoding="utf-8")
+    out, err = sys.stdout, sys.stderr
+    try:
+        if sys.stdout is None:
+            sys.stdout = sink
+        if sys.stderr is None:
+            sys.stderr = sink
+        yield
+    finally:
+        sys.stdout, sys.stderr = out, err
+        sink.close()
 
 
 class _Relay:

@@ -723,6 +723,16 @@ which is the thing being kept. The new model is named after what it was trained
 from and when, so two fine-tunings of one base are two rows rather than the same
 row twice.
 
+Cellpose draws tqdm progress bars while it trains, and tqdm writes to
+`sys.stderr`. Started from a desktop shortcut or `pythonw` there is no console,
+`sys.stderr` is `None`, and the first bar raises `'NoneType' object has no
+attribute 'write'` a tenth of a second in — from a line of cellpose, with a
+message that says nothing about consoles. Both the training and the segmentation
+calls now run with the null device standing in when a stream is missing; a run
+from a terminal is untouched. (It bites training and not segmentation: a
+12000×12000 image segments fine in the same process, because that path never
+reaches a bare `trange`.)
+
 Training runs on a `thread_worker` like segmentation, and cellpose's own training
 log is forwarded to the status line through a Qt signal — a panel that says
 nothing for the length of a run is the state people kill. There is **no held-out

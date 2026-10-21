@@ -1491,6 +1491,87 @@ def test_where_a_trained_model_lands() -> None:
         check(part in words, f"the result says {part!r}: {words}")
 
 
+def test_training_survives_having_no_console() -> None:
+    """The viewer is started from a shortcut, and cellpose draws progress bars.
+
+    tqdm writes to ``sys.stderr``. Started windowed there is no console and
+    ``sys.stderr`` is ``None``, so cellpose's first ``trange`` raises
+    ``'NoneType' object has no attribute 'write'`` a tenth of a second into a
+    run -- with a message that says nothing about consoles, from a line of
+    cellpose nobody here wrote.
+
+    The real tqdm is used rather than a stand-in for the write, because the
+    point of the check is that the library's own call survives.
+    """
+    print("training with no console to draw on")
+
+    import sys
+
+    try:
+        from tqdm import trange
+    except Exception:
+        print("  skip tqdm is not installed")
+        return
+
+    # What is actually broken, pinned first: without the guard this raises.
+    saved_out, saved_err = sys.stdout, sys.stderr
+    sys.stdout = None
+    sys.stderr = None
+    try:
+        raised = None
+        try:
+            for _ in trange(2):
+                pass
+        except AttributeError as error:
+            raised = str(error)
+    finally:
+        sys.stdout, sys.stderr = saved_out, saved_err
+    check(
+        raised is not None and "write" in raised,
+        f"a bare tqdm with no stderr is the failure being guarded: {raised}",
+    )
+
+    # And with the guard it does not. Nothing is checked inside the block:
+    # stdout is the null device in there, so an "ok" line would go nowhere.
+    sys.stdout = None
+    sys.stderr = None
+    inside_out = inside_err = None
+    survived = False
+    try:
+        with seg._console():
+            inside_out, inside_err = sys.stdout, sys.stderr
+            for _ in trange(2):
+                pass
+            print("this goes to the null device, not to the terminal")
+            survived = True
+    except Exception as error:  # noqa: BLE001 - reported below, outside the block
+        survived = False
+        raised = error
+    finally:
+        sys.stdout, sys.stderr = saved_out, saved_err
+
+    check(survived, f"inside the guard tqdm writes happily: {raised if not survived else ''}")
+    check(
+        inside_out is not None and inside_err is not None,
+        "because both streams are there to write to",
+    )
+    check(
+        sys.stdout is saved_out and sys.stderr is saved_err,
+        "and the real ones are back afterwards",
+    )
+    check(
+        inside_err.closed,
+        "with the stand-in closed rather than left open for the process's life",
+    )
+
+    # A terminal is left exactly alone -- no indirection to debug later.
+    with seg._console():
+        check(
+            sys.stdout is saved_out and sys.stderr is saved_err,
+            "a run from a terminal keeps its own streams",
+        )
+
+
 def test_a_backend_that_cannot_train_says_so() -> None:
     """Training is optional for a backend, and refusing is not an error to debug."""
     print("a backend with no trainer")
@@ -1746,6 +1827,7 @@ def main() -> int:
         test_training_on_the_region_only,
         test_where_a_trained_model_lands,
         test_a_backend_that_cannot_train_says_so,
+        test_training_survives_having_no_console,
     ):
         test()
         print()
