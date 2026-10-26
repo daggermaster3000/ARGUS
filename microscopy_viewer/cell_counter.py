@@ -139,6 +139,10 @@ def indices_of(data: np.ndarray, label: int, centre: Sequence[float], reach_px: 
 
 
 def count(data: np.ndarray) -> int:
-    """How many cells are marked: distinct labels other than 0."""
-    values = np.unique(np.asarray(data))
-    return int((values != 0).sum())
+    """How many cells are marked: distinct labels other than 0.
+
+    Only the marked pixels are sorted: on a slide-sized map the dots are a
+    sliver of it, and sorting the whole map took the better part of a second.
+    """
+    flat = np.asarray(data).reshape(-1)
+    return int(np.unique(flat[np.flatnonzero(flat)]).size)

@@ -30,7 +30,7 @@ from qtpy.QtWidgets import (
 
 from .. import cell_counter as cc
 from ..utils import get_logger
-from .sample_files import close_sample, restore_view, source_of, view_state
+from .sample_files import close_sample, restore_view, source_of, tie_to_sample, view_state
 
 logger = get_logger("cell_counter_widget")
 
@@ -42,6 +42,21 @@ MODE_3D = "Every plane (3D)"
 MIP_SUFFIX = "MIP"
 #: Screen pixels a press may move and still be a click, not a pan.
 CLICK_SLOP = 4
+
+
+def geometry_for(image, three_d: bool = False) -> cc.Geometry:
+    """Where a counter map over *image* sits: the finest level's grid.
+
+    The layer's scale may belong to a coarser level the 3D renderer swapped in,
+    so the base scale is used when the reader stored one.
+    """
+    data = image.data[0] if getattr(image, "multiscale", False) else image.data
+    pyramid = image.metadata.get("mv_pyramid")
+    if pyramid:
+        data = pyramid[0]
+    axes = str(image.metadata.get("mv_axes", "") or "")
+    scale = image.metadata.get("mv_pyramid_scale") or image.scale
+    return cc.geometry_of(np.shape(data), scale, image.translate, axes, three_d)
 
 
 class CellCounterWidget(QWidget):
@@ -240,15 +255,7 @@ class CellCounterWidget(QWidget):
         self._update_buttons()
 
     def _geometry_for(self, image, three_d: bool) -> cc.Geometry:
-        data = image.data[0] if getattr(image, "multiscale", False) else image.data
-        pyramid = image.metadata.get("mv_pyramid")
-        if pyramid:
-            data = pyramid[0]
-        axes = str(image.metadata.get("mv_axes", "") or "")
-        # The finest level's shape; the layer's scale may belong to a coarser
-        # level the 3D renderer swapped in, so the base scale is used if stored.
-        scale = image.metadata.get("mv_pyramid_scale") or image.scale
-        return cc.geometry_of(np.shape(data), scale, image.translate, axes, three_d)
+        return geometry_for(image, three_d)
 
     def _update_buttons(self) -> None:
         has_image = self.image_layer() is not None
@@ -323,6 +330,7 @@ class CellCounterWidget(QWidget):
             np.asarray(data), name=name, scale=geometry.scale, translate=geometry.translate,
             metadata={COUNTER_KEY: {"source": self._source(), "image": image.name}}, **kwargs,
         )
+        tie_to_sample(layer, self._source())
         self._adopt(layer, geometry)
         self._status.setText(
             f"Counter ready on {image.name}. Switch Count on and click the cells."
@@ -522,7 +530,7 @@ class CellCounterWidget(QWidget):
                           "translate": geometry.translate, "blending": "additive"}
                 if layer is not None:
                     kwargs["colormap"] = layer.colormap
-                self._viewer.add_image(plane, **kwargs)
+                tie_to_sample(self._viewer.add_image(plane, **kwargs), source)
                 if layer is not None:
                     layer.visible = False
             if self._layer is not None:
