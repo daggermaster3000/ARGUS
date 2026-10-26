@@ -813,6 +813,48 @@ class CellposeBackend(Backend):
         return masks, info
 
 
+#: What a GPU error says when the card's session in this process is gone for
+#: good. Running out of memory is not among them: that one can be retried.
+_GPU_FAULTS = (
+    "cuda error", "cudaerror", "illegal memory access", "device-side assert",
+    "unspecified launch failure", "cudnn_status", "cublas_status", "device is lost",
+)
+
+
+def is_gpu_fault(error: BaseException | str) -> bool:
+    """Whether *error* means the GPU cannot be used again by this process.
+
+    After an illegal memory access (or any other fault the driver reports
+    asynchronously) CUDA refuses every later call, including loading a model:
+    each remaining sample of a batch would fail in a few seconds with the same
+    message, and only restarting the program brings the card back. A caller
+    that sees this should stop, not go on to the next sample.
+    """
+    text = str(error).lower()
+    if "out of memory" in text:
+        return False
+    return any(sign in text for sign in _GPU_FAULTS)
+
+
+def release_gpu_memory() -> None:
+    """Hand cached GPU memory back between samples. Never raises.
+
+    PyTorch keeps what it allocated for the last image; on a card another
+    program is also using, that is memory the next sample then has to find
+    elsewhere.
+    """
+    try:
+        import gc
+
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        logger.debug("could not release GPU memory", exc_info=True)
+
+
 _BACKENDS: dict[str, Backend] = {CellposeBackend.name: CellposeBackend()}
 
 

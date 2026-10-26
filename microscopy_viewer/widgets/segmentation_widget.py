@@ -46,6 +46,7 @@ from qtpy.QtWidgets import (
 from .. import segmentation as sg
 from ..exports import default_stem, export_table
 from ..utils import format_number, get_logger
+from .sample_files import source_of, tie_to_sample
 
 logger = get_logger("segmentation_widget")
 
@@ -135,6 +136,10 @@ class SegmentationWidget(QWidget):
 
             self.batch = BatchSegmentationTab(app, self.settings)
             self._tabs.addTab(self.batch, "Batch")
+        from .cellpose_training_widget import TrainingTab
+
+        self.training = TrainingTab(viewer, self)
+        self._tabs.addTab(self.training, "Train")
         layout.addWidget(self._tabs, stretch=1)
 
         self._status = QLabel("Pick a channel, set the object diameter in µm, then Segment.")
@@ -855,14 +860,15 @@ class SegmentationWidget(QWidget):
             expanded_name = f"{base} {EXPANDED_SUFFIX}"
             if expanded_name in self._viewer.layers:
                 self._viewer.layers.remove(expanded_name)
+            sample = source_of(source) if source is not None else ""
             if result.expanded_masks is not None:
-                self._viewer.add_labels(
+                tie_to_sample(self._viewer.add_labels(
                     result.expanded_masks, name=expanded_name, scale=scale, opacity=0.35,
                     **_unit_kwargs(source, len(scale)),
-                )
-            self._viewer.add_labels(
+                ), sample)
+            tie_to_sample(self._viewer.add_labels(
                 result.masks, name=layer_name, scale=scale, **_unit_kwargs(source, len(scale))
-            )
+            ), sample)
         except Exception:
             logger.exception("could not add the labels layer")
         finally:
@@ -880,11 +886,12 @@ class SegmentationWidget(QWidget):
             value = getattr(source, attribute, None)
             if value is not None:
                 kwargs[attribute] = value
+        sample = source_of(source) if source is not None else ""
         try:
-            self._viewer.add_image(projection, **kwargs)
+            tie_to_sample(self._viewer.add_image(projection, **kwargs), sample)
         except Exception:
             logger.debug("could not copy the source appearance", exc_info=True)
-            self._viewer.add_image(projection, name=layer_name, scale=scale)
+            tie_to_sample(self._viewer.add_image(projection, name=layer_name, scale=scale), sample)
 
     # -- results --------------------------------------------------------------
 
