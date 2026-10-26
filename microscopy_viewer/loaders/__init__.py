@@ -117,8 +117,12 @@ def expand_inputs(paths: Sequence[str | Path]) -> list[Path]:
     return out
 
 
-def release(path: str | Path) -> int:
+def release(path: str | Path, own_thread_only: bool = False) -> int:
     """Give back every read handle any reader is holding on *path*.
+
+    With *own_thread_only*, only the handles the calling thread opened: what a
+    scan or a thumbnail run does after reading a file, so a sample opened on
+    screen meanwhile keeps the handle its layers read through.
 
     The readers keep files open for the life of the process so their lazy arrays
     stay readable. Anything that wants to write the file, move it, or simply work
@@ -130,7 +134,7 @@ def release(path: str | Path) -> int:
     """
     from . import ims, tiff
 
-    return sum(reader.release(path) for reader in (ims, tiff))
+    return sum(reader.release(path, own_thread_only) for reader in (ims, tiff))
 
 
 def is_open(path: str | Path) -> bool:

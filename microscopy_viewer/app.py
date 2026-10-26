@@ -124,6 +124,7 @@ class MicroscopyViewer:
         self.panels: dict[str, object] = {}
         self.docks: dict[str, object] = {}
         specs = iter_panels()
+        self._panel_specs = {spec.identifier: spec for spec in specs}
 
         # Declare the attributes up front so a failed panel leaves an explicit
         # None rather than a missing attribute for callers to trip over.
@@ -143,6 +144,10 @@ class MicroscopyViewer:
                     scrollable(widget), name=spec.title, area=spec.area, **spec.dock_kwargs
                 )
                 self._add_vertical_stretch(dock, widget, spec)
+                # napari's close button removes a dock for good; these are only
+                # put away, to be opened again from the Panels menu. Set on the
+                # dock because the title bar is rebuilt when the dock is moved.
+                dock.destroyOnClose = dock.hide
             except Exception:
                 logger.exception("could not build the %r panel", spec.identifier)
                 continue
@@ -154,8 +159,48 @@ class MicroscopyViewer:
                 dock.setVisible(False)
 
         self._tabify_panels(specs)
+        self._build_panels_menu(specs)
         self._metadata_dock = self.docks.get("metadata")
         self._scroll_layer_controls()
+
+    def _build_panels_menu(self, specs) -> None:
+        """A *Panels* menu in the menu bar: one tick box per panel.
+
+        Its own menu, after napari's *Plugins*, rather than entries inside that
+        one: napari rebuilds its menus from its command registry and would drop
+        anything added to them by hand.
+
+        Each dock's own toggle action is used, so the tick follows the panel
+        however it was opened or closed — here, by its close button, by the tour.
+        """
+        #: Panel identifier -> the checkable action that opens and closes it.
+        self.panel_actions: dict[str, object] = {}
+        self.panels_menu = None
+        window = self.viewer.window
+        try:
+            from qtpy.QtWidgets import QMenu
+
+            bar = window.main_menu
+            menu = QMenu("&Panels", bar)
+            after_plugins = getattr(window, "window_menu", None)
+            if after_plugins is not None:
+                bar.insertMenu(after_plugins.menuAction(), menu)
+            else:
+                bar.addMenu(menu)
+        except Exception:  # pragma: no cover - napari API drift
+            logger.exception("could not add the Panels menu")
+            return
+        self.panels_menu = menu
+        for spec in specs:
+            dock = self.docks.get(spec.identifier)
+            if dock is None:
+                continue
+            action = dock.toggleViewAction()
+            action.setText(spec.title)
+            # In front of whatever it shares a tab bar with, not behind it.
+            action.triggered.connect(lambda checked, _dock=dock: _dock.raise_() if checked else None)
+            menu.addAction(action)
+            self.panel_actions[spec.identifier] = action
 
     def _scroll_layer_controls(self) -> None:
         """Let napari's own layer-controls dock shrink too.
@@ -226,6 +271,17 @@ class MicroscopyViewer:
         if window is None:
             return
         qt_viewer = getattr(self.viewer.window, "_qt_viewer", None)
+        # Whichever of the right-hand tab stack is open stands for all of it.
+        stack = next(
+            (
+                dock
+                for identifier, dock in self.docks.items()
+                if identifier != "metadata"
+                and self._panel_specs[identifier].area == "right"
+                and dock.isVisible()
+            ),
+            None,
+        )
         # Every dock in a column is given its share at once: sizing one alone
         # lets Qt take the space back from whichever neighbour it likes.
         columns = (
@@ -241,7 +297,7 @@ class MicroscopyViewer:
             (
                 (
                     (self.docks.get("metadata"), 0.25),
-                    (self.docks.get("segmentation"), 0.75),
+                    (stack, 0.75),
                 ),
                 0.3,
             ),
@@ -405,6 +461,34 @@ class MicroscopyViewer:
             except Exception:
                 logger.exception("could not restore the stored brain regions")
 
+    # -- the session ----------------------------------------------------------
+
+    def restore_session(self, reopen_files: bool = True) -> None:
+        """Put back what was open when the viewer was last closed.
+
+        The panels, their settings, the experiment folder and its selection;
+        with *reopen_files* the images that were on screen too, and the view of
+        them. See :mod:`microscopy_viewer.session`.
+        """
+        from . import session
+        from .widgets import session_state
+
+        try:
+            session_state.restore(
+                self, session.load(), reopen_files=reopen_files, progress=self._progress
+            )
+        except Exception:
+            # Last time's window is a convenience; never a reason not to open.
+            logger.exception("could not restore the last session")
+
+    def keep_session(self) -> None:
+        """Save the session each time the main window closes, from now on."""
+        from .widgets.session_state import SessionKeeper
+
+        window = getattr(self.viewer.window, "_qt_window", None)
+        if window is not None:
+            self.session_keeper = SessionKeeper(self, window)
+
     # -- the tour -------------------------------------------------------------
 
     def start_tour(self, index: int = 0):
@@ -487,6 +571,7 @@ def launch(
     splash: bool = True,
     busy_overlay: bool = True,
     tour: bool = True,
+    restore_session: bool = True,
 ) -> MicroscopyViewer:
     """Create the viewer, open any given paths, and optionally run the Qt loop.
 
@@ -505,6 +590,11 @@ def launch(
 
     With *tour* the guided tour starts once the window is up, the first time this
     version of the tour has not been seen (see :mod:`microscopy_viewer.onboarding`).
+
+    With *restore_session* the window comes back as it was last closed — open
+    panels, their settings, the experiment folder and the images on screen — and
+    is saved again when it closes. Files asked for here, on the command line or
+    by dropping them on the app icon, are opened instead of last time's.
     """
     import napari
     from napari.qt import get_qapp
@@ -534,6 +624,10 @@ def launch(
         if banner is not None:
             banner.pump(f"Opening {len(paths)} file(s)…")
         app.open_paths(paths)
+    if restore_session:
+        handed_over = file_opener is not None and file_opener.has_pending()
+        app.restore_session(reopen_files=not paths and not handed_over)
+        app.keep_session()
     if file_opener is not None:
         file_opener.attach(app.open_paths)
     if banner is not None:

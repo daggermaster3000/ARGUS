@@ -22,7 +22,7 @@ class PanelSpec:
 
     #: Stable key used to look the panel up on the app (``app.panels[...]``).
     identifier: str
-    #: Dock title shown in the tab and the Window menu.
+    #: Dock title shown in the tab and the Panels menu.
     title: str
     #: Builds the widget. Takes the app, returns a QWidget.
     factory: Callable[[Any], Any]
@@ -34,8 +34,10 @@ class PanelSpec:
     tabify_with: str | None = None
     #: Lower numbers are created first.
     order: int = 100
-    #: Start collapsed; the user can reopen it from the Window menu.
-    start_hidden: bool = False
+    #: Start closed; it is opened from the Panels menu. Closed is the
+    #: default so the window opens on the canvas rather than on a dozen tabs,
+    #: and what was open last time comes back with the session.
+    start_hidden: bool = True
     #: Extra keyword arguments passed to ``add_dock_widget``.
     dock_kwargs: dict = field(default_factory=dict)
 
@@ -114,6 +116,25 @@ def _register_builtin_panels() -> None:
         # Takes the app: saving into an .ims closes and reopens the sample.
         return FusionWidget(app)
 
+    def _junction_analysis(app):
+        from .junction_analysis_widget import JunctionAnalysisWidget
+
+        # Takes the app: it borrows the Segmentation and Fusion panels' settings
+        # and runs on the Experiment panel's selection.
+        return JunctionAnalysisWidget(app)
+
+    def _positive_counter(app):
+        from .positive_counter_widget import PositiveCounterWidget
+
+        # Takes the app: saving into an .ims closes and reopens the sample.
+        return PositiveCounterWidget(app)
+
+    def _junction_review(app):
+        from .junction_review_widget import JunctionReviewWidget
+
+        # Takes the app: it opens samples, and drives the Fusion region panel.
+        return JunctionReviewWidget(app)
+
     def _timeseries(app):
         from .timeseries_widget import TimeSeriesWidget
 
@@ -173,6 +194,8 @@ def _register_builtin_panels() -> None:
             # starts rather than something consulted mid-analysis.
             area="left",
             order=5,
+            # The one panel open from the start: it is how samples are reached.
+            start_hidden=False,
         )
     )
     register_panel(
@@ -206,6 +229,38 @@ def _register_builtin_panels() -> None:
             attribute="fusion_widget",
             tabify_with="segmentation",
             order=57,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="junction_analysis",
+            title="Junction analysis",
+            factory=_junction_analysis,
+            attribute="junction_analysis_widget",
+            tabify_with="segmentation",
+            order=58,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="positive_counter",
+            title="Manual positive count",
+            factory=_positive_counter,
+            attribute="positive_counter_widget",
+            tabify_with="segmentation",
+            order=56,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="junction_review",
+            title="Junction review",
+            factory=_junction_review,
+            attribute="junction_review_widget",
+            tabify_with="segmentation",
+            order=59,
+            # No stretch under the panel: the sample list is what takes the height.
+            dock_kwargs={"add_vertical_stretch": False},
         )
     )
 

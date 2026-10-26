@@ -39,6 +39,9 @@ logger = get_logger("ims")
 #: Open ``h5py.File`` handles are kept alive for the process lifetime because the
 #: dask graphs read from them lazily long after the reader has returned.
 _OPEN_FILES: list[h5py.File] = []
+#: The thread that opened each handle, by ``id``: a scan or a thumbnail run
+#: releases only its own, never the one a layer on screen reads through.
+_OWNER: dict[int, int] = {}
 
 _DATE_PATTERNS = ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S")
 
@@ -54,7 +57,7 @@ def _same_file(handle: h5py.File, path: Path) -> bool:
         return False
 
 
-def release(path: str | Path) -> int:
+def release(path: str | Path, own_thread_only: bool = False) -> int:
     """Close the read handles this module is holding on *path*. Returns how many.
 
     HDF5 will not open a file for writing while it is open for reading, even in
@@ -73,11 +76,14 @@ def release(path: str | Path) -> int:
     for handle in list(_OPEN_FILES):
         if not _same_file(handle, target):
             continue
+        if own_thread_only and _OWNER.get(id(handle)) != threading.get_ident():
+            continue
         try:
             handle.close()
         except Exception:
             logger.debug("could not close the handle on %s", target, exc_info=True)
         _OPEN_FILES.remove(handle)
+        _OWNER.pop(id(handle), None)
         closed += 1
     if closed:
         logger.info("released %d read handle(s) on %s", closed, target.name)
@@ -406,6 +412,7 @@ def read(path: Path) -> list[LayerSpec]:
     path = Path(path)
     handle = h5py.File(str(path), "r")
     _OPEN_FILES.append(handle)
+    _OWNER[id(handle)] = threading.get_ident()
     lock = threading.Lock()
 
     dataset_group = handle.get("DataSet")

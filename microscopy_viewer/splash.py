@@ -6,9 +6,11 @@ panel needs and waking the GPU. What is on screen for those seconds is an empty
 white rectangle, which reads as a hung application rather than a loading one.
 
 So the window is kept hidden until it is ready and this is shown over the gap
-instead. Nothing here is required for the viewer to work: a missing animation, a
-Qt build without the GIF plugin, or any other failure means the splash is skipped
-and the window opens the way it always did.
+instead. Nothing here is required for the viewer to work: any failure means the
+splash is skipped and the window opens the way it always did.
+
+The animation is :class:`microscopy_viewer.loader.Loader`, which paints itself;
+there is no image file to be missing and no codec for Qt to lack.
 
 The animation only advances while something is processing events, and building a
 viewer is one long blocking call, so the caller drives it: :meth:`Splash.pump`
@@ -18,32 +20,26 @@ report as much as a picture — the panel being built is named as it is built.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from .utils import get_logger
 
 logger = get_logger("splash")
 
-#: The animation, inside the package so an installed copy has it too.
-ANIMATION = Path(__file__).resolve().parent / "resources" / "loading.gif"
-
-#: Width the animation is drawn at. The file is 320 px across; blown up much
-#: past that a GIF turns to mush, and a splash is not meant to fill the screen.
+#: Width of the splash, and the side of the animation drawn in the middle of it.
 _WIDTH = 420
+_LOADER = 230
 
 #: Padding around the animation, and the height left under it for the caption.
 _PAD = 14
 _CAPTION = 46
 
-#: Splash colours: near-black behind the animation with pale text, which is what
-#: a GIF with a dark background sits on without a bright border around it.
-_BACKGROUND = "#141416"
+#: Splash colours: the animation's own near-black, with pale text.
+_BACKGROUND = "#101014"
 _TEXT = "#e8e8ea"
 _DIM = "#9a9aa2"
 
 
 class Splash:
-    """A frameless window playing :data:`ANIMATION` while the viewer is built.
+    """A frameless window showing the loading animation while the viewer is built.
 
     Not a ``QSplashScreen``: that class paints a single pixmap, so an animation
     means pushing every frame into it by hand, and it has no room for the caption.
@@ -52,10 +48,9 @@ class Splash:
 
     def __init__(self, title: str = "Microscopy Viewer") -> None:
         from qtpy.QtCore import Qt
-        from qtpy.QtGui import QMovie
         from qtpy.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-        self._movie: QMovie | None = None
+        self._loader = None
         # Never takes focus: as a busy overlay it appears while somebody is typing
         # somewhere else, and stealing the keyboard for a picture is unforgivable.
         self.widget = QWidget(
@@ -72,9 +67,8 @@ class Splash:
         layout.setContentsMargins(_PAD, _PAD, _PAD, _PAD)
         layout.setSpacing(8)
 
-        self._picture = QLabel(self.widget)
-        self._picture.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self._picture)
+        self.widget.setFixedWidth(_WIDTH + 2 * _PAD)
+        self._load_animation(layout)
 
         self._title = QLabel(title, self.widget)
         self._title.setAlignment(Qt.AlignCenter)
@@ -86,39 +80,25 @@ class Splash:
         self._message.setStyleSheet(f"color: {_DIM}; font-size: 11px;")
         layout.addWidget(self._message)
 
-        self._load_animation()
         self.widget.adjustSize()
         self._centre()
 
     # -- setup ----------------------------------------------------------------
 
-    def _load_animation(self) -> None:
-        """Start the GIF, or leave a blank panel of the same size behind."""
-        from qtpy.QtCore import QSize
-        from qtpy.QtGui import QMovie
+    def _load_animation(self, layout) -> None:
+        """Put the animation in, or leave the captions alone if it cannot be made."""
+        from qtpy.QtCore import Qt
 
-        height = int(_WIDTH * 9 / 16)
-        if not ANIMATION.is_file():
-            logger.info("no splash animation at %s; showing the caption alone", ANIMATION)
-            self._picture.setFixedSize(_WIDTH, 1)
-            return
+        try:
+            from .loader import Loader
 
-        movie = QMovie(str(ANIMATION))
-        if not movie.isValid():
-            # A Qt build without the GIF image plugin. Not worth a warning box.
-            logger.info("Qt cannot play %s; showing the caption alone", ANIMATION.name)
-            self._picture.setFixedSize(_WIDTH, 1)
-            return
-
-        movie.jumpToFrame(0)
-        native = movie.currentPixmap().size()
-        if native.width() > 0:
-            height = int(round(_WIDTH * native.height() / native.width()))
-        movie.setScaledSize(QSize(_WIDTH, height))
-        self._picture.setFixedSize(_WIDTH, height)
-        self._picture.setMovie(movie)
-        movie.start()
-        self._movie = movie
+            self._loader = Loader(_LOADER, self.widget)
+            layout.addWidget(self._loader, alignment=Qt.AlignHCenter)
+            self._loader.start()
+        except Exception:
+            logger.info("could not build the loading animation; showing the caption alone",
+                        exc_info=True)
+            self._loader = None
 
     def _centre(self) -> None:
         """Put the splash in the middle of the screen the cursor is on."""
@@ -156,8 +136,8 @@ class Splash:
     def show(self) -> "Splash":
         # Restarted rather than resumed: an overlay shown again should open on
         # the animation, not on the frame it happened to stop at.
-        if self._movie is not None:
-            self._movie.start()
+        if self._loader is not None:
+            self._loader.start()
         self.widget.show()
         self.widget.raise_()
         self.pump()
@@ -165,8 +145,8 @@ class Splash:
 
     def hide(self) -> None:
         """Take the splash down but keep it ready to be shown again."""
-        if self._movie is not None:
-            self._movie.stop()
+        if self._loader is not None:
+            self._loader.stop()
         self.widget.hide()
 
     def pump(self, message: str | None = None) -> None:
@@ -179,6 +159,10 @@ class Splash:
 
         if message is not None:
             self._message.setText(message)
+        if self._loader is not None:
+            # No event loop is turning the timer during the build; ask for a
+            # frame here, and the animation draws wherever the clock says it is.
+            self._loader.update()
         application = QApplication.instance()
         if application is not None:
             application.processEvents()
@@ -187,8 +171,8 @@ class Splash:
 
     def finish(self, window=None) -> None:
         """Close the splash and bring *window* forward in its place."""
-        if self._movie is not None:
-            self._movie.stop()
+        if self._loader is not None:
+            self._loader.stop()
         self.widget.close()
         if window is not None:
             try:

@@ -7,6 +7,7 @@ resolution tags.
 
 from __future__ import annotations
 
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -322,9 +323,59 @@ def _split_channels(arrays: list[Any], axes: str) -> tuple[list[list[Any]], str,
     return per_channel, remaining, count
 
 
+def _salvage_ome(tf: tifffile.TiffFile) -> tuple[str, str, tuple[int, ...]] | None:
+    """OME-XML, axes and shape of a file whose header tifffile gave up on.
+
+    Some exporters leave a few stray bytes after the closing ``</OME>``. The
+    description then fails to decode, tifffile stops treating the file as
+    OME-TIFF, and what comes back is a bare stack of pages: one "channel" of
+    nine planes, no channel names, no pixel size. The XML itself is intact, so
+    it is cut at its closing tag and read here.
+
+    ``None`` when the first page carries no recoverable OME-XML, or when what it
+    describes does not match the pages that are there.
+    """
+    try:
+        raw = tf.pages[0].tags["ImageDescription"].value
+    except Exception:
+        return None
+    data = raw if isinstance(raw, bytes) else str(raw).encode("latin-1", "replace")
+    start, stop = data.find(b"<OME"), data.rfind(b"</OME>")
+    if start < 0 or stop < 0:
+        return None
+    declaration = data.find(b"<?xml")
+    begin = declaration if 0 <= declaration < start else start
+    xml = data[begin: stop + len(b"</OME>")].decode("utf-8", "replace")
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return None
+    pixels = _find(root, "Pixels")
+    if pixels is None:
+        return None
+    try:
+        size = {axis: int(pixels.get(f"Size{axis}", 1)) for axis in "XYZCT"}
+    except ValueError:
+        return None
+    # DimensionOrder lists the axes fastest first; an array's are slowest first.
+    order = str(pixels.get("DimensionOrder", "XYZCT")).upper()
+    if sorted(order) != sorted("XYZCT"):
+        return None
+    axes = "".join(axis for axis in reversed(order) if axis in "YX" or size[axis] > 1)
+    shape = tuple(size[axis] for axis in axes)
+    planes = int(np.prod([size[axis] for axis in "ZCT"]))
+    page = tf.pages[0]
+    if planes != len(tf.pages) or tuple(page.shape) != (size["Y"], size["X"]):
+        return None
+    return xml, axes, shape
+
+
 #: Lazy dask graphs read from the file handle long after :func:`read` returns, so
 #: the open ``TiffFile`` objects are parked here for the process lifetime.
 _OPEN_FILES: list[tifffile.TiffFile] = []
+#: The thread that opened each handle, by ``id``: a scan or a thumbnail run
+#: releases only its own, never the one a layer on screen reads through.
+_OWNER: dict[int, int] = {}
 
 
 def _same_file(handle: "tifffile.TiffFile", path: Path) -> bool:
@@ -337,7 +388,7 @@ def _same_file(handle: "tifffile.TiffFile", path: Path) -> bool:
             return False
 
 
-def release(path: str | Path) -> int:
+def release(path: str | Path, own_thread_only: bool = False) -> int:
     """Close the handles this module holds on *path*. Returns how many.
 
     The same contract as :func:`microscopy_viewer.loaders.ims.release`, and needed
@@ -352,11 +403,14 @@ def release(path: str | Path) -> int:
     for handle in list(_OPEN_FILES):
         if not _same_file(handle, target):
             continue
+        if own_thread_only and _OWNER.get(id(handle)) != threading.get_ident():
+            continue
         try:
             handle.close()
         except Exception:
             logger.debug("could not close the handle on %s", target, exc_info=True)
         _OPEN_FILES.remove(handle)
+        _OWNER.pop(id(handle), None)
         closed += 1
     if closed:
         logger.info("released %d read handle(s) on %s", closed, target.name)
@@ -374,10 +428,19 @@ def read(path: Path) -> list[LayerSpec]:
     path = Path(path)
     tf = tifffile.TiffFile(str(path))
     _OPEN_FILES.append(tf)
+    _OWNER[id(tf)] = threading.get_ident()
     try:
         series = tf.series[0]
         raw_axes = str(series.axes or "")
         arrays, multiscale = _series_arrays(tf, series)
+        salvaged = None if tf.is_ome else _salvage_ome(tf)
+        if salvaged is not None:
+            ome_xml, raw_axes, ome_shape = salvaged
+            if int(np.prod(ome_shape)) == int(np.prod(arrays[0].shape)):
+                arrays, multiscale = [arrays[0].reshape(ome_shape)], False
+                logger.info("%s: recovered the OME header (%s %s)", path.name, raw_axes, ome_shape)
+            else:
+                salvaged = None
         shape = tuple(int(n) for n in arrays[0].shape)
 
         axes = normalise_axes(raw_axes) if len(raw_axes) == len(shape) else guess_axes(shape)
@@ -387,9 +450,13 @@ def read(path: Path) -> list[LayerSpec]:
         meta = AcquisitionMetadata(
             image_name=path.stem,
             file_path=path,
-            file_format="OME-TIFF" if tf.is_ome else ("ImageJ TIFF" if tf.is_imagej else "TIFF"),
+            file_format="OME-TIFF" if tf.is_ome or salvaged is not None
+            else ("ImageJ TIFF" if tf.is_imagej else "TIFF"),
         )
-        if tf.is_ome and tf.ome_metadata:
+        if salvaged is not None:
+            _parse_ome(ome_xml, meta)
+            _parse_resolution_tags(tf, meta)
+        elif tf.is_ome and tf.ome_metadata:
             _parse_ome(tf.ome_metadata, meta)
             _parse_resolution_tags(tf, meta)
         elif tf.is_imagej:

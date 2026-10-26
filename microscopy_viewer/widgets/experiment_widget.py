@@ -64,14 +64,16 @@ PATH_ROLE = Qt.UserRole + 1
 #: Layer metadata key naming the file a layer was read out of, for layers that
 #: are not image channels (a stored label map has no acquisition metadata) but
 #: still belong to that sample and have to go when it does.
-SAMPLE_KEY = "argus_sample"
+from .sample_files import SAMPLE_KEY, clear_samples, sample_of  # noqa: E402
 
 
 def _layer_source(layer) -> str:
-    """The file a layer belongs to: its acquisition's, or the one it was read from."""
-    meta = layer.metadata.get("mv_metadata")
-    source = str(getattr(meta, "file_path", "") or "") if meta is not None else ""
-    return source or str(layer.metadata.get(SAMPLE_KEY, "") or "")
+    """The file a layer was read from or out of — not what a panel made from it.
+
+    What closing a file *for writing* has to take off screen: the layers holding
+    its handle. Panel-made layers (counts, lines) stay through a write.
+    """
+    return sample_of(layer, derived=False)
 
 
 class _Relay(QObject):
@@ -91,6 +93,8 @@ class ExperimentWidget(QWidget):
     #: The samples :meth:`selected_entries` returns may have changed: a new scan,
     #: or a different selection.
     samples_changed = Signal()
+    #: A thumbnail arrived for the file at this path.
+    preview_ready = Signal(str)
 
     def __init__(self, app, parent: QWidget | None = None):
         super().__init__(parent)
@@ -102,8 +106,17 @@ class ExperimentWidget(QWidget):
         self._overviews: list = []
         self._overview_ids: set[int] = set()
         self._overview_window = None
+        self._picker_window = None
+        self._picker_paths: set[str] = set()
+        self._item_index: dict = {}
+        #: Paths selected from a table before the scan reached them.
+        self._pending_selection: set[str] = set()
+        #: ``((folder, recursive), paths)`` of the last listing, for the picker.
+        self._listing: tuple = (None, [])
         self._worker = None
         self._cancelled = False
+        #: ``(selected, opened)`` paths waiting for the scan :meth:`restore` started.
+        self._restoring = None
         self._relay = _Relay()
         self._relay.message.connect(self._log)
         self._relay.preview.connect(self._set_preview)
@@ -200,6 +213,15 @@ class ExperimentWidget(QWidget):
         self._overview_button.setEnabled(False)
         self._overview_button.clicked.connect(self.show_overview)
         row.addWidget(self._overview_button)
+        pick = QPushButton("Pick from table…")
+        pick.setToolTip(
+            "Choose samples off a prescreen or QC table (CSV or Excel, a row per sample): "
+            "keep some categories (Pass: yes), draw n of others (10 ripped, 10 folded, 10 "
+            "of each shape), see them as thumbnails, select them here or open them one "
+            "after the other."
+        )
+        pick.clicked.connect(self.show_picker)
+        row.addWidget(pick)
         row.addStretch(1)
         outer.addLayout(row)
         return box
@@ -283,6 +305,45 @@ class ExperimentWidget(QWidget):
             return [e for e in self._entries if id(e) not in self._overview_ids]
         return [self._entries[row] for row in sorted(rows) if row < len(self._entries)]
 
+    def selected_paths(self) -> list[str]:
+        """The files selected in the grid — none when nothing is, unlike
+        :meth:`selected_entries`."""
+        return [str(item.data(PATH_ROLE)) for item in self._grid.selectedItems()]
+
+    def restore(self, folder, selected=(), opened=()) -> None:
+        """Come back to *folder* as it was left: scanned, with *selected* selected.
+
+        *opened* are the files the viewer has already put back on screen; the
+        label maps stored in them come up once the scan has found them, as they
+        do when a sample is opened from here.
+        """
+        self._folder_edit.setText(str(folder))
+        self._restoring = ([str(path) for path in selected], [str(path) for path in opened])
+        self.scan()
+        if self._worker is None:
+            # Nothing to scan, so nothing will come back to finish this.
+            self._restoring = None
+
+    def _finish_restore(self) -> None:
+        selected, opened = self._restoring
+        self._restoring = None
+        self._grid.clearSelection()
+        first = None
+        for row in range(self._grid.count()):
+            item = self._grid.item(row)
+            if str(item.data(PATH_ROLE)) in selected:
+                item.setSelected(True)
+                first = first or item
+        if first is not None:
+            self._grid.scrollToItem(first)
+        entries = [entry for entry in self._entries
+                   if str(entry.path) in opened and entry.readable]
+        if entries:
+            self._load_stored_labels(entries)
+            regions = getattr(self._app, "regions_widget", None)
+            if regions is not None:
+                regions.raise_layer()
+
     # -- scanning -------------------------------------------------------------
 
     def choose_folder(self) -> None:
@@ -305,15 +366,20 @@ class ExperimentWidget(QWidget):
             return
 
         paths = ex.list_files(folder, self._recursive.isChecked())
+        self._listing = ((str(Path(folder)), self._recursive.isChecked()), list(paths))
+        # An open picker matches its table now, not when the scan is done.
+        self._rematch_picker()
         self._overviews, self._overview_ids = [], set()
         if not paths:
             self._grid.clear()
+            self._item_index = {}
             self._entries = []
             self._status.setText(f"No readable datasets in {Path(folder).name}.")
             return
 
         self._entries = []
         self._grid.clear()
+        self._item_index = {}
         self._log_view.clear()
         self._cancelled = False
         self._busy(True)
@@ -362,6 +428,9 @@ class ExperimentWidget(QWidget):
         if not entry.readable:
             item.setForeground(Qt.red)
         self._grid.addItem(item)
+        if str(entry.path) in self._pending_selection:
+            self._pending_selection.discard(str(entry.path))
+            item.setSelected(True)
 
     def _set_preview(self, index: int, rgb) -> None:
         """Put a thumbnail on the item at *index*, if the grid still has one."""
@@ -371,6 +440,7 @@ class ExperimentWidget(QWidget):
         pixmap = _to_pixmap(np.asarray(rgb))
         if pixmap is not None:
             item.setIcon(QIcon(pixmap))
+            self.preview_ready.emit(str(item.data(PATH_ROLE)))
 
     def _on_scan_done(self, found) -> None:
         from .. import overview as ov
@@ -383,6 +453,10 @@ class ExperimentWidget(QWidget):
         # opened, analysed or segmented at all.
         self._overview_ids = {id(entry) for entry in found if id(entry) not in kept}
         rows = min(len(found), self._grid.count())
+        # Taking a tile out drops its selection; what was selected during the
+        # scan (picks from a table, say) is put back after.
+        selected = {str(item.data(PATH_ROLE)) for item in self._grid.selectedItems()}
+        self._grid.blockSignals(True)
         items = [self._grid.takeItem(0) for _ in range(rows)]
         order = ([i for i in range(rows) if id(found[i]) in kept]
                  + [i for i in range(rows) if id(found[i]) not in kept])
@@ -390,6 +464,10 @@ class ExperimentWidget(QWidget):
             self._grid.addItem(items[i])
             if id(found[i]) in self._overview_ids:
                 self._mark_overview(items[i], found[i])
+            if str(items[i].data(PATH_ROLE)) in selected:
+                items[i].setSelected(True)
+        self._grid.blockSignals(False)
+        self._pending_selection = set()
         self._entries = [found[i] for i in order] + list(found[rows:])
         self._overview_button.setEnabled(bool(self._overviews))
         self._overview_button.setText(
@@ -413,7 +491,11 @@ class ExperimentWidget(QWidget):
                         "in their own window and at the end of the grid, marked “overview?”. "
                         "They are left out of “all samples” unless selected.")
         self._log(summary)
-        if self._overviews:
+        if self._restoring is not None:
+            # Coming back to last time's folder: the overview is a button away,
+            # not a window opened over the viewer at every launch.
+            self._finish_restore()
+        elif self._overviews:
             self.show_overview()
 
     # -- overviews ------------------------------------------------------------
@@ -469,9 +551,104 @@ class ExperimentWidget(QWidget):
         self.select_entry(entry)
         self.open_selected()
 
+    # -- picking from a table -------------------------------------------------
+
+    def show_picker(self) -> None:
+        """Open (or bring back) the window that picks samples off a table."""
+        from .sample_picker_window import SamplePickerWindow
+
+        window = self._picker_window
+        if window is None:
+            window = self._picker_window = SamplePickerWindow(
+                paths=self.folder_paths,
+                icon_of=self.icon_of,
+                select=self.select_paths,
+                open_path=self.open_path,
+                folder=self.folder,
+                parent=self,
+            )
+            self._picker_paths = {str(path) for path in self.folder_paths()}
+            self.samples_changed.connect(self._rematch_picker)
+            self.preview_ready.connect(window.on_preview)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _rematch_picker(self) -> None:
+        # Only another folder changes which files there are; a new selection does not.
+        window = self._picker_window
+        paths = {str(path) for path in self.folder_paths()}
+        if window is not None and paths != self._picker_paths:
+            self._picker_paths = paths
+            window.rematch()
+            window.update_picks()
+
+    def icon_of(self, path) -> QIcon | None:
+        """The thumbnail the scan made of *path*, if it is in the grid."""
+        item = self._items_by_path().get(str(path))
+        return item.icon() if item is not None else None
+
+    def _items_by_path(self) -> dict:
+        """Grid items by path, rebuilt only when the grid changed.
+
+        A table picks hundreds of samples at a time; looking each up by walking
+        a thousand-tile grid made every tick in the picker take seconds.
+        """
+        index = self._item_index
+        if len(index) != self._grid.count():
+            index = self._item_index = {
+                str(self._grid.item(row).data(PATH_ROLE)): self._grid.item(row)
+                for row in range(self._grid.count())
+            }
+        return index
+
+    def select_paths(self, paths) -> int:
+        """Select exactly *paths* in the grid; returns how many were found."""
+        index = self._items_by_path()
+        items = [index[str(path)] for path in paths if str(path) in index]
+        self._grid.blockSignals(True)
+        try:
+            self._grid.clearSelection()
+            for item in items:
+                item.setSelected(True)
+        finally:
+            self._grid.blockSignals(False)
+        first = min(items, key=self._grid.row) if items else None
+        if first is not None:
+            self._grid.scrollToItem(first)
+        self.samples_changed.emit()
+        found = len(self._grid.selectedItems())
+        # Picks the scan has not reached yet are selected as their tiles arrive.
+        self._pending_selection = ({str(path) for path in paths} - set(index)) if self._worker is not None else set()
+        self._status.setText(f"{found} sample(s) selected from the table."
+                             + (f" {len(self._pending_selection)} more as the scan reaches them."
+                                if self._pending_selection else ""))
+        return found
+
+    def open_path(self, path) -> None:
+        """Open one sample in place of what is on screen, scanned yet or not."""
+        if self.select_paths([path]):
+            self.open_selected()
+            return
+        # The scan has not reached it: a header read is enough to open it.
+        self.open_entries([ex.describe_file(path)])
+
+    def folder_paths(self) -> list[Path]:
+        """Every dataset in the folder, listed without reading any: what a table
+        is matched against, so it does not wait for the scan."""
+        folder = self.folder()
+        if folder is None:
+            return []
+        key = (str(folder), self._recursive.isChecked())
+        if self._listing[0] != key:
+            self._listing = (key, ex.list_files(folder, self._recursive.isChecked()))
+        return list(self._listing[1])
+
     def _clear_worker(self) -> None:
         self._worker = None
         self._cancelled = False
+        # A scan that failed or was stopped: the next one is an ordinary scan.
+        self._restoring = None
         self._busy(False)
 
     def _on_error(self, exc) -> None:
@@ -498,7 +675,11 @@ class ExperimentWidget(QWidget):
         What the incoming samples carry comes up with them: their stored
         outlines (through the Brain regions panel) and their stored label maps.
         """
-        entries = [entry for entry in self.selected_entries() if entry.readable]
+        self.open_entries(self.selected_entries())
+
+    def open_entries(self, entries) -> None:
+        """Show *entries*, replacing whatever sample is on screen (see :meth:`open_selected`)."""
+        entries = [entry for entry in entries if entry.readable]
         if not entries:
             self._status.setText("Nothing readable selected.")
             return
@@ -516,6 +697,9 @@ class ExperimentWidget(QWidget):
         regions = getattr(self._app, "regions_widget", None)
         pending = self._settle_regions(regions)
         if pending is None:
+            return
+        counts = getattr(self._app, "positive_counter_widget", None)
+        if counts is not None and hasattr(counts, "settle_unsaved") and not counts.settle_unsaved(self):
             return
 
         closed = self._close_all_samples()
@@ -615,13 +799,17 @@ class ExperimentWidget(QWidget):
         return self._close_paths([entry.path for entry in self.selected_entries()])
 
     def _close_all_samples(self) -> int:
-        """Close every layer that came from a file, whichever panel opened it."""
-        sources = []
-        for layer in self._viewer.layers:
-            source = _layer_source(layer)
-            if source and source not in sources:
-                sources.append(source)
-        return self._close_paths(sources) if sources else 0
+        """Clear the screen for the next sample: every sample, and everything of theirs.
+
+        Their channels and stored label maps, and every layer a panel made for
+        them — the junction line and region, counted cells, hand counts, a
+        segmentation — plus the QC picture. Left behind, those would be drawn
+        over the next sample, counted against it, or saved into it.
+        """
+        removed = clear_samples(self._viewer)
+        if removed:
+            self._log(f"Closed {removed} layer(s) of the samples that were on screen.")
+        return removed
 
     def _close_paths(self, paths) -> int:
         """Remove every layer backed by these files, then give the handles back.
@@ -737,7 +925,8 @@ class ExperimentWidget(QWidget):
             self._status.setText("Select a sample to read ROIs from.")
             return
         entry = entries[0]
-        rois = ims_store.load_rois(entry.path)
+        # Onto the Brain regions layer: anatomy only, not the junction band.
+        rois = ims_store.anatomy(ims_store.load_rois(entry.path))
         if not rois:
             self._log(f"{entry.name} has no stored ROIs.")
             return

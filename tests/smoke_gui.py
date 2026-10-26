@@ -439,10 +439,64 @@ def main() -> int:
     app.toolbar.toggle_scale_bar()
     # isHidden rather than isVisible: this viewer was built with show=False, so
     # every child widget reports itself invisible regardless of the dock state.
+    check(app._metadata_dock.isHidden(), "the metadata dock starts closed")
     app.toggle_metadata_panel()
-    check(app._metadata_dock.isHidden(), "metadata dock hidden")
+    check(not app._metadata_dock.isHidden(), "metadata dock shown")
     app.toggle_metadata_panel()
-    check(not app._metadata_dock.isHidden(), "metadata dock shown again")
+    check(app._metadata_dock.isHidden(), "metadata dock hidden again")
+
+    print("the Panels menu", flush=True)
+    opened = sorted(name for name, dock in app.docks.items() if not dock.isHidden())
+    check(opened == ["experiment"], f"only the experiment panel is open at first ({opened})")
+    actions = app.panel_actions
+    check(set(actions) == set(app.docks), "the menu lists every panel")
+    titles = [a.text().replace("&", "") for a in app.viewer.window.main_menu.actions()]
+    check("Panels" in titles and titles.index("Panels") == titles.index("Plugins") + 1,
+          f"and sits in the menu bar after Plugins ({titles})")
+    actions["segmentation"].trigger()
+    check(not app.docks["segmentation"].isHidden(), "ticking one opens it")
+    check(actions["segmentation"].isChecked(), "and the tick follows")
+    # The close button on the dock's own title bar: napari's removes the dock.
+    app.docks["segmentation"].titleBarWidget().close_button.click()
+    check(app.docks["segmentation"].isHidden(), "the dock's close button only puts it away")
+    check(not actions["segmentation"].isChecked(), "and unticks it")
+    actions["segmentation"].trigger()
+    check(not app.docks["segmentation"].isHidden(), "so it opens again from the menu")
+
+    print("the session", flush=True)
+    from microscopy_viewer import session
+    from microscopy_viewer.widgets import session_state
+
+    # Never the real one of whoever runs this.
+    session.session_file = lambda: rules_home / "session.json"
+    from qtpy.QtWidgets import QDoubleSpinBox
+
+    controls = session_state._controls(app.segmentation_widget)
+    key = next(k for k, w in controls.items() if isinstance(w, QDoubleSpinBox))
+    before = controls[key].value()
+    controls[key].setValue(before + controls[key].singleStep())
+    changed = controls[key].value()
+    app.keep_session()
+    check(app.session_keeper.save(), "the session is written")
+    kept = session.load()
+    check(sorted(kept["panels"]) == ["experiment", "segmentation"], "with the open panels")
+    check(kept["settings"]["segmentation"]["values"][key] == changed, "and the panels' settings")
+    check(bool(kept["files"]) == any(
+        session_state.source_of(layer) for layer in app.viewer.layers
+    ), "and the files on screen")
+    controls[key].setValue(before)
+    actions["segmentation"].trigger()
+    actions["analysis"].trigger()
+    app.restore_session(reopen_files=False)
+    opened = sorted(name for name, dock in app.docks.items() if not dock.isHidden())
+    check(opened == ["experiment", "segmentation"], f"restoring puts the panels back ({opened})")
+    check(session_state._controls(app.segmentation_widget)[key].value() == changed,
+          "and the setting")
+    stale = dict(kept["settings"]["segmentation"], form="QSpinBox=1")
+    check(session_state.restore_settings(app.segmentation_widget, stale) == 0,
+          "settings saved from a different form are left alone")
+    controls[key].setValue(before)
+    actions["segmentation"].trigger()
     check("slide" in app.toolbar._buttons, "the slide export button is on the toolbar")
     check("movie" in app.toolbar._buttons, "and the movie export button")
     app.toolbar.toggle_play()

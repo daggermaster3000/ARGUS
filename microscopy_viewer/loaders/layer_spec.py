@@ -48,6 +48,63 @@ def is_brightfield(name: str | None) -> bool:
     return bool(tokens & _BRIGHTFIELD_TOKENS)
 
 
+#: Display colours by wavelength: ``(upper bound in nm, colormap, RGB)``. The
+#: number in a channel name is a laser line or the dye's name (405, 488, 555,
+#: 647), and these are the colours those are conventionally shown in — not the
+#: colour of light of that wavelength, which for 555 nm would be a yellow-green
+#: nobody expects an Alexa 555 channel to be.
+WAVELENGTH_COLORS = (
+    (420, "blue", (0.0, 0.0, 1.0)),      # 350, 405: DAPI, Hoechst
+    (470, "cyan", (0.0, 1.0, 1.0)),      # 440, 458: CFP
+    (520, "green", (0.0, 1.0, 0.0)),     # 488, 514: GFP, Alexa 488, FITC
+    (545, "yellow", (1.0, 1.0, 0.0)),    # 532: YFP
+    (605, "red", (1.0, 0.0, 0.0)),       # 546, 555, 561, 568, 594: mCherry, Alexa 555/568/594
+    (720, "magenta", (1.0, 0.0, 1.0)),   # 633, 640, 647: Cy5, Alexa 647
+    (1000, "gray", (1.0, 1.0, 1.0)),     # near infra-red: no colour of its own
+)
+
+#: Fluorophores named without a number, and the wavelength they stand for.
+FLUOROPHORE_NM = {
+    "dapi": 405, "hoechst": 405, "bfp": 405, "cfp": 458, "cerulean": 458,
+    "gfp": 488, "fitc": 488, "yfp": 532, "venus": 532, "citrine": 532,
+    "mcherry": 561, "rfp": 561, "tdtomato": 561, "dsred": 561, "tritc": 561,
+    "cy3": 561, "texasred": 594, "cy5": 647, "apc": 647, "cy7": 750,
+}
+
+_WAVELENGTH_IN_NAME = re.compile(r"(?<![0-9])([3-9][0-9]{2})(?![0-9])")
+
+
+def wavelength_from_name(name: str | None) -> int | None:
+    """The wavelength a channel name states, in nm, or ``None``.
+
+    A three-digit number between 350 and 999 standing on its own or after
+    letters — ``AF488``, ``Alexa 555``, ``Confocal - 561``, ``405 nm`` — or a
+    fluorophore that implies one. A number that is part of a longer one
+    (``stack 14880``) is not a wavelength.
+    """
+    if not name:
+        return None
+    lowered = str(name).lower()
+    for match in _WAVELENGTH_IN_NAME.finditer(lowered):
+        value = int(match.group(1))
+        if 350 <= value <= 999:
+            return value
+    squashed = re.sub(r"[^a-z0-9]", "", lowered)
+    # Longest first, so a short name is never found inside a longer one first.
+    for word in sorted(FLUOROPHORE_NM, key=len, reverse=True):
+        if word in squashed:
+            return FLUOROPHORE_NM[word]
+    return None
+
+
+def color_for_wavelength(nm: float) -> tuple[str, tuple[float, float, float]]:
+    """``(colormap name, RGB)`` a channel of that wavelength is shown in."""
+    for upper, colormap, rgb in WAVELENGTH_COLORS:
+        if nm < upper:
+            return colormap, rgb
+    return WAVELENGTH_COLORS[-1][1], WAVELENGTH_COLORS[-1][2]
+
+
 def channel_appearance(
     channel_name: str | None,
     color: tuple[float, float, float] | None,
@@ -58,11 +115,19 @@ def channel_appearance(
 
     Brightfield channels are forced to grayscale, overriding any display colour
     stored in the file — a transmitted-light channel tinted green is never what
-    was wanted. Fluorescence channels keep the file's colour when there is one,
-    and otherwise take the next entry from the cycle.
+    was wanted. A fluorescence channel whose name states a wavelength or a
+    fluorophore (``AF488``, ``Confocal - 561``, ``DAPI``) is shown in that
+    wavelength's colour, whatever the file stored and wherever it sits in the
+    channel order: the same stain is then the same colour in every sample.
+    Otherwise it keeps the file's colour when there is one, and failing that
+    takes the next entry from the cycle.
     """
     if is_brightfield(channel_name):
         return "gray", None, "additive" if n_channels > 1 else "translucent"
+    nm = wavelength_from_name(channel_name) if n_channels > 1 else None
+    if nm is not None:
+        colormap, rgb = color_for_wavelength(nm)
+        return colormap, rgb, "additive"
     fallback = COLORMAP_CYCLE[index % len(COLORMAP_CYCLE)] if n_channels > 1 else "gray"
     return fallback, color, "additive" if n_channels > 1 else "translucent"
 

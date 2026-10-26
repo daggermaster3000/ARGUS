@@ -172,6 +172,10 @@ def export_table(frame, path: str | Path, sheet_name: str = "Results") -> Path:
     return path
 
 
+#: Rows of data one sheet holds: Excel's 1,048,576, less the header.
+EXCEL_MAX_ROWS = 1_048_575
+
+
 def export_sheets(frames: dict[str, Any], path: str | Path) -> Path:
     """Write several dataframes to one workbook, one sheet each.
 
@@ -182,6 +186,12 @@ def export_sheets(frames: dict[str, Any], path: str | Path) -> Path:
 
     Falls back to a sheet-suffixed ``.csv`` per frame when a CSV path is given,
     since CSV has no notion of a sheet.
+
+    A table with more rows than a sheet can hold (:data:`EXCEL_MAX_ROWS` — the
+    per-cell table of a few hundred slide scans gets there) is written whole to
+    a ``.csv`` beside the workbook, and its sheet says where it went. Splitting
+    it over several sheets would keep it in the file and make it unusable there:
+    nothing can sort, filter or pivot across sheets.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -201,6 +211,16 @@ def export_sheets(frames: dict[str, Any], path: str | Path) -> Path:
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, frame in frames.items():
             sheet = str(name)[:31]  # Excel's own limit
+            if len(frame) > EXCEL_MAX_ROWS:
+                beside = path.with_name(f"{path.stem}_{str(name).lower().replace(' ', '_')}.csv")
+                # utf-8-sig: Excel reads "µm" in a header as such only with the mark.
+                frame.to_csv(beside, index=False, encoding="utf-8-sig")
+                logger.info("%s has %d rows, too many for a sheet; written to %s", name, len(frame), beside)
+                frame = pd.DataFrame({
+                    "Note": [f"{len(frame):,} rows are more than a sheet holds ({EXCEL_MAX_ROWS:,})."],
+                    "Written to": [beside.name],
+                    "In the folder": [str(beside.parent)],
+                })
             frame.to_excel(writer, sheet_name=sheet, index=False)
             _autofit(writer.sheets[sheet], frame)
 

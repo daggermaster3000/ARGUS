@@ -128,9 +128,27 @@ def test_brightfield_name_matching() -> None:
     check(color is None, f"stored colour dropped (got {color})")
     check(blending == "additive", f"blending unchanged for multichannel ({blending})")
 
-    colormap, color, _blending = channel_appearance("GFP", None, 0, 3)
-    check(colormap == "green", f"first fluorescence channel still cycles to {colormap!r}")
-    check(color is None, "no colour invented when the file had none")
+    colormap, color, _blending = channel_appearance("Channel 0", None, 0, 3)
+    check(colormap == "green", f"an unnamed first fluorescence channel still cycles to {colormap!r}")
+    check(color is None, "no colour invented when neither the file nor the name gives one")
+
+    from microscopy_viewer.loaders.layer_spec import wavelength_from_name
+
+    for name, nm in (("AF405", 405), ("AF488", 488), ("AF555", 555), ("Alexa 647", 647),
+                     ("Confocal - 561", 561), ("405 nm", 405), ("DAPI", 405), ("EGFP", 488),
+                     ("mCherry", 561), ("Cy5", 647), ("Channel 0", None), ("stack 14880", None),
+                     ("Phalloidin", None)):
+        check(wavelength_from_name(name) == nm, f"{name!r} -> {nm}")
+    for name, wanted in (("AF405", "blue"), ("AF488", "green"), ("AF555", "red"),
+                         ("Alexa 647", "magenta"), ("CFP", "cyan"), ("YFP", "yellow")):
+        # Last in the order, and with a stored colour that disagrees: the name wins.
+        colormap, color, blending = channel_appearance(name, (0.2, 0.9, 0.9), 2, 3)
+        check(colormap == wanted and blending == "additive", f"{name} is shown in {wanted} ({colormap})")
+        check(color is not None and max(color) == 1.0, f"{name} gets a colour of its own ({color})")
+    colormap, color, _blending = channel_appearance("AF488", None, 0, 1)
+    check(colormap == "gray" and color is None, "a single-channel image stays grey")
+    colormap, color, _blending = channel_appearance("Phalloidin", (1.0, 0.5, 0.0), 1, 3)
+    check(color == (1.0, 0.5, 0.0), "a name with no wavelength keeps the file's colour")
 
 
 def test_pyramid_padding_without_imagesize_attrs() -> None:
@@ -543,3 +561,31 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def test_a_thread_releases_only_the_handles_it_opened(tmp_path):
+    """A scan or thumbnail run on another thread must not close the handle a
+    layer on screen reads through."""
+    import threading
+
+    import numpy as np
+    import tifffile
+
+    from microscopy_viewer import loaders
+    from microscopy_viewer.loaders import tiff
+
+    path = tmp_path / "sample.tif"
+    tifffile.imwrite(path, np.zeros((2, 16, 16), dtype=np.uint16))
+    tiff.read(path)  # "on screen": opened by this thread
+
+    def scan():
+        tiff.read(path)
+        loaders.release(path, own_thread_only=True)
+
+    worker = threading.Thread(target=scan)
+    worker.start()
+    worker.join()
+    assert loaders.is_open(path)
+    assert sum(1 for h in tiff._OPEN_FILES if tiff._same_file(h, path.resolve())) == 1
+    assert loaders.release(path) == 1
+    assert not loaders.is_open(path)

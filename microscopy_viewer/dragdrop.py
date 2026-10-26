@@ -98,6 +98,10 @@ class FileOpenCatcher(QObject):
         # script itself, and any paths given there, which are opened already.
         self._from_command_line = {_normalise(arg) for arg in sys.argv}
 
+    def has_pending(self) -> bool:
+        """Whether files have been handed over that nothing has opened yet."""
+        return bool(self._pending)
+
     def attach(self, callback: Callable[[Sequence[str]], None]) -> None:
         """Start delivering to *callback*, including anything already received."""
         self._callback = callback

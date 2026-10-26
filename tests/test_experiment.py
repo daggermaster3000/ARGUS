@@ -307,7 +307,7 @@ def _patch_reader(monkey: dict, specs_by_path) -> None:
     monkey["specs"] = ex._read_specs
     monkey["release"] = ex._release
     ex._read_specs = lambda path: specs_by_path[Path(path).name]
-    ex._release = lambda path: None
+    ex._release = lambda path, own_thread_only=True: None
 
 
 def _unpatch_reader(monkey: dict) -> None:

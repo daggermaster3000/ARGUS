@@ -182,12 +182,17 @@ def _read_specs(path: Path):
     return load_path(path)
 
 
-def _release(path: Path) -> None:
-    """Give back the reader's handle on *path*, if it is holding one."""
+def _release(path: Path, own_thread_only: bool = True) -> None:
+    """Give back the reader's handle on *path*, if it is holding one.
+
+    Only what this thread opened, by default: the same file may be on screen,
+    read through a handle of its own that has to outlive a scan or a thumbnail.
+    A batch about to write into the file releases them all.
+    """
     from .loaders import release
 
     try:
-        release(path)
+        release(path, own_thread_only=own_thread_only)
     except Exception:
         logger.debug("could not release the handle on %s", path, exc_info=True)
 
@@ -563,7 +568,7 @@ def run_batch(
             outcome.error = str(exc)
         finally:
             outcome.elapsed_s = time.perf_counter() - started
-            _release(path)
+            _release(path, own_thread_only=False)
         outcomes.append(outcome)
         if progress is not None:
             progress(
