@@ -53,8 +53,26 @@ SIDES = (SIDE_LEFT, SIDE_RIGHT, SIDE_BOTH)
 MIN_SPLINE_POINTS = 50
 MAX_SPLINE_POINTS = 1000
 
-#: Key the region is stored under in the sample.
+#: Key the automatic run stores its region under in the sample.
 DEFAULT_KEY = "fusion region"
+#: Key a region drawn (or corrected) by hand is stored under, so it never
+#: overwrites the automatic one and the two can be compared.
+MANUAL_KEY = "manual annotated junction region"
+
+#: How far a band that follows the tissue reaches past its outline, in µm:
+#: cells migrating over the organoid's surface sit just outside the outline the
+#: nuclear stain gives.
+TISSUE_MARGIN_UM = 10.0
+
+
+def region_keys(key: str) -> tuple[str, ...]:
+    """The stored regions to try for *key*, in order.
+
+    Asking for the hand-drawn region falls back to the automatic one, so a
+    folder where only some samples were redrawn is counted whole: the redrawn
+    ones in their own region, the rest in the automatic band.
+    """
+    return (MANUAL_KEY, DEFAULT_KEY) if key == MANUAL_KEY else (key,)
 
 
 def _clean(points: Sequence[Sequence[float]]) -> np.ndarray:
@@ -162,6 +180,26 @@ def band_polygon(
     ))
 
 
+def fill_polygon(pixels: np.ndarray, shape: Sequence[int]) -> np.ndarray:
+    """A polygon given in ``(row, column)`` pixel coordinates, as a boolean mask.
+
+    Rasterised by Pillow's scanline fill. ``skimage.draw.polygon`` tests every
+    pixel of the bounding box against every edge, which for a band on a slide
+    scan — nine million pixels, two thousand vertices — is twenty seconds; a
+    scanline fill is a few hundredths of one.
+    """
+    from PIL import Image, ImageDraw
+
+    height, width = (int(n) for n in tuple(shape)[-2:])
+    points = np.asarray(pixels, dtype=float)
+    if len(points) < 3 or height <= 0 or width <= 0:
+        return np.zeros((height, width), dtype=bool)
+    canvas = Image.new("1", (width, height), 0)
+    # Pillow wants (x, y), and puts pixel centres at whole numbers as napari does.
+    ImageDraw.Draw(canvas).polygon([(float(c), float(r)) for r, c in points], fill=1, outline=1)
+    return np.asarray(canvas, dtype=bool)
+
+
 def band_mask(
     polygon: np.ndarray,
     shape_yx: Sequence[int],
@@ -175,7 +213,6 @@ def band_mask(
     slide scan costs what the band covers and not what the slide does.
     """
     from scipy import ndimage
-    from skimage.draw import polygon as fill_polygon
 
     shape = tuple(int(n) for n in tuple(shape_yx)[-2:])
     voxel = np.asarray(tuple(voxel_yx)[-2:], dtype=float)
@@ -189,9 +226,7 @@ def band_mask(
     if np.any(high <= low):
         return mask
     box = tuple(int(n) for n in (high - low))
-    rows, cols = fill_polygon(pixels[:, 0] - low[0], pixels[:, 1] - low[1], shape=box)
-    window = np.zeros(box, dtype=bool)
-    window[rows, cols] = True
+    window = fill_polygon(pixels - low, box)
     window = ndimage.binary_dilation(window, structure=np.ones((3, 3), dtype=bool))
     window = ndimage.binary_fill_holes(window)
     mask[low[0]:high[0], low[1]:high[1]] = window

@@ -236,14 +236,32 @@ def _text(value: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Outlines a panel other than Brain regions stores beside the hand-drawn
+#: regions: the junction finder's band (``junction.BAND_ROI_NAME``). They are
+#: not anatomy, so the Brain regions layer does not show them (:func:`anatomy`),
+#: and saving the regions on screen does not delete them.
+OTHER_PANELS_ROIS = ("Fusion band",)
+
+
+def anatomy(rois: Sequence[StoredRoi]) -> list[StoredRoi]:
+    """*rois* without the outlines other panels store (:data:`OTHER_PANELS_ROIS`)."""
+    return [roi for roi in rois if roi.name not in OTHER_PANELS_ROIS]
+
+
 def save_rois(path: str | Path, rois: Sequence[StoredRoi], replace: bool = True) -> int:
     """Write *rois* into the file. Returns how many were written.
 
     With *replace* the previous set is removed first, which is what the panel
     wants: the shapes on screen are the truth, and a shape that was deleted there
-    should not survive in the file.
+    should not survive in the file. Outlines stored by another panel
+    (:data:`OTHER_PANELS_ROIS`, e.g. the junction band) survive a replace unless
+    *rois* carries one of the same name — they are not on that panel's screen.
     """
     entries = [roi for roi in rois if roi.vertices_um.shape[0] >= 3]
+    if replace:
+        names = {roi.name for roi in entries}
+        entries += [roi for roi in load_rois(path)
+                    if roi.name in OTHER_PANELS_ROIS and roi.name not in names]
     with writable(path) as handle:
         if replace and ROI_GROUP in handle:
             del handle[ROI_GROUP]

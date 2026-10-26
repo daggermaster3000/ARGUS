@@ -590,7 +590,7 @@ class RegionsWidget(QWidget):
         source = self.sample_path() or self._regions_source
         if source is None:
             return True
-        stored = ims_store.load_rois(source)
+        stored = ims_store.anatomy(ims_store.load_rois(source))
         if len(stored) != len(regions):
             return True
         for region, roi in zip(regions, stored):
@@ -650,7 +650,8 @@ class RegionsWidget(QWidget):
             if path not in sources:
                 sources.append(path)
 
-        carrying = [(path, ims_store.load_rois(path)) for path in sources]
+        # Only anatomy: the junction band stored with a sample is not a brain region.
+        carrying = [(path, ims_store.anatomy(ims_store.load_rois(path))) for path in sources]
         carrying = [(path, rois) for path, rois in carrying if rois]
         if not carrying:
             return
@@ -743,7 +744,7 @@ class RegionsWidget(QWidget):
         if path is None:
             self._status.setText("No sample open to read from.")
             return
-        rois = ims_store.load_rois(path)
+        rois = ims_store.anatomy(ims_store.load_rois(path))
         if not rois:
             self._status.setText(f"{path.name} carries no stored regions.")
             return
