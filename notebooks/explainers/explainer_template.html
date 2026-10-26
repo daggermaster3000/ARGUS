@@ -599,7 +599,7 @@ footer{color:var(--muted);font-size:13px;padding:10px 4px 40px}
   <div class="fig"><div class="col" id="slides-fig"></div><div class="col prose"><p>One slide carries several sections, and the sections on a slide may come from one assembloid. So they are not independent of each other. Every genotype test is therefore run twice: once on single samples, and once on <b>slide means</b> (one mean per slide: 8 WT3 slides against 11 GD1). The test on slides is the honest one. Its p-values are larger because it has fewer data points.</p></div></div>
   <h3>What the validation showed</h3>
   <div id="results"></div>
-  <details style="margin-top:16px"><summary class="note" style="cursor:pointer">Key numbers delivered with this page's data</summary><div id="numbers-dump"></div></details>
+  <details style="margin-top:16px"><summary class="note" style="cursor:pointer">All the numbers built into this page</summary><div id="numbers-dump"></div></details>
   <div class="codeblock" data-step="counting"></div>
 </section>
 
@@ -1476,7 +1476,7 @@ function secMincut(){
     if (frame<K){
       const s=steps[frame]; let sofar=0, full=0; for (let k=0;k<=frame;k++) sofar+=steps[k].amount;
       E.forEach(([u,v,c],a)=>{ if (Math.abs(s.water[a])>=c) full++; });
-      text=`<b>Push ${frame+1} of ${K}.</b> The shortest route from the labelled seed to the other seed that still has room everywhere carries ${fmt(s.amount/1000,2)} more water — as much as its narrowest pipe had left, which is now full. Water through so far: ${fmt(sofar/1000,2)}. Full pipes: ${full}.`;
+      text=`<b>Push ${frame+1} of ${K}.</b> The program takes the shortest route from the labelled seed to the other seed on which every pipe still has room, and sends ${fmt(s.amount/1000,2)} more water along it: as much as the narrowest pipe on the route had left, so that pipe is now full. Water through so far: ${fmt(sofar/1000,2)}. Full pipes: ${full}.`;
     } else {
       text=`<b>No route with room left.</b> Pixels the water can still reach from the labelled seed, through pipes that are not full, are its side (teal); the rest are the other side (coral). Every join between the two sides is full: those ${cut.length} joins are the cut (amber). Their total width, ${fmt(tot/1000,2)}, equals all the water that got through, ${fmt(flow/1000,2)} — the max-flow / min-cut theorem, which is why no cheaper cut exists.`;
     }
@@ -1636,12 +1636,12 @@ function secDP(){
     if (frame<NS){
       const c=frame;
       infoHost.append(el('div',{class:'info'}, el('div',{html:c===0
-        ? `<b>Station 1.</b> Any position the curve may use costs 0 so far (nothing crossed yet). The seeds are forbidden.`
-        : `<b>Station ${c+1} of ${NS}.</b> For each position here and each of the ${ND} headings it can arrive with, the cheapest way to get here from station 1 is kept: the best of ${ND} ways to arrive (one per heading at station ${c}), each = the number stored there + the turn + the stretch crossed. The number in a square is the cheapest of its ${ND}; the bold lines show where it came from. That is ${NO*ND} numbers for this station — while the number of different curves reaching it is already ${count(c)}.`})));
+        ? `<b>Station 1.</b> The curve may start at any square outside the seeds, and nothing has been crossed yet, so every start costs 0.`
+        : `<b>Station ${c+1} of ${NS}.</b> For each square in this column, and for each of the ${ND} directions the curve can arrive in, the program keeps one number: the cheapest price of any curve from station 1 that gets here that way. It finds it by trying the ${ND} directions the curve could have had at station ${c}: the price stored there, plus the price of turning, plus the price of the stretch just crossed. The number shown in a square is the cheapest of its ${ND}; the blue lines show which square of station ${c} it came from. This station needs ${NO*ND} numbers, although ${count(c)} different curves already reach it.`})));
     } else {
       const got=costOf(res.path,bend), s=costOf(straight,bend), k=costOf(viaCrack,bend);
       const onCrack=res.path.filter((r,c)=>KIND[c][r]==='crack').length>=3;
-      infoHost.append(el('div',{class:'info'}, el('div',{html:`<b>Walk back.</b> At the last station take the cheapest number (${fmt(res.best,2)}) and follow where each came from back to station 1: the amber curve. It is the cheapest of all ${count(NS-1)} curves, found in ${NS} station steps.`}),
+      infoHost.append(el('div',{class:'info'}, el('div',{html:`<b>Walk back.</b> At the last station, take the cheapest number (${fmt(res.best,2)}) and follow the stored "came from" links back to station 1. That path is the amber curve: the cheapest of all ${count(NS-1)} possible curves, found in ${NS} steps, one per station, without trying them one by one.`}),
         el('table',{html:`<tr><td></td><td class="n">crossing</td><td class="n">turning</td><td class="n">total</td></tr>
           <tr><td>straight along the junction</td><td class="n">${fmt(s.cross,2)}</td><td class="n">${fmt(s.turn,2)}</td><td class="n">${fmt(s.total,2)}</td></tr>
           <tr><td>down the crack</td><td class="n">${fmt(k.cross,2)}</td><td class="n">${fmt(k.turn,2)}</td><td class="n">${fmt(k.total,2)}</td></tr>`})),
@@ -1976,7 +1976,7 @@ function secPositivity(){
   syncCtl(); update();
   // validation table (positivity_metrics, 21 October 2026)
   const rowsT=[['median + 7 SD, median filter','0.03 %','2.4','11','0.38','0.73',true],['ring contrast ≥ 1.5','0.07 %','1.5','8','0.25','0.53'],['median + 3 SD (current)','0.54 %','2.0','80','0.13','0.03'],['ring contrast > negative 99th, no autofluorescence','0.52 %','1.9','45','0.17','0.59'],['negative control 99th / 99.9th pct','2.13 / 0.67 %','1.9 / 1.7','121 / 23','0.09 / 0.21','0.28 / 0.18'],['GMM / Otsu on log intensity','0.43 / 31 %','1.4 / 1.0','66 / 2,384','0.02 / 0.01','0.20 / 0.06']];
-  $('#pos-table').innerHTML=`<table class="t"><tr><th>rule</th><th>false positives in the negative control</th><th>step at the line</th><th>migrated / mm</th><th>F1 vs clicks</th><th>rank agreement with clicks</th></tr>${rowsT.map(r=>`<tr${r[6]?' class="hl"':''}><td>${r[0]}</td>${r.slice(1,6).map(x=>`<td class="n">${x}</td>`).join('')}</tr>`).join('')}</table><p class="cap">From the validation notebooks (30 samples, 920,000 cells; clicks on 12 samples, 822 clicks). <b>False positives</b>: share of control cells called positive, the control held out by position. <b>Step at the line</b>: how much more often cells are positive just on the home side than just past the line (higher = sees a real difference). <b>Rank agreement</b>: Spearman correlation of the per-sample counts with the hand counts. The current rule calls about 7× as many cells as were clicked and does not rank the samples like the clicks (0.03). The chosen rule is first on every column.</p>`;
+  $('#pos-table').innerHTML=`<table class="t"><tr><th>rule</th><th>false positives in the negative control</th><th>step at the line</th><th>migrated / mm</th><th>F1 vs clicks</th><th>rank agreement with clicks</th></tr>${rowsT.map(r=>`<tr${r[6]?' class="hl"':''}><td>${r[0]}</td>${r.slice(1,6).map(x=>`<td class="n">${x}</td>`).join('')}</tr>`).join('')}</table><p class="cap">From the validation notebooks (30 samples, 920,000 cells; clicks on 12 samples, 822 clicks). <b>False positives</b>: share of control cells called positive, the control held out by position. <b>Step at the line</b>: how much more often cells are positive just on the home side than just past the line (higher = sees a real difference). <b>Rank agreement</b>: Spearman correlation of the per-sample counts with the hand counts. The current rule calls about 7× as many cells as were clicked and does not rank the samples like the clicks (0.03). The chosen rule is best on all four quality columns: fewest false positives, largest step at the line, highest F1 and highest rank agreement.</p>`;
 }
 
 /* ---------- 13 crossed ---------- */
@@ -2157,7 +2157,7 @@ async function secWorkflow(){
     ['valid',2,0,'Imaged pixels','mask · > 0 in every channel', T.valid,'tissue','Where the scan has data. Stitched scans pad untaken tiles with exact zeros (dark): no data, kept out of everything after.'],
     ['tissue',3,0,'Tissue','mask · any channel above the slide', T.tissue,'tissue','Smoothed 10 µm, thresholded a fifth of the way from slide to tissue in each channel, combined, tidied, holes filled.'],
     ['dens',3,1,'Cell densities','map · AF488 (teal), AF555 (coral)', T.dens,'labelled','Each label less its 45 µm local median (cells, not haze), smoothed over 100 µm into a density.'],
-    ['seeds',2,1,'Two seeds','two masks · one per organoid', T.seeds,'seeds','The densest core of each label, pulled apart so each starts deep inside its own organoid.'],
+    ['seeds',2,1,'Two seeds','two masks · one per organoid', T.seeds,'seeds','The densest patch of each label; of each, only the half furthest from the other is kept, so each seed starts deep inside its own organoid.'],
     ['mincut',1,1,'Minimum cut','two halves · cheapest cut', T.mincut,'mincut','Water pushed from seed to seed through pipes as wide as the price; the full pipes are the cut. On this section it runs down a crack.'],
     ['price',0,1,'Price of cutting','map · dark line = cheap', T.price,'price','The nuclear stain (block means) against its 60 µm surroundings, to the power 6.'],
     ['curve',0,2,'Curve paying for turns','two halves · smooth curve', T.curve,'bending','The same search as a curve that pays for every turn (dynamic programming): the amber line the pipeline uses.'],
@@ -2291,14 +2291,21 @@ function secGlossary(){
     ['Opening, closing','Opening removes specks narrower than a small disc; closing fills gaps narrower than it.'],
     ['Local median','The middle value of a square around a pixel. Ignores a few bright cells; follows a slow haze.'],
     ['Density','How many labelled cells per area, smoothed over 100 µm.'],
-    ['Seed','A small area surely inside one organoid, from which the cut separates the other.'],
-    ['Price (cost)','How cheap it is to cut through a pixel: low on the dark line between organoids.'],
-    ['Minimum cut','The cheapest set of joins between pixels whose removal separates the two seeds; found exactly by a maximum-flow computation.'],
+    ['Imaged pixels','Pixels where the scanner recorded data (above 0 in every channel). Stitched scans fill tiles that were not imaged with exact zeros; those pixels are left out of every step.'],
+    ['Core','The largest patch where one label\'s density is above half its range: the heart of that organoid. Each seed is the half of its core furthest from the other core.'],
+    ['Seed','An area that is surely inside one organoid. The cut must separate the labelled seed from the other seed.'],
+    ['Price (cost)','What it costs to cut through a pixel, from 0 (free) to 1 (plain tissue). Low on the dark, cell-poor line between organoids.'],
+    ['Minimum cut','The cheapest set of joins between pixels whose removal separates the two seeds.'],
+    ['Maximum flow','How the minimum cut is computed: water is pushed from one seed to the other through pipes as wide as the price, until no route has room left. The full pipes between the two sides are the cut.'],
+    ['Seam price','The mean price under the finished cut. Above 0.4 means there was no dark line to follow, and the line is flagged "no dark line at the junction".'],
     ['Bending price','An extra price for every turn of the junction, bend × (turn ÷ 90°)²; stops the line from turning corners to follow a tear.'],
+    ['Dynamic programming','Finding the cheapest of a huge number of curves without trying them one by one: column after column, only the cheapest way to reach each square in each direction is kept.'],
     ['Junction line','The smoothed boundary between the two halves, in µm; the same kind of line a person draws by hand.'],
     ['Band','The part of one organoid within a set distance (width) of the junction line, plus a thin rim past the tissue edge.'],
     ['Gap, width, rim','Gap: distance left free at the line (2 µm). Width: how deep the band reaches (300 µm by default). Rim: how far past the tissue edge (10 µm).'],
-    ['Status: ok / check / fail','The finder\'s own verdict from figures measured along the way. "ok" means no check fired, not that the line is right.'],
+    ['Status: ok / check / fail','The finder\'s own verdict, from figures it measures along the way (flags). "ok" means no check fired, not that the line is right.'],
+    ['Capped mean error','How far the found line lies from the hand-drawn one, averaged over samples, with each sample counted at most 300 µm (a missing line counts 300 µm). The headline score of the validation.'],
+    ['Held-out samples','A third of the hand-drawn samples kept aside while settings are chosen, then used to check them. A setting changes only if it also helps on these.'],
     ['Triage','Which samples are drawn by hand: status fail, or Shape Damaged.'],
     ['Cellpose','A trained neural network that outlines nuclei in the nuclear stain.'],
     ['Grown nucleus','The nucleus enlarged by 3 µm; neighbours split the gap between them (each pixel to the nearer nucleus).'],
