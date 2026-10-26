@@ -67,8 +67,29 @@ jobs:
       - name: Segmentation engine
         run: python tests/test_segmentation.py
 
+      - name: Cellpose retraining
+        run: python tests/test_cellpose_training.py
+
       - name: Fusion region geometry
         run: python tests/test_fusion.py
+
+      - name: Automatic junction and QC
+        run: python tests/test_junction.py
+
+      - name: Junction cell counts
+        run: python tests/test_junction_analysis.py
+
+      - name: Junction review decisions
+        run: python tests/test_junction_review.py
+
+      - name: Sections grouped by assembloid
+        run: python tests/test_assembloids.py
+
+      - name: Manual positive counts
+        run: python tests/test_positive_counter.py
+
+      - name: Saved session
+        run: python tests/test_session.py
 
     env:
       # Windows runners default to cp1252, which cannot encode the µm and arrows

@@ -122,9 +122,9 @@ then spends several seconds building the docks — importing what each panel nee
 waking the GPU, reading settings. What is on screen for those seconds is an empty
 white window, which looks like a hung application rather than a loading one.
 
-So the window is kept hidden until it is built, and the animation in
-`microscopy_viewer/resources/loading.gif` is shown in its place, with the step
-currently running underneath it:
+So the window is kept hidden until it is built, and a loading animation is shown
+in its place — drawn in code (`microscopy_viewer/loader.py`): a plain spinner, one
+arc turning on a faint ring — with the step currently running underneath it:
 *Building the Segmentation panel…*, *Opening 3 file(s)…*, *Ready*. The window then
 appears complete, with the files already open.
 
@@ -134,8 +134,7 @@ splash, which is what both names the step and lets Qt paint a frame. That makes
 the splash a progress report as much as a picture — if startup ever does hang, the
 last line says where.
 
-Nothing depends on it. A missing GIF, a Qt build without the image plugin, or any
-other failure means the splash is skipped and the window opens the way it always
+Nothing depends on it. Any failure means the splash is skipped and the window opens the way it always
 did. `--no-splash` does the same on purpose.
 
 #### While the window is busy
@@ -159,8 +158,8 @@ So there are two pieces, in `microscopy_viewer/busy.py`:
   which is where the animation has to go, because a stuck thread can no longer be
   asked.
 - A **watchdog thread** comparing that timestamp against the clock and driving
-  `microscopy_viewer/busy_window.py`, a child process whose only job is to play
-  the GIF. It is spawned once at startup and kept hidden, so appearing during a
+  `microscopy_viewer/busy_window.py`, a child process whose only job is to draw
+  the loading animation. It is spawned once at startup and kept hidden, so appearing during a
   freeze costs one line down a pipe rather than a process launch.
 
 The watchdog thread touches only plain data and that pipe, never a Qt object:
@@ -176,6 +175,25 @@ a hang turns into a crash.
   every Qt application freezes.
 
 ### Channel colours
+
+A channel whose name states a wavelength or a fluorophore is shown in that
+wavelength's conventional colour, whatever the file stored and wherever it sits
+in the channel order — so the same stain is the same colour in every sample:
+
+| In the name | Colour |
+|---|---|
+| 350–419 nm, DAPI, Hoechst, BFP | blue |
+| 420–469 nm, CFP | cyan |
+| 470–519 nm, GFP, FITC (e.g. `AF488`) | green |
+| 520–544 nm, YFP | yellow |
+| 545–604 nm, mCherry, RFP, tdTomato, Cy3 (e.g. `AF555`, `561`) | red |
+| 605–719 nm, Cy5 (e.g. `AF647`) | magenta |
+| 720 nm and up | white |
+
+These are display conventions, not the physical colour of the light (555 nm is
+yellow-green to the eye; an Alexa 555 channel is shown red). A name with no
+wavelength in it keeps the file's own colour, and a single-channel image stays
+grey.
 
 Fluorescence channels use the display colour stored in the file, or the next entry
 in a colour cycle when the file has none.
@@ -196,7 +214,6 @@ extend `_BRIGHTFIELD_TOKENS` in
 |---|---|---|
 | Open Images | `Ctrl+O` | file picker, multi-select |
 | Export Snapshot | `Ctrl+S` | save the current view as PNG / TIFF / JPEG |
-| Export Measurements | `Ctrl+E` | write all ROI measurements to `.xlsx` |
 | Export Slide | `Ctrl+P` | build a PowerPoint figure: a row per dataset, a column per channel, plus the merge. Also batch mode — works with nothing open |
 | Export Movie | `Ctrl+Shift+M` | write the time series as a `.mov` for PowerPoint, or `.mp4` / `.gif` |
 | Batch MIP | `Ctrl+Shift+P` | maximum-project a folder of stacks to `.tif` or `.ims`. Works with nothing open |
@@ -206,6 +223,30 @@ extend `_BRIGHTFIELD_TOKENS` in
 | 2D / 3D (MIP) | `Ctrl+D` | switch the canvas between slice view and a 3D maximum-intensity projection (a *view* — to draw ROIs on a projection use **Create projection layers** in the ROI intensity comparison panel) |
 | Toggle Scale Bar | `Ctrl+B` | show / hide the calibrated scale bar |
 | Show/Hide Metadata | `Ctrl+M` | collapse the metadata dock |
+
+### Panels menu
+
+Only **Experiment setup** is open at first. Every other panel is in the
+**Panels** menu of the menu bar, after *Plugins*, ticked when open; open ones
+share a tab bar, closed ones take no room. A panel's own close button only puts
+it away.
+
+### Picking up where you left off
+
+Closing the window saves what it looked like, and the next launch puts it back:
+the open panels, each panel's settings, the last directory, the experiment folder
+with its selected samples, the images that were on screen, and the zoom and slider
+positions. A sample that is no longer there (a share not mounted today) is skipped
+without a message.
+
+Files given on the command line, or dropped on the app icon, are opened *instead*
+of last time's images; the panels and settings still come back. Start on an empty
+window with `microscopy-viewer --fresh`. The session lives in `session.json` in
+the per-user data directory, next to the log; deleting it does the same once.
+
+A panel's settings are read off its controls, so they only go back onto the same
+form: after an update that adds or removes a control in a panel, that panel
+starts from its defaults once.
 
 ### 3D and maximum-intensity projection
 
@@ -409,6 +450,8 @@ segmentation.
 
 ### Acquisition movie
 
+> **Not in the window on this branch.** The panel was taken out of the layout for the assembloid study; its code is still in the repository.
+
 The **Acquisition movie** panel (with the other right-hand panels, or from the
 **Window** menu) films an open z-stack the way the microscope acquired it. Each
 ticked channel's maximum-intensity projection builds up plane by plane, first to
@@ -438,6 +481,8 @@ leaves no half-written file behind.
 
 ### Measuring and annotating
 
+> **Not in the window on this branch.** The panel was taken out of the layout for the assembloid study; its code is still in the repository.
+
 The **Measurements** dock drives a standard napari Shapes layer:
 
 1. **New ROI layer** — adds a Shapes layer matched to the active image's
@@ -457,6 +502,8 @@ across Z reports a true 3D distance. ROI names are editable in the first column 
 follow through to the spreadsheet and the on-canvas labels.
 
 ### ROI intensity comparison
+
+> **Not in the window on this branch.** The panel was taken out of the layout for the assembloid study; its code is still in the repository.
 
 A separate dock, tabbed behind **Measurements**, for asking whether a region is
 brighter under one condition than another — and how separable the two pixel
@@ -544,6 +591,8 @@ responsive; the statistics themselves always use every pixel. Measurement runs o
 a `thread_worker`, so the viewer keeps redrawing while a large ROI is measured.
 
 ### Atlas registration
+
+> **Not in the window on this branch.** The panel was taken out of the layout for the assembloid study; its code is still in the repository.
 
 **Atlas registration** fits an open brain onto a reference atlas — Z-Brain, ZBB or
 anything else that ships a reference volume — and reads the signal channel out per
@@ -856,6 +905,40 @@ Without it the panel still appears and says exactly that, the way the atlas pane
 reports a missing `antspyx`. `Backend` is a three-method interface here too, so
 StarDist or micro-SAM can be added beside Cellpose.
 
+#### Retraining Cellpose on your own corrections (Train tab)
+
+When the model misses nuclei, merges neighbours or finds nuclei in debris, teach
+it with your own corrections. The **Train** tab of the Segmentation panel does it
+in three steps:
+
+1. **Corrected crops.** Segment as usual, then fix the Labels layer by hand with
+   napari's Labels tools: paint each missed nucleus with a new label, erase what
+   is not a nucleus, and repaint a merged pair as two. **Draw rectangles** adds a
+   `Training rectangles` layer; draw one round each area you corrected, a few
+   hundred µm across. **Add to the training set** cuts each rectangle out of the
+   image (the Setup tab's *Segment* channel, at full resolution, on the plane on
+   screen) and out of the chosen Labels layer, and stores the pair. Inside a
+   rectangle **every nucleus has to be labelled**: one left out is taught as
+   background. A crop with fewer than 5 objects, or over 4096 px a side, is
+   refused and the status line says why. Labels from a decimated run are
+   resampled onto the image's pixels.
+2. **Training set.** A folder, by default `cellpose training\nuclei` under the
+   viewer's application data folder, in the layout the Cellpose GUI and command
+   line read too: `0001.tif` beside `0001_masks.tif`, plus `0001.json` recording
+   the sample, channel, rectangle and voxel size. Keep one folder per kind of
+   object and stain.
+3. **Train.** Fine-tunes the Setup tab's model (cpsam by default) on the set, on
+   the GPU the Setup tab shows, with Cellpose's own defaults: 100 epochs,
+   learning rate 1e-5, weight decay 0.1. With 5 crops or more, a fifth is held out
+   and its test loss reported. The new model is saved into Cellpose's model folder
+   (`~/.cellpose/models`) under the name you give it (an existing model is never
+   overwritten), appears in the Setup tab's model list, and is selected, so the
+   next **Segment** uses it. Each run is recorded in the set's `runs.jsonl`.
+
+A few dozen corrected crops is usually enough to fix a systematic mistake. On an
+RTX 4090 a 2-epoch run on two 300 µm crops takes about 20 s, and 100 epochs on a
+few dozen crops a few minutes. Compare on a sample that is not in the set.
+
 ### Batch maximum projection
 
 **Batch MIP** (Ctrl+Shift+P) flattens a folder of stacks in one go. A confocal
@@ -943,9 +1026,412 @@ Two things it will not do:
   one region layer and the outlines are per-sample, so showing one sample's regions
   over another's image would be worse than showing none.
 
+The junction band's outline (*Fusion band*, stored by the Fusion region panel and its
+batch run) lives beside the regions in the same file but is not anatomy: it is never
+put on the Brain regions layer, and saving the regions — which replaces the stored
+set — keeps it. Batch segmentation and the measurements can still be restricted to it.
+
 The region layer is deliberately kept out of the **Measurements** panel. That panel
 renames every shape it finds to `ROI 1`, `ROI 2`, … on each recompute, which would
 overwrite the anatomical names as fast as they were typed.
+
+### Fusion region (assembloid junction)
+
+An assembloid is two organoids fused together. One carries labelled cells (GFP),
+the other does not, and the question is what crossed from the first into the
+second. The **Fusion region macro** panel (right-hand tabs) makes the region
+that is measured in: a band of fixed width along the junction, on the organoid
+the cells migrate into. It is the geometry of the Fiji macro
+`Flip_and_duplicate_assembloids` — spline, band, cleaned mask — with the
+junction either drawn by hand or found automatically.
+
+#### By hand
+
+1. Pick the **Image**, click **Draw the junction line**, click along the
+   interface and double-click to finish.
+2. The band appears as a Labels layer, *Fusion region*, and is rebuilt whenever
+   the line or a setting changes. The line stays editable.
+3. **Save the region with the sample**. A region saved here is stored as
+   `manual annotated junction region`, beside the automatic run's own
+   `fusion region` rather than over it. Junction analysis and the manual
+   positive count use the hand-drawn region where a sample has one and the
+   automatic band where it does not, and say which.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Band width | 300 µm | how far the band reaches from the line |
+| Side | left | which side of the line, walking from its first point to its last; *Both sides* gives labels 1 and 2 |
+| Start gap | 2 µm | distance left between the line and the band |
+| Outer cap length | band width | how far the outer corners are pushed out along the line, splaying the ends |
+| Follow the tissue | on | the band is the organoid's own tissue within the band width of the line, as the automatic run makes it: its ends follow the organoid's outline instead of cutting straight across. Off gives the macro's strip. The outline is read off the nuclear stain once per sample (a second or two) |
+| Past the tissue edge | 10 µm | how far a band that follows the tissue reaches past the outline, so cells migrating over the organoid's side are in it. Used by the automatic run too |
+| Fit a spline | on | smooth curve through the clicks, as Fiji's *Fit Spline* |
+
+The mask is dilated by one pixel and has its holes filled, as in the macro: on
+the inside of a bend the outer edge of the band crosses itself, and that is what
+closes the gap it leaves.
+
+#### Automatically
+
+**Find the junction on this image** proposes the line and puts it in the same
+line layer, where it can be corrected. **Run on the selected samples** does
+every sample selected in *Experiment setup*, stores each band, and writes a QC
+report. The box beside it sets how many samples are worked on **at once**, each
+in its own process (8 by default on a machine with 10 or more cores; about 5 s a
+sample one after another, so 700 sections take about 10 minutes instead of an
+hour). **Stop** starts no new sample; those already running finish. If the
+processes cannot be started, the run carries on one sample after another.
+
+To run every passing sample: *Experiment setup* ▸ **Pick from table…**, load the
+prescreen table, right-click *Pass: yes* ▸ **Keep only**, untick *Shape:
+Separated* (no junction to find), leave **Draw** unticked (every kept sample is
+picked), **Select in Experiment setup**, then **Run on the selected samples**.
+
+How the junction is found, on a 5 µm/pixel overview of the section:
+
+1. **Tissue** — wherever any channel stands above the slide (*Find the tissue in
+   every channel*; off: the nuclear stain alone). Each channel's threshold sits a
+   fifth of the way from background to tissue, because one organoid of a pair is
+   usually dimmer than the other and a midpoint threshold drops it; one faint in
+   DAPI is still bright in its own label.
+2. **Where the labelled cells are** — the *punctate* part of the GFP channel:
+   what is brighter than the median of its own neighbourhood. That leaves out
+   autofluorescence and folds. Smoothed over 100 µm into a density map.
+3. **Two seeds**, one per organoid, made by the same operation on each
+   organoid's own label. The first is the dense core of the GFP map. The second
+   is the dense core of the same map made from the other organoid's label
+   (mCherry / 555; *Other organoid* in the panel), outside the first core. Each
+   is then cut back to its half furthest from the other (distance measured
+   through the tissue, not across holes). These only say *which organoid is
+   which*. When the other channel is missing, holds no cells, or its core is
+   under 2 % of the tissue — or with *Find the other organoid from its own
+   label* unticked — the second seed is instead the tissue with few GFP cells
+   furthest from the GFP core, which is what it always was before. Which rule
+   was used is the *Second seed* column of `junction_QC.xlsx`. On the 2025-09
+   slides the two rules put the junction within 30 µm of each other on half the
+   sections and more than 100 µm apart on a third: check the QC pictures after
+   switching.
+4. **The dark line** — two organoids pressed together leave a thin dark line
+   between them in DAPI. The stain is divided by its own surroundings (8 µm
+   smoothing over 60 µm smoothing), which is 1 inside either organoid, bright or
+   dim, and below 1 on the line.
+5. **A minimum cut** — the tissue is cut between the two seeds where cutting is
+   cheapest: as short as possible, and several times cheaper along the dark
+   line. So the junction runs through the neck when there is one and along the
+   line wherever there is one. A cut is a sum over its whole length, which is
+   why it follows a continuous line and ignores isolated dark specks.
+6. **Smoothing** — the junction is smoothed along its length (running mean over
+   150 µm); the tissue outline and the band are rounded off over 25 µm.
+7. **The band** — every part of the unlabelled organoid within the band width of
+   the junction. Not the macro's strip with a cap at either end: a strip ends in
+   two straight cuts across the tissue wherever the line stopped. Taken by
+   distance inside the organoid, the band ends where the organoid does — its two
+   extremities run along the organoid's outline, and its far edge is the
+   junction moved in by the band width. *Outer cap length* is therefore not used
+   by the automatic band. It reaches *Past the tissue edge* (10 µm) beyond the
+   outline along the organoid's side, never into the other organoid.
+
+A band found on one image is shown this way too; moving the line or changing a
+setting afterwards rebuilds it from the line as for a hand-drawn junction —
+following the tissue, unless that is turned off.
+
+| Option | Default | |
+|---|---|---|
+| Labelled cells | first channel named *gfp* / *488* | must mark one organoid **throughout** |
+| Nuclear stain | first channel named *dapi* / *hoechst* / *405* | |
+| Follow the dark line in the nuclear stain | on | off = shortest cut only: right at a neck, approximate elsewhere |
+| Find the tissue in every channel | on | the section's outline is where *any* channel stands above the slide. One organoid of a pair often has a faint nuclear stain; from that alone it is dropped and the junction stops short of the outline. Off if a channel lights up the slide around the tissue |
+| Bending cost | 1000 µm | what a sharp 90° corner in the junction costs, as µm of plain tissue cut; the same turn spread over a longer stretch costs less (bending energy). Keeps the cut from turning a corner to follow a crack, a fold or the edge of a bright patch; 0 = free, the old behaviour |
+| Do not cut along tears | off | a tear is empty, so in the nuclear stain it is the darkest and so the cheapest thing to cut along. On: holes in the tissue and stain under 35 % of the tissue level cost as much as plain tissue; the junction, dim but not empty, keeps its discount |
+| Follow the cells' edge | off | extra price for cutting where the labelled-cell density is at either organoid's own level, nothing where it is halfway: keeps the line from sliding towards one pole, or down a tear across which the cells do not change |
+| Cells: take away the local median over | on, 45 µm | the labelled channels' local median is taken away before their cells are counted into the density that says where each organoid is, so diffuse signal (autofluorescence, a fold, a thick patch) does not count as cells. **Show the filter** puts the channel, its median, what is left, and the density with and without the median on the canvas to compare before choosing |
+| Band on the organoid the cells migrate into | on | off puts it on the labelled organoid |
+| Keep only the part of the band on tissue | on | batch only |
+
+What it cannot do:
+
+- **Cracks and folds are dark lines too.** On a section with many, the junction
+  can be pulled onto one; turn line-following off for those, or correct by hand.
+- **A sparse label does not work.** mCherry in the 2025-09 slides sits along one
+  edge of its organoid; used as the label it split that organoid in two (median
+  275 µm from the GFP-based junction over 206 slides).
+- **It is a proposal.** The status below describes the *sample*, not how well
+  the line sits. Look at the pictures.
+
+#### Quality control
+
+Every sample gets a status — **ok**, **check** or **fail** — and the reasons:
+
+| Flag | Raised when | Status |
+|---|---|---|
+| no tissue found | nothing above the DAPI threshold | fail |
+| organoids not fused | a second piece ≥ 25 % the size of the first | fail |
+| no junction found | no dense core, or nothing to seed the other side | fail |
+| large holes or torn | holes > 10 % of the filled outline | check |
+| ragged outline | area < 75 % of its convex hull | check |
+| cut off by the scan edge | > 5 % of the outline lies on the edge of the scan | check |
+| saturated | > 1 % of the nuclear channel at the detector maximum | check |
+| no dark line at the junction | the nuclear stain under the cut is hardly darker than plain tissue (seam price > 0.4): with no seam to follow the cut takes the shortest way across, which is often not the junction | check |
+| labelled cells on both sides (junction uncertain) | cell density ratio across the junction < 1.8 | check |
+| junction very short | < 150 µm | check |
+| one organoid much smaller than the other | labelled side < 10 % or > 90 % of the tissue | check |
+| hardly any tissue in the band | < 0.02 mm² | check |
+| size / staining unlike the rest, out of focus | more than 3.5 robust SDs (median/MAD, log scale) from the folder; needs 8+ samples | check |
+
+A run writes `junction_QC/` into the experiment folder:
+
+- `junction_QC.xlsx` — one row per sample: status, flags, band side, and the
+  figures behind them (tissue area, pieces, hole share, solidity, focus,
+  junction length, band area, band tissue area, mean of each channel in the
+  band, labelled-cell density in the band, and the section's shape: perimeter,
+  long and short axis, the area of each half, four size-free shape numbers).
+- **Assembloid** — which sections come from the same assembloid. Sections are
+  named `<slide>_s<scene>`, the scanner numbering the pieces on a slide in
+  turn; one slide may carry one assembloid, two cut together (scenes
+  alternate, until the smaller runs out) or two one after the other, and an
+  assembloid may run on onto the next slide. Each section's outline and
+  labelled half are stored as a small picture, centred and turned onto its
+  long axis; serial sections overlap on it almost entirely (about 0.2 apart on
+  a 0–1 scale), two different assemblies do not (about 0.75). Within a slide
+  the scenes are given, in order, to one of two tracks so that each changes
+  least from one section to the next; a slide stays one track unless a second
+  clearly pays. Groups are `<slide>/A` and `/B`; a track that matches one at
+  the start of the next slide keeps its name there (**Continues from**, with
+  the **Link distance**): a block holds two assemblies, so at a slide boundary
+  a track is joined to the one it matches clearly better than the other
+  (by 0.1), up to 0.6 apart.
+  **Odd section** marks a section unlike its track (torn, folded) that was too
+  short a track on its own; **Pattern** is the slide's (one, alternating,
+  blocks, mixed); **Step** how unlike the section is to the previous one of its
+  assembloid. Use the assembloid, not the section, as the unit when sections
+  are compared between conditions — and check the grouping on the slide strips
+  (`run_junctions.py` writes one per slide) before relying on it.
+- `ok/`, `check/`, `fail/` — one folder per status, each holding the pictures of
+  the samples with that status: `<sample>.png`, the overview with the tissue
+  outline (white), the junction (yellow) and the band (magenta), captioned with
+  status and flags. A sample has one picture; a rerun replaces it and moves it
+  if its status changed. A file that could not be read gets a picture in `fail/`
+  saying why. **Find the junction automatically** on a single open sample files
+  its picture the same way.
+- `junction_QC_sheet_NN.png` — the same pictures, twenty to a page.
+
+`notebooks/explainers/junction_region.ipynb` walks through the method step by step on one
+section, with a figure for each step, calling the same functions a run does.
+
+#### What is stored, and what to do next
+
+Each band goes into the sample's store (inside an `.ims`; `<name>.argus.h5`
+beside a TIFF):
+
+- a label map, `fusion region`, with the line it was built from, the settings
+  and the status;
+- an outline named **Fusion band**, kept beside any outlines drawn by hand.
+
+Because the band is an ordinary stored outline, the rest of the pipeline uses
+it as it stands: **Segmentation ▸ Batch** with *Only inside the stored ROIs*
+counts cells in the band alone, and **Analysis** reports objects, density and
+intensities per region with *Fusion band* as one of the regions.
+
+Timing on a folder of 206 slide scans (1 GB each): about 2 s per sample.
+
+### Opening another sample clears the last one
+
+Opening a sample from **Experiment setup**, or the next one in **Junction
+review**, takes the previous sample off screen with everything that belongs to
+it: its channels, the label maps read out of it, and every layer a panel made
+for it — the fusion line and region, the counted junction cells, hand counts,
+cell-counter dots, segmentation and expanded labels, projections — and the QC
+picture. Each panel marks the layers it makes with the sample they were made
+from, which is how they are found. Unsaved hand counts are asked about first
+(save, discard or cancel), as unsaved brain regions are.
+
+Redrawing the junction (**Draw again**, **Clear** in the Fusion region panel)
+also removes the cells counted in the region that is going.
+
+### Manual positive count
+
+The **Manual positive count** panel (Panels menu) is for counting by hand the
+cells that are positive in each channel — instead of the automatic count, or to
+check it.
+
+1. Open the sample. The table lists its channels.
+2. Select a channel's row and switch **Count** on. Click every cell that is
+   positive in it: each click puts a dot. Shift-click takes a dot off, dragging
+   still pans, Ctrl+Z undoes. *Show only the channel being counted* hides the
+   other stains while you judge.
+3. Select the next channel and carry on. Every channel keeps its own dots, in
+   its own colour, on its own Labels layer named `<channel> positive manual`.
+
+The table shows each channel's count as it grows, and **In region**: the dots
+whose centre lies in the junction region — the *Fusion region* layer on screen,
+else the region stored with the sample. Without a region only totals are shown.
+
+- **Save into sample** stores every counter as a label map named
+  `<channel> positive manual`, beside the sample's other label maps (inside an
+  `.ims`; in `<name>.argus.h5` beside a TIFF). **Load saved** brings them back
+  to carry on. The Analysis panel reads one like any label map: type its name.
+- **Export the table…** writes channel, count, count in region, region area and
+  density as a workbook or CSV.
+
+A counter is one map over the whole stack: a dot shows on every plane, so a cell
+is not counted twice while scrolling through Z. Counting works in 2D view.
+
+### Junction review
+
+The **Junction review** panel is for going through a run's QC pictures and then
+drawing by hand the junctions that need it. It is two steps, in this order.
+
+**1. Review.** Pick whose pictures: *Junction* (`junction_QC/` — the whole
+section with the line and the band, which is what a line is judged on) or
+*Junction analysis* (`junction_analysis/QC/` — the counted region only).
+**Reload** reads the folder. The samples are listed worst first (`fail`,
+`check`, `ok`) and the selected one's picture is shown on the canvas, where it
+can be zoomed. Decide each:
+
+| Key | Button | Meaning |
+|---|---|---|
+| A | Accept | the junction is where it should be |
+| R | Redraw | the sample is good, the line is not — it joins the queue |
+| X | Exclude | do not use the sample; say why in the note |
+| U | Undo | back to undecided |
+| ← → | | previous / next |
+
+The keys work while the panel has the focus (click in the list). A decision is
+written at once to `review.csv` in the QC folder — sample, status, decision,
+note, date, file — and the next picture comes up; with *Show: To review* a
+decided sample leaves the list, so the list shrinking to nothing is the review
+done. It can be stopped anywhere and picked up later. A rerun that files a
+picture under another status keeps its decision.
+
+**2. Redraw.** **Open the next to redraw** opens the next queued sample in
+place of whatever is on screen, with the line tool in hand on its nuclear stain.
+Click along the junction, double-click to finish; the band appears. **Other
+side** moves the band across the line, **Draw again** starts the line over, and
+**Save and next** stores the band with the sample (as the Fusion region panel's
+*Save* does, with that panel's width, gap and name), marks it *redrawn* and
+opens the next. A region saved from the Fusion region panel itself is ticked
+off the same way. **Open this one** opens the selected sample whatever was
+decided about it.
+
+**Build the band from the drawn line** builds the band from the line you drew on
+the open sample (or opens the selected one first), with the Fusion region
+panel's band settings: width, gap, side, following the tissue. Nothing is
+searched for — the line is yours, as drawn or as edited since. With no line
+drawn yet it makes the line tool ready instead; a line still being drawn must be
+finished first (double-click its last point). Wrong side: **Other side**; then
+**Save and next**. To have a line proposed automatically, use the Fusion region
+panel's *Find the junction on this image*.
+
+**Count the redrawn samples** runs the Junction analysis panel, with its
+settings, on the samples redrawn here; their stored region is now the hand-drawn
+one. It writes a workbook of those samples only
+(`junction_counts_redrawn_<date>.xlsx`).
+
+A band drawn by hand is a strip beside the line — not clipped to the tissue
+outline as an automatic one is — and carries no QC status of its own.
+
+### Junction analysis
+
+Counts the cells in the junction region and says which channels each one is
+positive for. The **Junction analysis** panel sits with the right-hand tabs.
+
+1. Make the region in **Fusion region macro** (drawn or automatic). A *Fusion
+   region* layer on screen is used whether or not it was saved; otherwise the
+   stored region is read; otherwise, if *Find the junction when no region is
+   stored* is ticked, the junction is found on the spot.
+2. **Count in this sample**, or select samples in *Experiment setup* and **Run on
+   the selected samples** (nothing has to be open).
+
+What happens:
+
+- **Nuclei are segmented only inside the region's bounding box** (Cellpose on the
+  nuclear stain, with the Segmentation panel's model and diameter). A slide scan
+  is fifty megapixels and the band three; one sample takes seconds, not minutes.
+  A cell is in the region when its centroid is.
+- **Each cell is measured in every channel**, over its nucleus grown by
+  *Measure around nuclei* (3 µm; a watershed, so neighbours split the gap) — a
+  cytoplasmic label is not under the nucleus. Sizes stay the nucleus's own.
+- **Each channel gets a threshold**, per sample, and a cell above it is positive.
+  The nuclear stain is reported but not scored: every cell was found on it.
+
+| Positive when | Threshold | Use it when |
+|---|---|---|
+| Above the cells (default) | median + k × SD of the cells' own values | most cells in the region are negative — true of cells that had to migrate there; adapts to staining and shared autofluorescence |
+| Above the background | median + k × SD of the tissue between the cells | you want "is there signal at all"; blind to a haze every cell carries |
+| Otsu split of the cells | best split into two groups | there really are two groups |
+| Fixed value | a number you type | samples must be compared on one scale |
+
+SDs are robust (1.4826 × MAD), so the bright cells being looked for do not raise
+the bar on themselves. *k* defaults to 3. *Compare the cell's* picks which
+figure is tested: mean (default), median, P95 or max.
+
+**Threshold from** says which cells the median and SD (or the Otsu split) are
+taken from; the cells *counted* are those in the region either way.
+
+| Threshold from | What is segmented | Use when |
+|---|---|---|
+| The cells in the region (default) | the region only | most cells in the region are negative. Fast |
+| All cells of the sample | the whole section, both organoids | a large share of the region's cells is positive — they would raise their own bar and be undercounted. Minutes per slide scan instead of seconds |
+
+It has no effect on *Above the background* and *Fixed value*, which take nothing
+from the cells (and then only the region is segmented). The region is segmented
+and counted exactly as before; the rest of the section is segmented in tiles of
+2048 px, bare slide skipped, only to collect each cell's value. The background is the
+tissue between the cells of the region in both cases. *Threshold from* and
+*Cells behind the threshold* in the *Counts* sheet say what each threshold
+rests on.
+
+Per cell and per channel the workbook has: mean, median, SD, CV, P95, max,
+integrated intensity, SDs over background and fold over background, plus the
+nucleus area, diameter and position, and a *Positive for* column naming the
+channels (`AF555 + AF488`, `none`, …).
+
+Results appear three ways:
+
+- **Table in the panel** — per sample and channel: cells in region, positive,
+  %, positive per mm² of region, positive per mm of junction, threshold,
+  background, junction status.
+- **Layers** (single sample) — *Junction cells*: every counted cell as an
+  outline; *`<channel>`+ cells*: the positive cells outlined in red.
+- **Workbook** — sheets *Counts*, *Combinations* (how many cells are positive
+  for which set of channels), *Cells* (every cell, every figure) and *Settings*.
+  A batch writes it to `junction_analysis/` in the experiment folder; **Export…**
+  writes it anywhere. A sheet holds 1,048,575 rows; when there are more cells
+  than that (a few hundred slide scans), the *Cells* table is written whole to
+  `<workbook name>_cells.csv` beside the workbook and the *Cells* sheet says so.
+  Excel cannot open that many rows either — read it with pandas, R or Power
+  Query.
+- **QC pictures** — every run, a single count included, leaves a picture per
+  sample in `junction_analysis/QC/`, sorted into `ok/`, `check/` and `fail/`
+  (**QC…** opens the folder). The picture is the counted region: each stain in
+  its colour, the region outlined in white and its surroundings dimmed, a ring
+  round every positive cell in the colour its channel has in the caption, and
+  the counts. `fail` is a sample that could not be counted or whose junction
+  failed; `check` one whose junction was flagged or whose region holds no cell;
+  a region drawn by hand has no status of its own and counts as `ok`. The same
+  word is the *QC* column of the *Counts* sheet.
+
+**When the GPU faults.** A CUDA error such as *an illegal memory access was
+encountered* is not a failure of one sample: the card stops answering this
+process for good, and every later sample would fail in seconds with *could not
+load the model*. The run therefore stops at the fault, says how many samples
+were not attempted, and writes what it has. Close the viewer, start it again and
+run the missing samples. The usual cause is the card running out of memory while
+another program (a second viewer, a script) is segmenting on it too — run one
+thing on the GPU at a time. Running out of memory on its own is an ordinary
+failure of that sample and the run goes on.
+
+A batch keeps each sample's tables and not its label maps (they are tens of
+gigabytes over a few hundred slide scans); the cells are drawn for a single
+count only.
+
+*Store the counted cells with the sample* keeps them as the label map
+`junction cells`, with each channel's threshold and positive cells.
+
+Thresholds are per sample unless *Fixed value* is used, so a percentage from one
+sample and one from another were not cut at the same intensity. That is the
+right default for uneven staining and the wrong one for comparing absolute
+brightness — the threshold is in the table for exactly that reason.
 
 ### Guided tour
 
@@ -994,6 +1480,42 @@ Wheel to zoom, drag to pan; hover a box for the file, click it to select that
 sample in the grid, double-click to open it. **Save image…** writes the picture
 with the boxes and names as a PNG for a slide. The **Overview** button under the
 grid opens it again.
+
+**Picking samples off a table.** **Pick from table…** under the grid opens a
+window that chooses samples from a prescreen or QC table — a CSV or Excel file
+with a row per sample, such as `oasis_prescreen.csv`. Rows are matched to the
+files of the experiment folder by the `file` column (or any column of file names
+or stems) as soon as the table loads — against the folder listing, not the scan,
+so nothing waits for a thousand thumbnails. Full paths in a `file` / `path`
+column are used as they are. Rows with no file are counted and left out. The
+picks' thumbnails are drawn by the window itself (up to 60) or taken from the
+scan, whichever comes first; opening a pick and selecting the picks work before
+the scan reaches them (selected tiles light up as it does). Every column that sorts
+samples into a few groups (*Pass*, *Ripped*, *Folded*, *Shape*, *Quality*,
+*cluster* …) is listed with its values, each with two ticks:
+
+- **Keep** — samples with this value may be picked. Untick *Pass: no* and
+  *Pass: review* to pick from passing samples only — or right-click *Pass: yes*
+  ▸ **Keep only Pass: yes** (and ▸ **Keep every Pass** to tick them all again).
+  Within a column the ticked values are any of; across columns, all of. *Kept*
+  shows how many samples with that value the other columns leave.
+- **Draw** — this group gets its own *n* random picks (10 by default), none
+  picked twice: ticking *Ripped: yes/no* and *Folded: yes/no* gives 40 samples.
+  A group with fewer kept samples than *n* gives what it has, and the summary
+  says so. Tick **A pick counts for every group it is in** to let overlapping
+  groups share: a ripped, folded sample then fills both groups, and fewer
+  samples cover every group at least *n* times. Set *n* to **all** (below 1) to
+  take every kept sample of each ticked group instead of a draw — e.g. all the
+  passing samples of each genotype. With nothing ticked to draw, every kept
+  sample is picked.
+
+The picks show as thumbnails with the groups they stand for. **Select in
+Experiment setup** selects them in the grid, so batches and panels run on
+them; **Open next** opens the next one not opened yet in place of the sample
+on screen (double-click opens any), for annotating one after the other; **Save
+list…** writes them with the groups and the full table row. The draw is
+seeded: the same table, ticks and seed give the same picks, the seed is saved
+with the list, and **New draw** moves to the next seed.
 
 **ROIs and label maps go inside the `.ims` file.** Both are written into one
 top-level group, `/ARGUS`, beside Imaris's own `/DataSet` and `/DataSetInfo`.
@@ -1548,6 +2070,7 @@ microscopy_viewer/
   intensity.py              ROI statistics, AUC / overlap; no Qt, runs off-thread
   registration.py           atlas registration and the per-region readout; no Qt
   segmentation.py           Cellpose segmentation, the GPU device, per-object stats; no Qt
+  cellpose_training.py      training sets of corrected crops, fine-tuning Cellpose on them; no Qt
   exports.py                snapshots and the Excel workbook
   slides.py                 channel/merge rendering and the PowerPoint slide; no Qt
   contrast.py               auto / reset contrast
@@ -1558,6 +2081,13 @@ microscopy_viewer/
   movie.py                  canvas frames -> .mov / .mp4 / .gif; no Qt
   acquisition.py            the acquisition movie: a z-stack's MIP building up; no Qt
   cell_counter.py           manual cell counts as a label map; no Qt
+  fusion.py                 junction line -> spline -> band -> label map; no Qt
+  junction.py               automatic junction (a seed per organoid, DAPI line, min cut) and QC; no Qt
+  junction_analysis.py      cells in the junction region, per-channel positivity, workbook; no Qt
+  junction_review.py        decisions on the QC pictures, the queue of junctions to redraw; no Qt
+  assembloids.py            which sections are from the same assembloid (scene order + shape); no Qt
+  positive_counter.py       hand counts of positive cells per channel, counts in the region; no Qt
+  loader.py                 the loading animation, drawn in code
   grouping.py               group columns from file / folder names, unique sample names; no Qt
   dragdrop.py               application-wide drop handling
   widgets/
@@ -1623,13 +2153,21 @@ python tests/test_slides.py         # channel/merge rendering and the .pptx tabl
 python tests/test_overview.py       # overview detection, stitching, the locator slide — no Qt needed
 python tests/test_registration.py   # atlas registration engine — no Qt; ANTs checks skip without antspyx
 python tests/test_segmentation.py   # segmentation engine, units, object table — no Qt; cellpose is never run
+python tests/test_cellpose_training.py  # crops, the training set, a run with a stand-in trainer — no Qt, no cellpose
 python tests/test_busy.py           # the freeze watchdog and its animation process — no display needed
 python tests/test_projection.py     # batch MIP, and the TIFF / Imaris writers — no Qt needed
 python tests/test_regions.py        # region geometry and per-region counting — no Qt needed
 python tests/test_experiment.py     # folder scans, the in-file store, batch runs — no Qt needed
 python tests/test_naming.py         # reading the genotype out of a file name — no Qt needed
 python tests/test_onboarding.py     # the tour's script and its seen/not-seen memory — no Qt needed
+python tests/test_session.py        # the saved session file — no Qt needed
 python tests/test_analysis.py       # region morphometrics, channel statistics, the report folder — no Qt needed
+python tests/test_fusion.py         # junction line, spline, band geometry — no Qt needed
+python tests/test_junction.py       # automatic junction, the DAPI line, QC flags, a folder run — no Qt needed
+python tests/test_junction_analysis.py  # per-cell statistics, threshold rules, counting in the region — no Qt, no cellpose
+python tests/test_junction_review.py    # review decisions kept beside the QC pictures, the redraw queue — no Qt
+python tests/test_assembloids.py        # sections grouped by assembloid: cuts, torn sections, running on — no Qt
+python tests/test_positive_counter.py   # hand counts per channel, dots in the region, the table — no Qt
 python tests/smoke_gui.py           # builds the real viewer: docks, ROIs, snapshots, exports
 ```
 

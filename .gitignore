@@ -27,3 +27,9 @@ Thumbs.db
 
 # Stray duplicate of assets/microscopy_viewer.ico, left in the loaders package
 microscopy_viewer/loaders/favicon*.ico
+
+# Explainer build caches (rebuilt by notebooks/explainers/build_explainer.py)
+notebooks/explainers/_build/cache/
+notebooks/explainers/_build/cell_tables/
+notebooks/explainers/_build/*.json
+notebooks/explainers/_build/preview.html
