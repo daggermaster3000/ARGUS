@@ -1,0 +1,54 @@
+# Notebooks
+
+Two kinds, in two folders.
+
+## `explainers/` — how the method works
+
+Step-by-step walk-throughs on two real sections drawn by hand, from one slide: one
+where the finder worked (034-033_s13, 15 µm from the hand-drawn line) and one where
+it failed (034-033_s17, 341 µm off, status ok). They change when the method changes,
+not when new data arrives.
+
+| Notebook | What it explains |
+|---|---|
+| `junction_region.ipynb` | The automatic junction region, step by step, on the section that worked and the one that failed. |
+| `junction_pixels.ipynb` | The same, pixel by pixel, with an animation from the seeds to the line, and where the failed section goes wrong. |
+| **`pipeline_explainer.html`** | **The whole pipeline as an interactive web page** — pre-screen, junction, cells, positivity, crossing, counting — with live figures on the two real sections (a *Sample* switch on each; `?sample=failed` in the address opens on the failed one), galleries of good and bad organoids and of failure modes. Each section has a collapsible **Minimal code** block (from `explainer_code.py`; `python notebooks/explainers/explainer_code_check.py` checks the junction steps give the package's result on the worked section). Open it in a browser; works offline. Rebuild with `python notebooks/explainers/build_explainer.py` (page in `explainer_template.html`, data computed with the package). |
+
+## `validation/` — how well it works on the annotated data
+
+Each ends with a dated **What it showed**. Data and caches live in
+`D:\Slidescanner extracted\junction_eval\`.
+
+| Notebook | Question |
+|---|---|
+| `junction_evaluation.ipynb` | The junction finder against the hand-drawn lines: line distance, Dice, tuning, triage, two annotators. |
+| `counts_in_band.ipynb` | Positive cells in the junction band, per sample and per genotype. |
+| `counts_crossed.ipynb` | Positive cells that passed the line into the other organoid: how many, how far, along the surface or not. |
+| `positivity_metrics.ipynb` | Which rule should call a cell positive: thresholds from the band, a negative control, local contrast, two-population models; judged without and with the hand clicks. |
+| `band_choice.ipynb` | How much the counts depend on which band is used: first annotator, second, or the finder's. |
+| `manual_vs_auto.ipynb` | Quillan's hand counts against the automatic counts, on the samples he counted. |
+
+Scripts beside them, run from the repository root:
+
+| Script | Does |
+|---|---|
+| `count_cells.py` | Segments each annotated sample once and measures every cell every way the notebooks compare (GPU, ~2 min a sample) → `junction_eval/cells/`. |
+| `count_common.py` | What the count notebooks share: loading cells with their geometry (cached in `junction_eval/cell_tables/`), the bands, the clicks, the positivity rules, the statistics. |
+| `junction_tuning.py` | Overview cache, scoring and Bayesian search for the junction finder; also the list of excluded samples and the second annotator's key. |
+| `junction_walk.py` | The random-walker variants for `junction_evaluation`. |
+| `junction_downstream.py` | Junction analysis counts in each annotator's band and the finder's. |
+
+## `dataset/` — the whole dataset
+
+| File | What |
+|---|---|
+| `run_dataset.py` | The pipeline over every passing sample of the pre-screen table: junction (stored in the sample, QC picture), cells near the line, positivity under the validated rules, counts in the band and past the line, a picture per sample. Resumes where it stopped. Output: `D:\Slidescanner extracted\dataset_analysis_20261021\`. |
+| `whole_dataset.ipynb` | The analysis of that run: QC, genotype comparison (samples, slides, mixed model), robustness, where the cells are, band choice. |
+| `positivity_dataset.ipynb` | The positivity rules recomputed on that run's cells: median + k SD with the reference pooled per section, slide, experiment or dataset, ring contrast, negative control; how many cells each calls, how they agree, and the genotype result under each. |
+
+Notebooks are executed in the conda env that has Jupyter:
+
+```powershell
+C:/Users/qfavey/.conda/envs/napari-env-q/python.exe -m jupyter nbconvert --execute --inplace <notebook>
+```
