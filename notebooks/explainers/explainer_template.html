@@ -2297,7 +2297,7 @@ function secGlossary(){
     ['Price (cost)','What it costs to cut through a pixel, from 0 (free) to 1 (plain tissue). Low on the dark, cell-poor line between organoids.'],
     ['Minimum cut','The cheapest set of joins between pixels whose removal separates the two seeds.'],
     ['Maximum flow','How the minimum cut is computed: water is pushed from one seed to the other through pipes as wide as the price, until no route has room left. The full pipes between the two sides are the cut.'],
-    ['Seam price','The mean price under the finished cut. Above 0.4 means there was no dark line to follow, and the line is flagged "no dark line at the junction".'],
+    ['Seam price','The mean price under the finished cut. Above 0.4 means there was no dark line to follow: the line is flagged "no dark line at the junction" and found a second time, with each seed grown to all the tissue where its own label clearly leads.'],
     ['Bending price','An extra price for every turn of the junction, bend × (turn ÷ 90°)²; stops the line from turning corners to follow a tear.'],
     ['Dynamic programming','Finding the cheapest of a huge number of curves without trying them one by one: column after column, only the cheapest way to reach each square in each direction is kept.'],
     ['Junction line','The smoothed boundary between the two halves, in µm; the same kind of line a person draws by hand.'],

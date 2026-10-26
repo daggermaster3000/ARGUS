@@ -23,6 +23,7 @@ Each ends with a dated **What it showed**. Data and caches live in
 | Notebook | Question |
 |---|---|
 | `junction_evaluation.ipynb` | The junction finder against the hand-drawn lines: line distance, Dice, tuning, triage, two annotators. |
+| `junction_seeding.ipynb` | Seeds and other settings of the junction finder on all 138 hand-drawn sections (tuning and held-out): which change helps, on which kind of section. |
 | `counts_in_band.ipynb` | Positive cells in the junction band, per sample and per genotype. |
 | `counts_crossed.ipynb` | Positive cells that passed the line into the other organoid: how many, how far, along the surface or not. |
 | `positivity_metrics.ipynb` | Which rule should call a cell positive: thresholds from the band, a negative control, local contrast, two-population models; judged without and with the hand clicks. |
@@ -37,6 +38,7 @@ Scripts beside them, run from the repository root:
 | `count_common.py` | What the count notebooks share: loading cells with their geometry (cached in `junction_eval/cell_tables/`), the bands, the clicks, the positivity rules, the statistics. |
 | `junction_tuning.py` | Overview cache, scoring and Bayesian search for the junction finder; also the list of excluded samples and the second annotator's key. |
 | `junction_walk.py` | The random-walker variants for `junction_evaluation`. |
+| `junction_seeding.py` | Finds every section with a hand-drawn junction, splits them, runs every variant → `junction_eval/seeding.jsonl`, seed diagnostics; with variant names, reruns only those. |
 | `junction_downstream.py` | Junction analysis counts in each annotator's band and the finder's. |
 
 ## `dataset/` — the whole dataset

@@ -11,6 +11,7 @@
 4. Seed diagnostics per section with the defaults -> ``junction_eval/seeding_diagnostics.csv``.
 
     python notebooks/validation/junction_seeding.py
+    python notebooks/validation/junction_seeding.py "bend 400" ...   # run only these variants again
 """
 from __future__ import annotations
 
@@ -55,7 +56,16 @@ VARIANTS = {
     "tissue from the nuclear stain only": {"tissue_all_channels": False},
     "all patches + tears priced": {"seed_rule": "patches", "tear_price": 1.0},
     "all patches + bend 2000": {"seed_rule": "patches", "bend_um": 2000.0},
+    # Follow-up (26 Oct): the no-seam fallback, tuned around what the first run showed.
+    "no-seam fallback, lead 0.35": {"no_seam_price": 0.4, "no_seam_edge": 0.5, "SEED_LEAD": 0.35},
+    "no-seam fallback, no cells' edge": {"no_seam_price": 0.4, "no_seam_edge": 0.0},
+    "no-seam fallback from price 0.3": {"no_seam_price": 0.3, "no_seam_edge": 0.5},
+    "no-seam fallback + bend 400": {"no_seam_price": 0.4, "no_seam_edge": 0.5, "bend_um": 400.0},
+    "no-seam fallback, lead 0.35, no edge": {"no_seam_price": 0.4, "no_seam_edge": 0.0, "SEED_LEAD": 0.35},
 }
+#: Under every variant: the defaults as they were when this sweep was run (26 Oct 2026),
+#: before the no-seam fallback was turned on, so "default" stays the same run.
+BASE = {"no_seam_price": 0.0}
 #: Module constants a variant may set (the worker sets them before the run).
 CONSTANTS = {"SEED_LEAD"}
 
@@ -105,7 +115,7 @@ def run_one(task):
         for k in CONSTANTS & set(params):
             setattr(jn, k, params[k])
         options = {k: v for k, v in params.items() if k not in CONSTANTS}
-        row = jt.run_case((name, {**jt.defaults(), **options}))
+        row = jt.run_case((name, {**jt.defaults(), **BASE, **options}))
     except Exception as exc:
         row = {"name": name, "found": False, "error": f"{type(exc).__name__}: {exc}"}
     finally:
@@ -146,7 +156,25 @@ def diagnose(name):
     return out
 
 
+def rerun(variants: list[str]) -> None:
+    """Run only *variants* again and replace their rows in the results (diagnostics kept)."""
+    table = pd.read_csv(SAMPLES)
+    tasks = [(n, v, VARIANTS[v]) for v in variants for n in table["name"]]
+    with ProcessPoolExecutor(12) as pool:
+        rows = list(pool.map(run_one, tasks, chunksize=4))
+    meta = table.set_index("name")[["set", "batch", "Ripped", "Folded", "Quality", "Shape"]]
+    kept = [json.loads(line) for line in RESULTS.read_text(encoding="utf-8").splitlines()]
+    kept = [r for r in kept if r["variant"] not in variants]
+    with RESULTS.open("w", encoding="utf-8") as f:
+        for r in kept + [{**r, **meta.loc[r["name"]].to_dict()} for r in rows]:
+            f.write(json.dumps(r, default=str) + "\n")
+    print("replaced", variants, "in", RESULTS)
+
+
 def main() -> None:
+    if sys.argv[1:]:  # variant names: run only those again
+        rerun(sys.argv[1:])
+        return
     table = annotated_sections()
     print(f"{len(table)} sections with a hand-drawn junction ({(table['batch'] == 'new').sum()} new); "
           f"held out: {(table['set'] == 'held out').sum()}", flush=True)
