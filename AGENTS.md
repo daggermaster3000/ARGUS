@@ -127,11 +127,17 @@ Visual plausibility is not enough; measure against hand annotations.
 - Always report a **held-out** split (stratified by Ripped / Folded / Quality).
   Tuning on 31 samples overfits easily (BO: 73→64 µm on tuning, 158→163 held out).
   Change a default only if held-out improves.
-- Current baseline (bend 1000, tissue from every channel since 22 Oct): median 29 µm, HD95 76 µm;
-  capped mean 49 µm tuning / 116 µm held out (`junction_tissue.py`, `tissue.jsonl`).
-- No seam: the cut's "Seam price" > 0.4 flags *no dark line at the junction* (5 of 6 such lines
-  > 75 µm off). Dominant seeds and the no-seam fallback (`seed_rule`, `no_seam_price`) were a wash
-  on the 30 samples (`junction_seam.py`) and stay off; more hand-drawn no-seam sections are needed.
+- Since 26 Oct the evaluation set is **138 hand-drawn sections** (`junction_seeding.py` finds them;
+  `junction_eval/annotated_all.csv`, 45 held out; the first 30 keep their old split). The new
+  108 are much harder (many without a dark line): capped mean 175 µm against 67 on the first 30.
+- Current baseline (bend 1000, tissue from every channel, no-seam fallback on since 26 Oct):
+  capped mean 130 µm tuning / 159 µm held out on the 138; 66 µm on the first 30
+  (`junction_seeding.ipynb`, `seeding.jsonl`).
+- No seam: the cut's "Seam price" > 0.4 flags *no dark line at the junction* and the junction is
+  found again from dominant seeds (`no_seam_price`, default `NO_SEAM_PRICE`). Seam price is the
+  best single predictor of a bad line (Spearman 0.40). Dominant seeds everywhere help seamless
+  sections but break seamed ones (first 30: 67 → 88 µm); seeding from every AF488 patch is worse
+  (+25 µm). "default" in `seeding.jsonl` is the fallback off (`junction_seeding.BASE`).
   Triage: draw by hand when status is fail or Shape is Damaged (7/8 failures, no
   good line sent); the "check" status is not useful for triage. On kept samples
   % positive agrees within ~±2 pp, no bias.

@@ -226,8 +226,10 @@ class JunctionOptions:
     seed_rule: str = SEED_RULE
     #: Above this cut price there is no dark line to follow, and the junction
     #: is found again from dominant seeds with ``no_seam_edge`` as the cells'
-    #: edge weight (see :data:`NO_SEAM_PRICE`); 0 leaves the first cut.
-    no_seam_price: float = 0.0
+    #: edge weight (see :data:`NO_SEAM_PRICE`); 0 leaves the first cut. On since
+    #: 26 Oct 2026: 172 -> 159 um held out on 138 hand-drawn sections, no change
+    #: where there is a dark line (``junction_seeding.ipynb``).
+    no_seam_price: float = NO_SEAM_PRICE
     no_seam_edge: float = 0.5
     #: Find the tissue in every channel, not only the nuclear stain.
     tissue_all_channels: bool = TISSUE_ALL_CHANNELS
@@ -844,7 +846,7 @@ def find_seeds(
 
 def dominant_seeds(
     filled: np.ndarray, density: np.ndarray, other_density: np.ndarray | None = None,
-    lead: float = SEED_LEAD,
+    lead: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, str] | None:
     """One seed in each organoid, as large as the labels allow: ``(labelled, other, how)``.
 
@@ -857,7 +859,9 @@ def dominant_seeds(
     other organoid, its seed is where the labelled cells are scarce.
 
     ``None`` when either seed is not a real patch (:data:`SEED_MIN_SHARE`).
+    *lead* defaults to :data:`SEED_LEAD`, read at call time.
     """
+    lead = SEED_LEAD if lead is None else lead
     normal = _normalised(density, filled)
     if normal is None:
         return None

@@ -1171,7 +1171,7 @@ Every sample gets a status — **ok**, **check** or **fail** — and the reasons
 | ragged outline | area < 75 % of its convex hull | check |
 | cut off by the scan edge | > 5 % of the outline lies on the edge of the scan | check |
 | saturated | > 1 % of the nuclear channel at the detector maximum | check |
-| no dark line at the junction | the nuclear stain under the cut is hardly darker than plain tissue (seam price > 0.4): with no seam to follow the cut takes the shortest way across, which is often not the junction | check |
+| no dark line at the junction | the nuclear stain under the cut is hardly darker than plain tissue (seam price > 0.4): with no seam to follow the cut takes the shortest way across, which is often not the junction. The junction is then found a second time from the labels: each seed becomes all the tissue where its own label clearly leads the other's, so the cut is left only the mixed strip between them (*No-seam fallback* = 1 in the QC table). On 138 hand-drawn sections this brought the held-out error from 172 to 159 µm without changing sections that have a dark line | check |
 | labelled cells on both sides (junction uncertain) | cell density ratio across the junction < 1.8 | check |
 | junction very short | < 150 µm | check |
 | one organoid much smaller than the other | labelled side < 10 % or > 90 % of the tissue | check |

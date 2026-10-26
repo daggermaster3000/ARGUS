@@ -215,6 +215,13 @@ def test_with_no_seam_the_seeds_can_come_from_the_labels() -> None:
               "the labelled one left of the junction, the other right of it")
         core_hot, core_cold, _ = jn.find_seeds(filled, density)
         check(hot.sum() > core_hot.sum() and cold.sum() > core_cold.sum(), "each larger than the dense core")
+        saved = jn.SEED_LEAD
+        jn.SEED_LEAD = 0.6
+        try:
+            narrower = jn.dominant_seeds(filled, density)
+        finally:
+            jn.SEED_LEAD = saved
+        check(narrower is None or narrower[0].sum() < hot.sum(), "the lead is read when called, not when defined")
     _overview, again = jn.analyse_specs(specs, jn.JunctionOptions(no_seam_price=0.01))
     check(again.metrics.get("No-seam fallback") == 1.0, "a cut dearer than the no-seam price is made again")
     if again.line_um is not None:
