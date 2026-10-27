@@ -545,8 +545,53 @@ def test_progress_and_the_time_left() -> None:
           and ja.duration(float("nan")) == "?", "durations read as a person would say them")
 
 
+def test_ring_contrast() -> None:
+    print("ring contrast: each cell over its own surroundings")
+    labels = np.zeros((60, 120), np.int32)
+    labels[18:23, 18:23] = 1      # bright, in dark tissue
+    labels[18:23, 78:83] = 2      # as bright, but in a bright haze
+    labels[40:45, 18:23] = 3      # dim, in dark tissue
+    green = np.full(labels.shape, 100.0)
+    green[:, 60:] = 900.0         # the haze on the right
+    green[labels == 1] = 1000.0
+    green[labels == 2] = 1000.0
+    green[labels == 3] = 120.0
+    images = {"AF488": green, "AF405": np.where(labels > 0, 1000.0, 100.0)}
+    band = np.ones(labels.shape, bool)
+    options = ja.CountOptions(method=ja.METHOD_RING, expand_um=0.0)
+    table, counts = ja.measure_cells(labels, labels, images, (1.0, 1.0), band, options, nuclear="AF405")
+    rows = table.set_index("Label")
+    check(abs(rows.loc[1, "AF488 ring contrast"] - 10.0) < 0.5 and abs(rows.loc[2, "AF488 ring contrast"] - 1000 / 900) < 0.1,
+          f"a cell in dark tissue stands out, the same cell in a haze does not "
+          f"({rows.loc[1, 'AF488 ring contrast']:.1f}, {rows.loc[2, 'AF488 ring contrast']:.2f})")
+    check(sorted(table.loc[table["AF488 positive"], "Label"]) == [1],
+          "so ring contrast ≥ 1.5 calls only the one that stands out")
+    green_count = next(c for c in counts if c.channel == "AF488")
+    check(green_count.method == ja.METHOD_RING and green_count.threshold == ja.RING_RATIO,
+          "the threshold is the contrast asked for")
+    check(ja.counts_dataframe([ja.JunctionCounts(path=Path("x"), name="x", channels=counts, n_cells=3)])
+          .set_index("Channel").loc["AF488", "Compared"] == "ring contrast", "and the table says what was compared")
+    check(not rows[ja.NO_RING_COLUMN].any(), "every cell here has a ring")
+
+    # Packed: no free pixel round the cell; the tissue between the cells stands in.
+    packed = np.zeros((40, 40), np.int32)
+    packed[10:30, 10:30] = 2
+    packed[18:23, 18:23] = 1
+    ring = ja.ring_labels(packed, (1.0, 1.0))
+    check(not np.any(ring == 1), "a packed cell has no ring")
+    ys = np.array([0.0, 10.0, 0.0, 10.0, 5.0, 500.0])
+    xs = np.array([0.0, 0.0, 10.0, 10.0, 5.0, 500.0])
+    rings = np.array([200.0, 200.0, 220.0, 180.0, np.nan, np.nan])
+    background = ja.ring_background(ys, xs, rings)
+    check(abs(background[4] - 200.0) < 1e-9, "and is measured over its neighbours' rings instead")
+    check(np.isnan(background[5]), "unless none is near, and then it is not called")
+    contrast = ja.ring_contrast(np.array([1000.0, 1000.0]), background[4:])
+    check(abs(contrast[0] - 5.0) < 1e-9 and np.isnan(contrast[1]), "contrast over that background")
+
+
 def main() -> int:
     for test in (
+        test_ring_contrast,
         test_progress_and_the_time_left,
         test_statistics_per_label,
         test_thresholds,

@@ -45,7 +45,25 @@ METHOD_CELLS = "Above the cells: median + k × SD"
 METHOD_BACKGROUND = "Above the background: median + k × SD"
 METHOD_OTSU = "Otsu split of the cells"
 METHOD_FIXED = "Fixed value"
-METHODS = (METHOD_CELLS, METHOD_BACKGROUND, METHOD_OTSU, METHOD_FIXED)
+METHOD_RING = "Ring contrast: cell ÷ its 3–6 µm ring"
+METHODS = (METHOD_CELLS, METHOD_BACKGROUND, METHOD_OTSU, METHOD_FIXED, METHOD_RING)
+
+#: The ring a cell's local background is read over: from this far out from the
+#: nucleus to that far, in µm — beyond the region the cell is measured over, and
+#: never into a neighbour (the same seeded growth). As in the validation's
+#: ``count_cells.RING_UM``.
+RING_UM = (3.0, 6.0)
+#: Ring contrast a cell needs, with :data:`METHOD_RING`: its mean over its
+#: ring's. 1.5 was the validation's (``positivity_metrics``, 21 Oct): 0.07 %
+#: false positives deep in the other organoid, held out by position.
+RING_RATIO = 1.5
+#: Per-cell column: no pixel of the ring was free of other cells, so the
+#: contrast is over the rings of the nearest cells that have one instead.
+NO_RING_COLUMN = "No ring"
+#: For a cell with no ring: how many of the nearest cells with one stand in,
+#: and how far they may be, in µm.
+RING_NEIGHBOURS = 8
+RING_NEIGHBOUR_UM = 50.0
 
 #: Which cells a threshold is derived from, for the rules that derive it from
 #: cells (:data:`CELL_RULES`). The cells *counted* are those in the region
@@ -132,6 +150,8 @@ class CountOptions:
     method: str = METHOD_CELLS
     #: Standard deviations above the centre, for the two "median + k × SD" rules.
     k: float = 3.0
+    #: With :data:`METHOD_RING`: the contrast a cell needs, cell ÷ its ring.
+    ring_ratio: float = RING_RATIO
     statistic: str = "mean"
     #: The cells the threshold is derived from: those in the region, or every
     #: cell of the sample — which means segmenting the whole section.
@@ -374,6 +394,72 @@ def label_stats(labels: np.ndarray, image: np.ndarray, ids: Sequence[int]) -> di
     return out
 
 
+def ring_labels(nuclei: np.ndarray, voxel_yx: Sequence[float], regions: np.ndarray | None = None,
+                expand_um: float = 0.0) -> np.ndarray:
+    """Each nucleus's ring, :data:`RING_UM` out, under the nucleus's label.
+
+    Grown as the measuring regions are, so a ring never takes a neighbour's
+    pixels; a nucleus packed in among others can have no ring at all.
+    *regions* grown by *expand_um* are reused when that is the ring's inside.
+    """
+    from . import segmentation as sg
+
+    inner = (regions if regions is not None and abs(expand_um - RING_UM[0]) < 1e-9
+             else sg.expand_labels(nuclei, voxel_yx, RING_UM[0]))
+    outer = sg.expand_labels(nuclei, voxel_yx, RING_UM[1])
+    return np.where(inner == 0, outer, 0)
+
+
+def ring_background(ys_um: np.ndarray, xs_um: np.ndarray, ring_mean: np.ndarray) -> np.ndarray:
+    """Each cell's local background: its ring's mean, or, with no ring, the median ring of its neighbours.
+
+    A cell packed in among others has no ring of its own; the
+    :data:`RING_NEIGHBOURS` nearest cells that have one, within
+    :data:`RING_NEIGHBOUR_UM`, stand in — the same kind of measurement, from
+    the same neighbourhood. With none that near, NaN: the cell is not called.
+    """
+    ring = np.asarray(ring_mean, dtype=np.float64)
+    have = np.isfinite(ring) & (ring > 0)
+    background = np.where(have, ring, np.nan)
+    missing = np.flatnonzero(~have)
+    if not missing.size or not have.any():
+        return background
+    from scipy.spatial import cKDTree
+
+    points = np.column_stack([np.asarray(ys_um, float), np.asarray(xs_um, float)])
+    tree = cKDTree(points[have])
+    k = min(RING_NEIGHBOURS, int(have.sum()))
+    distance, index = tree.query(points[missing], k=k, distance_upper_bound=RING_NEIGHBOUR_UM)
+    distance, index = distance.reshape(len(missing), k), index.reshape(len(missing), k)
+    values = np.where(np.isfinite(distance), ring[have][np.minimum(index, int(have.sum()) - 1)], np.nan)
+    with np.errstate(all="ignore"):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            background[missing] = np.nanmedian(values, axis=1)
+    return background
+
+
+def ring_contrast(cell_mean: np.ndarray, background: np.ndarray) -> np.ndarray:
+    """Cell over its local background (:func:`ring_background`); NaN where there is none."""
+    cell = np.asarray(cell_mean, dtype=np.float64)
+    background = np.asarray(background, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return cell / np.where(np.isfinite(background) & (background > 0), background, np.nan)
+
+
+def add_ring_contrast(table, names: Sequence[str]) -> None:
+    """Add ``<channel> ring contrast`` for every channel of *table* that has its ``ring mean``."""
+    ys = table["Centroid Y (µm)"].to_numpy(dtype=float)
+    xs = table["Centroid X (µm)"].to_numpy(dtype=float)
+    for name in names:
+        if f"{name} ring mean" not in table:
+            continue
+        background = ring_background(ys, xs, table[f"{name} ring mean"].to_numpy(dtype=float))
+        table[f"{name} ring contrast"] = ring_contrast(table[f"{name} mean"].to_numpy(dtype=float), background)
+
+
 def robust_centre_and_spread(values: np.ndarray) -> tuple[float, float]:
     """Median, and the standard deviation the MAD stands for.
 
@@ -411,6 +497,9 @@ def threshold_for(
     values = np.asarray(cell_values, dtype=np.float64)
     values = values[np.isfinite(values)]
     method = options.method
+    if method == METHOD_RING:
+        # In contrast units, not intensity: see :func:`positive_of`.
+        return float(options.ring_ratio), METHOD_RING
     if method == METHOD_FIXED:
         if channel in options.fixed:
             return float(options.fixed[channel]), METHOD_FIXED
@@ -428,6 +517,15 @@ def threshold_for(
         method = METHOD_CELLS
     centre, spread = robust_centre_and_spread(values)
     return float(centre + options.k * spread), METHOD_CELLS
+
+
+def positive_of(table, channel: str, count: "ChannelCount", statistic: str) -> np.ndarray:
+    """Which rows of *table* are positive for *channel* under *count*'s rule and threshold."""
+    if count.method == METHOD_RING:
+        values = table[f"{channel} ring contrast"].to_numpy(dtype=np.float64)
+        return np.isfinite(values) & (values >= count.threshold)
+    values = table[f"{channel} {statistic}"].to_numpy(dtype=np.float64)
+    return np.isfinite(values) & (values > count.threshold)
 
 
 def measure_cells(
@@ -489,6 +587,9 @@ def measure_cells(
     between = band & (np.asarray(regions) == 0)
     if int(between.sum()) < 200:  # a band packed solid with cells
         between = band
+    rings = ring_labels(nuclei, voxel, regions, options.expand_um) if ids.size else np.zeros_like(nuclei)
+    ring_size = np.asarray(ndimage.sum(rings > 0, rings, ids)) if ids.size else np.zeros(0)
+    table[NO_RING_COLUMN] = ring_size == 0
     counts: list[ChannelCount] = []
     positive_names: list[list[str]] = [[] for _ in range(len(ids))]
     for channel, image in images.items():
@@ -508,8 +609,9 @@ def measure_cells(
         scale = spread if spread and np.isfinite(spread) and spread > 0 else np.nan
         table[f"{channel} SDs over background"] = (stats["mean"] - centre) / scale
         table[f"{channel} fold over background"] = stats["mean"] / centre if centre else np.nan
+        table[f"{channel} ring mean"] = label_stats(rings, image, ids)["mean"] if ids.size else np.zeros(0)
+        add_ring_contrast(table, [channel])
 
-        values = stats[options.statistic]
         count = ChannelCount(channel=channel, n_cells=int(len(ids)), statistic=options.statistic,
                              background=centre, background_sd=spread, reference=channel == nuclear)
         count.cells_median, count.cells_sd = robust_centre_and_spread(population)
@@ -521,7 +623,7 @@ def measure_cells(
             count.method = "reference stain — not scored"
         else:
             count.threshold, count.method = threshold_for(channel, population, (centre, spread), options)
-            positive = np.asarray(values > count.threshold) & np.isfinite(values)
+            positive = positive_of(table, channel, count, options.statistic)
             table[f"{channel} positive"] = positive
             count.n_positive = int(positive.sum())
             for index in np.flatnonzero(positive):
@@ -832,12 +934,16 @@ def segment_section(
         ids, cy, cx = ids[own], cy[own], cx[own]
         regions = sg.expand_labels(nuclei, voxel, options.expand_um) if options.expand_um > 0 else nuclei
         area = np.asarray(ndimage.sum(nuclei > 0, nuclei, ids)) * voxel[0] * voxel[1]
+        rings = ring_labels(nuclei, voxel, regions, options.expand_um)
+        no_ring = np.asarray(ndimage.sum(rings > 0, rings, ids)) == 0
         figures = {"Centroid Y (µm)": cy * voxel[0], "Centroid X (µm)": cx * voxel[1],
-                   "Nucleus area (µm²)": area, "Equivalent diameter (µm)": 2.0 * np.sqrt(area / np.pi)}
+                   "Nucleus area (µm²)": area, "Equivalent diameter (µm)": 2.0 * np.sqrt(area / np.pi),
+                   NO_RING_COLUMN: no_ring.astype(np.float64)}
         for name, image in images.items():
             stats = label_stats(regions, image, ids)
             for figure in CELL_METRICS:
                 figures[f"{name} {figure}"] = stats[figure]
+            figures[f"{name} ring mean"] = label_stats(rings, image, ids)["mean"]
         return ids, figures, (nuclei, regions) if crop is not None else None
 
     found = 0
@@ -880,9 +986,13 @@ def segment_section(
         for window_done, future in pending:
             collect(window_done, future.result())
     columns = ["Label", "Centroid Y (µm)", "Centroid X (µm)", "Nucleus area (µm²)", "Equivalent diameter (µm)",
-               *(f"{name} {figure}" for name in names for figure in CELL_METRICS)]
+               NO_RING_COLUMN,
+               *(f"{name} {figure}" for name in names for figure in (*CELL_METRICS, "ring mean"))]
     table = pd.DataFrame({key: np.concatenate(parts[key]) if key in parts else np.zeros(0) for key in columns})
     table["Label"] = table["Label"].astype(np.int64)
+    table[NO_RING_COLUMN] = table[NO_RING_COLUMN].astype(bool)
+    # Over the whole section, so a packed cell's neighbours may lie in the next tile.
+    add_ring_contrast(table, names)
     return SectionCells(table=table, labels=pasted, regions=pasted_regions)
 
 
@@ -993,8 +1103,7 @@ def score_section(section, counts: Sequence[ChannelCount], band: np.ndarray,
     for count in counts:
         if count.reference or not np.isfinite(count.threshold):
             continue
-        values = table[f"{count.channel} {options.statistic}"].to_numpy(dtype=np.float64)
-        positive = np.isfinite(values) & (values > count.threshold)
+        positive = positive_of(table, count.channel, count, options.statistic)
         table[f"{count.channel} positive"] = positive
         count.n_positive_section = int(positive.sum())
         count.n_cells_section = int(len(table))
@@ -1561,7 +1670,7 @@ def counts_dataframe(results: Sequence[JunctionCounts]):
                 "Positives: median distance to the edge (µm)": float("nan") if count.reference else count.median_edge_um,
                 "Threshold": count.threshold,
                 "Rule": count.method,
-                "Compared": count.statistic,
+                "Compared": "ring contrast" if count.method == METHOD_RING else count.statistic,
                 "Threshold from": "" if count.reference or count.method not in CELL_RULES else count.threshold_from,
                 "Cells behind the threshold": (float("nan") if count.reference or count.method not in CELL_RULES
                                                else count.n_threshold_cells),
@@ -1631,6 +1740,8 @@ def settings_dataframe(options: CountOptions):
         ("Samples from a review", "yes" if options.review else "no"),
         ("Positive when", options.method),
         ("k (SDs)", options.k),
+        ("Ring contrast at least (cell ÷ ring)", options.ring_ratio if options.method == METHOD_RING else "not used"),
+        ("Ring (µm out from the nucleus)", f"{RING_UM[0]:g}–{RING_UM[1]:g}"),
         ("Threshold from", options.threshold_from if options.method in CELL_RULES else "not from cells"),
         ("Compared per cell", options.statistic),
         ("Nuclei grown by (µm)", options.expand_um),

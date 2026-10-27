@@ -283,7 +283,13 @@ class JunctionAnalysisWidget(QWidget):
             "• Otsu: the best split of the cells into two groups. Right when there are "
             "two groups; with one it splits it anyway.\n"
             "• Fixed value: one number for every sample — the only rule under which "
-            "samples are compared on the same scale."
+            "samples are compared on the same scale.\n"
+            "• Ring contrast: the cell's mean over the mean of a ring 3–6 µm round its "
+            "nucleus — the cell against its own surroundings, so a haze or a thick part "
+            "of the section does not make a cell positive. At least 1.5× by default "
+            "(the validation's best local rule: 0.07 % false positives deep in the "
+            "other organoid). A packed cell with no free ring is compared with the "
+            "tissue between the cells near it."
         )
         self._method.currentTextChanged.connect(self._update_sensitivity)
         form.addRow("Positive when", self._method)
@@ -313,6 +319,19 @@ class JunctionAnalysisWidget(QWidget):
             "starting point; raise it if dim cells are being called positive."
         )
         form.addRow("k", self._k)
+
+        self._ring_ratio = QDoubleSpinBox()
+        self._ring_ratio.setRange(1.0, 20.0)
+        self._ring_ratio.setSingleStep(0.1)
+        self._ring_ratio.setDecimals(2)
+        self._ring_ratio.setValue(ja.RING_RATIO)
+        self._ring_ratio.setSuffix(" ×")
+        self._ring_ratio.setToolTip(
+            "For “Ring contrast”: how many times brighter than its 3–6 µm ring a cell has "
+            "to be. 1.5 is the validation's choice; raise it if hazy cells are called, "
+            "lower it if clearly labelled cells next to other labelled cells are missed."
+        )
+        form.addRow("Ring contrast at least", self._ring_ratio)
 
         self._fixed = QDoubleSpinBox()
         self._fixed.setRange(0.0, 1e6)
@@ -454,6 +473,8 @@ class JunctionAnalysisWidget(QWidget):
 
     def _update_sensitivity(self, method: str) -> None:
         self._k.setEnabled(method in (ja.METHOD_CELLS, ja.METHOD_BACKGROUND))
+        self._ring_ratio.setEnabled(method == ja.METHOD_RING)
+        self._statistic.setEnabled(method != ja.METHOD_RING)
         self._fixed.setEnabled(method == ja.METHOD_FIXED)
         self._threshold_from.setEnabled(method in ja.CELL_RULES)
 
@@ -512,6 +533,7 @@ class JunctionAnalysisWidget(QWidget):
             region_keyword=self._region_edit.text().strip() or REGION_KEYWORD,
             method=self._method.currentText(),
             k=float(self._k.value()),
+            ring_ratio=float(self._ring_ratio.value()),
             statistic=self._statistic.currentText(),
             threshold_from=self._threshold_from.currentText(),
             # One number for every channel: named per channel once they are known.
@@ -966,7 +988,8 @@ class JunctionAnalysisWidget(QWidget):
                     if table is None or column not in table:
                         continue
                     wanted = table.loc[table[column], "Label"].to_numpy(dtype=np.int64)
-                    mask = np.isin(result.section_regions, wanted).astype(np.uint8)
+                    # The nucleus's outline: the cell as segmented, not the area it was measured over.
+                    mask = np.isin(result.section_labels, wanted).astype(np.uint8)
                     layer = put(f"{count.channel}{POSITIVE_SUFFIX}", mask, opacity=1.0, **whole)
                     layer.contour = POSITIVE_CONTOUR
                     self._tint(layer, POSITIVE_COLOR)
@@ -978,7 +1001,7 @@ class JunctionAnalysisWidget(QWidget):
             cells.contour = 1  # outlines: the signal underneath stays visible
             for count in scored:
                 wanted = result.positive_labels(count.channel)
-                mask = np.where(np.isin(result.regions, wanted), 1, 0).astype(np.uint8)
+                mask = np.where(np.isin(result.labels, wanted), 1, 0).astype(np.uint8)
                 layer = put(f"{count.channel}{POSITIVE_SUFFIX}", mask, opacity=1.0, **common)
                 # Red outlines, the same for every channel: the layer's name
                 # says which, and a red ring reads as "this one" over any stain.

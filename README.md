@@ -1446,6 +1446,7 @@ What happens:
 | Above the background | median + k × SD of the tissue between the cells | you want "is there signal at all"; blind to a haze every cell carries |
 | Otsu split of the cells | best split into two groups | there really are two groups |
 | Fixed value | a number you type | samples must be compared on one scale |
+| Ring contrast | the cell's mean ÷ the mean of a ring 3–6 µm round its nucleus, at least *Ring contrast at least* (1.5×) | the cell against its own surroundings: a haze, or a thick part of the section, does not make a cell positive |
 
 SDs are robust (1.4826 × MAD), so the bright cells being looked for do not raise
 the bar on themselves. *k* defaults to 3. *Compare the cell's* picks which
@@ -1466,9 +1467,21 @@ both cases. *Threshold from* and *Cells behind the threshold* in the *Counts*
 sheet say what each threshold rests on.
 
 Per cell and per channel the workbook has: mean, median, SD, CV, P95, max,
-integrated intensity, SDs over background and fold over background, plus the
-nucleus area, diameter and position, and a *Positive for* column naming the
-channels (`AF555 + AF488`, `none`, …).
+integrated intensity, SDs over background and fold over background, *ring mean*
+and *ring contrast*, plus the nucleus area, diameter and position, *No ring*, and
+a *Positive for* column naming the channels (`AF555 + AF488`, `none`, …).
+
+**Ring contrast** is measured for every cell, whatever the rule: the cell's mean
+(over its nucleus grown by *Measure around nuclei*) over the mean of its ring,
+3–6 µm out from the nucleus, grown the same way so a ring never takes a
+neighbour's pixels. In packed tissue a nucleus can have no free ring (*No ring*;
+about 45 % of the cells of a slide scan); its background is then the median ring
+of the 8 nearest cells that have one, within 50 µm. It is the rule the
+validation (`positivity_metrics`, 21 Oct) found second best without clicks:
+0.07 % false positives deep in the other organoid at 1.5×, against 0.54 % for
+median + 3 SD. On one slide scan it called 1.1 % of the section's cells
+AF488-positive (0.6 % of those with their own ring, 1.7 % of the packed ones),
+against 8 % for median + 3 SD.
 
 **Where each cell is**, in the *Cells* sheet:
 
@@ -1562,7 +1575,8 @@ In the panel:
 - **Layers** (*Analyse this sample*) — over the whole section: *Nuclei (whole
   section)*, every cell found, as outlines; *Nuclei grown by 3 µm*, the regions
   each cell was measured over (hidden at first); *`<channel>`+ cells*, the
-  positive cells of each channel anywhere in the section, outlined in red; and
+  positive cells of each channel anywhere in the section, their nucleus outlined
+  in red; and
   *Junction cells*, the region's cells (hidden at first). Each whole-section
   layer is a label map the size of the scan, ~250 MB. With *Segment only the
   junction region* the layers cover the region only.

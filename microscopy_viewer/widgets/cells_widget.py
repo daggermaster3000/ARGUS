@@ -163,6 +163,7 @@ class CellsWidget(QWidget):
         form.addRow("Hand-drawn region: name contains", ja._region_edit)
         form.addRow("Positive when", ja._method)
         form.addRow("k", ja._k)
+        form.addRow("Ring contrast at least", ja._ring_ratio)
         top_layout.addWidget(holder)
         layout.addWidget(top)
 
