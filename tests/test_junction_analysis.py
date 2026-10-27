@@ -258,7 +258,35 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         check(drawn.ok and drawn.band_source == f"stored ({fu.MANUAL_KEY})"
               and abs(drawn.band_area_mm2 - 40 * 110 / 1e6) < 1e-9,
               f"a region drawn by hand is counted in preference ({drawn.band_source})")
+        check(drawn.region_by == "by hand" and drawn.finder_status == "ok",
+              f"it says who drew it, and keeps what the finder said ({drawn.region_by}, {drawn.finder_status})")
+
+        # By keyword: the first stored junction region whose name has it; a
+        # label map that is not a junction region (no line) is passed over.
+        second = np.zeros(labels.shape, dtype=np.uint8)
+        second[30:90, 40:150] = 1
+        ims_store.save_labels(paths[0], f"{fu.MANUAL_KEY} quillan", second, (1.0, 1.0), attrs={"line_yx_um": line})
+        ims_store.save_labels(paths[0], "manual count AF488", manual, (1.0, 1.0), attrs={"channel": "AF488"})
+        check(ja.region_candidates(paths[0], ja.CountOptions(region_keyword="MANUAL"))
+              == [fu.MANUAL_KEY, f"{fu.MANUAL_KEY} quillan", fu.DEFAULT_KEY],
+              "the keyword finds the hand-drawn regions in name order, then the automatic one")
+        segment.window = (slice(0, 90 + margin), slice(40 - margin, 150 + margin))
+        keyed = ja.analyse_sample(paths[0], ja.CountOptions(
+            expand_um=0.0, find_junction=False, region_keyword="quillan",
+            review={"assembloid_s0": {"Status": "check", "Decision": "redrawn", "Note": "redrawn by Q"}}), segment=segment)
+        segment.window = window
+        check(keyed.ok and keyed.band_source == f"stored ({fu.MANUAL_KEY} quillan)"
+              and abs(keyed.band_area_mm2 - 60 * 110 / 1e6) < 1e-9,
+              f"another keyword picks the other annotator's region ({keyed.band_source})")
+        row = ja.counts_dataframe([keyed]).iloc[0]
+        check(row["Region drawn by"] == "by hand" and row["Review decision"] == "redrawn"
+              and row["Review status"] == "check" and row["Finder status"] == "ok",
+              "the table carries who drew the region, the review, and the finder's verdict")
+        ims_store.delete_labels(paths[0], f"{fu.MANUAL_KEY} quillan")
+        ims_store.delete_labels(paths[0], "manual count AF488")
         ims_store.delete_labels(paths[0], fu.MANUAL_KEY)
+        nothing = ja.region_candidates(paths[0], ja.CountOptions(region_keyword="manual"))
+        check(nothing == [fu.DEFAULT_KEY], f"with none drawn, only the automatic one is left ({nothing})")
 
         # The whole sample segmented, for its threshold: what comes back is
         # still the region's cells on the region's crop.

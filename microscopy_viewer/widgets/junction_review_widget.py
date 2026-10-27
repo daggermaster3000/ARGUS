@@ -236,7 +236,8 @@ class JunctionReviewWidget(QWidget):
         count.setToolTip(
             "Run the Junction analysis panel on the samples redrawn here, with its "
             "settings. Their stored region is now the one drawn by hand. The result is a "
-            "workbook of those samples only."
+            "workbook of those samples only. To count every accepted and redrawn sample, "
+            "choose “Sent on by a junction review” in the Junction analysis panel."
         )
         count.clicked.connect(self.count_redrawn)
         outer.addWidget(count)
@@ -581,13 +582,16 @@ class JunctionReviewWidget(QWidget):
                                  + jr.summary(self._items) + ".")
 
     def count_redrawn(self) -> None:
+        """Count the redrawn samples, through the Junction analysis panel's review route."""
         paths = [item.path for item in self._items if item.decision == jr.REDRAWN and item.path is not None]
-        if not paths:
+        folder = self.qc_folder()
+        if not paths or folder is None:
             self._status.setText("No redrawn samples yet.")
             return
         analysis = getattr(self._app, "junction_analysis_widget", None)
-        if analysis is None or not hasattr(analysis, "run_paths"):
+        if analysis is None or not hasattr(analysis, "run_review"):
             self._status.setText("The Junction analysis panel is not available.")
             return
-        if analysis.run_paths(paths):
+        # The decisions are on disk already (written after each one): the review file is the list.
+        if analysis.run_review(folder / jr.REVIEW_FILE, include=(jr.REDRAWN,)):
             self._status.setText(f"Counting {len(paths)} redrawn sample(s) — progress is in the Junction analysis panel.")

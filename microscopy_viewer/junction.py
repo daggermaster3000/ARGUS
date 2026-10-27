@@ -1905,6 +1905,9 @@ def store(path: Path, overview: Overview, result: JunctionResult, options: Junct
         "side": result.side,
         "status": result.status,
         "flags": "; ".join(result.flags),
+        # How it was found: whether the second search (no dark line) made it.
+        "second_search": float(result.metrics.get("No-seam fallback", 0.0)),
+        "seam_price": float(result.metrics.get("Seam price", float("nan"))),
         "line_yx_um": np.asarray(result.line_um, dtype=np.float64),
     }
     ims_store.save_labels(path, options.label_key, labels, overview.voxel_yx, attrs=attrs)

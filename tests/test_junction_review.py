@@ -99,8 +99,43 @@ def test_scanning_and_deciding() -> None:
               "a folder that is not there is simply empty")
 
 
+def test_a_review_file_gives_the_samples_to_count() -> None:
+    print("the samples a review sends on")
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        qc = _folder(root)
+        items = {item.name: item for item in jr.scan(qc, root)}
+        jr.decide(items["a_s1"], jr.ACCEPT)
+        jr.decide(items["a_s2"], jr.REDRAWN, "drawn again")
+        jr.decide(items["a_s3"], jr.EXCLUDE, "torn")
+        jr.decide(items["gone"], jr.ACCEPT)
+        written = jr.save_decisions(qc, list(items.values()))
+        # The recorded file is not needed: the sample is found beside the QC folder.
+        for item in items.values():
+            item.path = None
+        jr.save_decisions(qc, list(items.values()))
+
+        picked = jr.samples_from_review(written)
+        check(list(picked.paths) == ["a_s2", "a_s1"],
+              f"accepted and redrawn samples are kept, in the file's order ({list(picked.paths)})")
+        check(picked.paths["a_s2"] == root / "a_s2.ome.tiff", "each found beside the QC folder")
+        check(picked.rows["a_s2"] == {"Status": "check", "Decision": "redrawn", "Note": "drawn again"},
+              "with what the review said")
+        check(picked.missing == ["gone"], f"an accepted sample with no file is reported ({picked.missing})")
+        check(picked.left_out == {"exclude": 1, "": 1}, f"and what was left out, by decision ({picked.left_out})")
+        everything = jr.samples_from_review(qc, include=(jr.ACCEPT, jr.REDRAWN, jr.UNDECIDED))
+        check(list(everything.paths) == ["a_s2", "a_s1"] and everything.missing == ["a_s4", "gone"]
+              and everything.left_out == {"exclude": 1},
+              f"the QC folder can be given, and undecided asked for too ({everything.missing}, {everything.left_out})")
+        try:
+            jr.samples_from_review(root / "nowhere" / "review.csv")
+            check(False, "a missing review file is refused")
+        except FileNotFoundError:
+            check(True, "a missing review file is refused")
+
+
 def main() -> int:
-    for test in (test_scanning_and_deciding,):
+    for test in (test_scanning_and_deciding, test_a_review_file_gives_the_samples_to_count):
         test()
         print()
     if _failures:

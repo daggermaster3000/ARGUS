@@ -150,6 +150,78 @@ def redraw_queue(items: Sequence[ReviewItem]) -> list[ReviewItem]:
     return [item for item in items if item.decision == REDRAW and item.path is not None]
 
 
+#: The decisions whose samples a count takes from a review by default: the line
+#: was accepted, or it was drawn again by hand.
+COUNT_DECISIONS = (ACCEPT, REDRAWN)
+
+
+@dataclass
+class ReviewedSamples:
+    """The samples a review file sends on, and those it leaves behind."""
+
+    #: Sample name -> its file, in the file's order.
+    paths: dict[str, Path]
+    #: Sample name -> what the review said: ``Status``, ``Decision``, ``Note``.
+    rows: dict[str, dict[str, str]]
+    #: Kept by their decision, but no file was found for them.
+    missing: list[str]
+    #: How many were left out, by decision (``""`` is undecided).
+    left_out: dict[str, int]
+
+
+def samples_from_review(
+    review_file: str | Path, include: Sequence[str] = COUNT_DECISIONS,
+    sample_folder: str | Path | None = None,
+) -> ReviewedSamples:
+    """The samples of a ``review.csv`` whose decision is in *include*, with their files.
+
+    A sample's file is the one the review recorded; failing that, the sample of
+    that name in *sample_folder* — by default the experiment folder the QC
+    folder sits in (``junction_QC/`` or ``junction_analysis/QC/``).
+    """
+    target = Path(review_file)
+    if target.is_dir():
+        target = target / REVIEW_FILE
+    if not target.is_file():
+        raise FileNotFoundError(f"no review file at {target}")
+    rows = _read_rows(target)
+    found: dict[str, Path] = {}
+    # The experiment folder holds junction_QC/ and junction_analysis/QC/: one or two levels up.
+    for folder in ([Path(sample_folder)] if sample_folder is not None
+                   else [target.parent.parent, target.parent.parent.parent]):
+        found = find_samples(folder)
+        if any(name in found for name in rows):
+            break
+    wanted = {str(d).strip().lower() for d in include}
+    paths: dict[str, Path] = {}
+    kept_rows: dict[str, dict[str, str]] = {}
+    missing: list[str] = []
+    left_out: dict[str, int] = {}
+    for name, row in rows.items():
+        decision = str(row.get("Decision", "")).strip().lower()
+        if decision not in wanted:
+            left_out[decision] = left_out.get(decision, 0) + 1
+            continue
+        recorded = Path(row["File"]) if row.get("File") else None
+        path = recorded if recorded is not None and recorded.is_file() else found.get(name)
+        if path is None:
+            missing.append(name)
+            continue
+        paths[name] = path
+        kept_rows[name] = {k: str(row.get(k, "") or "") for k in ("Status", "Decision", "Note")}
+    return ReviewedSamples(paths=paths, rows=kept_rows, missing=missing, left_out=left_out)
+
+
+def _read_rows(target: Path) -> dict[str, dict[str, str]]:
+    """The rows of a review table, by sample name, whatever the file is called."""
+    try:
+        with target.open(newline="", encoding="utf-8-sig") as handle:
+            return {row["Sample"]: row for row in csv.DictReader(handle) if row.get("Sample")}
+    except Exception:
+        logger.exception("could not read %s", target)
+        return {}
+
+
 def tally(items: Sequence[ReviewItem]) -> dict[str, int]:
     """How many samples carry each decision; ``""`` is the undecided."""
     counts = {decision: 0 for decision in (UNDECIDED, *DECISIONS)}

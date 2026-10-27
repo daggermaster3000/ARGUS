@@ -1323,9 +1323,11 @@ finished first (double-click its last point). Wrong side: **Other side**; then
 panel's *Find the junction on this image*.
 
 **Count the redrawn samples** runs the Junction analysis panel, with its
-settings, on the samples redrawn here; their stored region is now the hand-drawn
-one. It writes a workbook of those samples only
-(`junction_counts_redrawn_<date>.xlsx`).
+settings, on the samples redrawn here (the *redrawn* rows of this `review.csv`);
+their stored region is now the hand-drawn one. It writes a workbook of those
+samples only (`junction_counts_reviewed_<date>.xlsx`). To count every accepted
+and redrawn sample at once, use the Junction analysis panel's *Sent on by a
+junction review* (below).
 
 A band drawn by hand is a strip beside the line — not clipped to the tissue
 outline as an automatic one is — and carries no QC status of its own.
@@ -1335,12 +1337,40 @@ outline as an automatic one is — and carries no QC status of its own.
 Counts the cells in the junction region and says which channels each one is
 positive for. The **Junction analysis** panel sits with the right-hand tabs.
 
-1. Make the region in **Fusion region macro** (drawn or automatic). A *Fusion
-   region* layer on screen is used whether or not it was saved; otherwise the
-   stored region is read; otherwise, if *Find the junction when no region is
-   stored* is ticked, the junction is found on the spot.
-2. **Count in this sample**, or select samples in *Experiment setup* and **Run on
-   the selected samples** (nothing has to be open).
+1. Make the region in **Fusion region macro** (drawn or automatic), and look
+   through the run in **Junction review** if you like.
+2. Choose the **Samples to run on**:
+   - *Selected in Experiment setup* — the samples selected there (all when none is);
+   - *Sent on by a junction review* — the samples of a `review.csv` whose decision
+     is ticked (*accepted* and *redrawn* by default; *not reviewed yet* on request).
+     Excluded samples and those still waiting to be redrawn are never counted. The
+     panel fills in the experiment's newest review file and says how many samples
+     it sends on, how many it leaves out and why, and any whose file it cannot find.
+3. **Count in this sample**, or **Run on the samples** (nothing has to be open).
+
+**Which region each sample is counted in**, in this order:
+
+1. a region drawn by hand: the first stored junction region, in name order, whose
+   name contains *Hand-drawn region: name contains* (`manual` by default, any
+   case) — so `manual annotated junction region` comes before
+   `manual annotated junction region quillan`, and typing `quillan` picks the
+   second annotator's. Only junction regions count (ones that keep their line),
+   not, say, a manual cell count;
+2. else the junction finder's own region (`fusion region`);
+3. else, if *Find the junction when no region is stored* is ticked, the junction
+   is found on the spot.
+
+A *Fusion region* layer on screen is used in preference for a single count,
+saved or not.
+
+**What is kept about each sample's route** (table and *Counts* sheet): *Region
+drawn by* (by hand, junction finder, on screen) and *Region* (which stored
+region); *Junction status* / *flags* of the region counted in (a hand-drawn one
+has none); *Finder status*, *Finder flags* and *Finder second search* — what the
+junction finder said about the sample even when the hand-drawn region was used,
+and whether its second search (for sections without a dark line) made the line;
+and, for samples from a review, *Review status*, *Review decision* and *Review
+note*.
 
 What happens:
 
@@ -1389,8 +1419,8 @@ channels (`AF555 + AF488`, `none`, …).
 Results appear three ways:
 
 - **Table in the panel** — per sample and channel: cells in region, positive,
-  %, positive per mm² of region, positive per mm of junction, threshold,
-  background, junction status.
+  %, positive per mm² of region, positive per mm of junction, threshold, who
+  drew the region, the finder's status and second search, the review decision.
 - **Layers** (single sample) — *Junction cells*: every counted cell as an
   outline; *`<channel>`+ cells*: the positive cells outlined in red.
 - **Workbook** — sheets *Counts*, *Combinations* (how many cells are positive

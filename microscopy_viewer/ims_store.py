@@ -425,6 +425,25 @@ def label_shape(path: str | Path, key: str) -> tuple[int, ...]:
         return ()
 
 
+def label_attrs(path: str | Path, key: str) -> dict[str, Any]:
+    """The attributes of a stored label map, without reading the map. Empty when absent."""
+    import h5py
+
+    store = _readable_store(path)
+    if store is None:
+        return {}
+    try:
+        with h5py.File(str(store), "r") as handle:
+            group = handle.get(LABEL_GROUP)
+            if group is None or key not in group:
+                return {}
+            dataset = group[key]
+            return {name: dataset.attrs[name] for name in dataset.attrs}
+    except OSError as exc:
+        logger.info("could not read the attributes of %r in %s: %s", key, Path(path).name, exc)
+        return {}
+
+
 def _chunks(shape: Sequence[int]) -> tuple[int, ...]:
     dims = tuple(int(n) for n in shape)
     if len(dims) < 2:

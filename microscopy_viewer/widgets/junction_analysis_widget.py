@@ -1,7 +1,8 @@
 """Dock panel: count the cells in the junction region and score them per channel.
 
 The work is in :mod:`microscopy_viewer.junction_analysis`. This module picks the
-sample, runs the count off the main thread — it segments nuclei, which takes
+samples — the open one, those selected in Experiment setup, or those a junction
+review sent on (its ``review.csv``) — runs the count off the main thread — it segments nuclei, which takes
 seconds on a GPU and longer without — and shows what came back three ways: a
 table in the panel, the cells drawn over the image with one layer per channel
 they are positive for, and a workbook.
@@ -35,6 +36,7 @@ from qtpy.QtWidgets import (
 from .. import fusion as fu
 from .. import junction as jn
 from .. import junction_analysis as ja
+from .. import junction_review as jr
 from ..exports import WORKBOOK_FILTER, default_stem
 from ..utils import format_number, get_logger
 from .sample_files import source_of, tie_to_sample
@@ -51,8 +53,14 @@ POSITIVE_SUFFIX = "+ cells"
 TABLE_COLUMNS = (
     "Sample", "Channel", "Cells in region", "Positive", "Positive (%)",
     "Positive per mm²", "Positive per mm of junction", "Threshold",
-    "Background median", "Junction status",
+    "Region drawn by", "Finder status", "Finder second search", "Review decision",
 )
+
+#: Where the samples of a run come from.
+FROM_EXPERIMENT = "Selected in Experiment setup"
+FROM_REVIEW = "Sent on by a junction review"
+#: The word that marks a region as drawn by hand (see ``CountOptions.region_keyword``).
+REGION_KEYWORD = "manual"
 
 #: How the positive cells are drawn: a red outline this many pixels thick.
 POSITIVE_COLOR = "red"
@@ -91,6 +99,7 @@ class JunctionAnalysisWidget(QWidget):
         note.setWordWrap(True)
         layout.addWidget(note)
 
+        layout.addWidget(self._build_samples_box())
         layout.addWidget(self._build_settings_box())
         layout.addLayout(self._build_buttons())
 
@@ -121,6 +130,67 @@ class JunctionAnalysisWidget(QWidget):
 
     # -- construction ---------------------------------------------------------
 
+    def _build_samples_box(self) -> QGroupBox:
+        box = QGroupBox("Samples to run on")
+        form = QFormLayout(box)
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self._source = QComboBox()
+        self._source.addItems([FROM_EXPERIMENT, FROM_REVIEW])
+        self._source.setToolTip(
+            "Which samples “Run” counts in.\n"
+            "• Selected in Experiment setup: the samples selected there (all when none is).\n"
+            "• Sent on by a junction review: the samples of a review.csv (written by the "
+            "Junction review panel) whose decision is ticked below. The review's status, "
+            "decision and note go into the workbook beside each count."
+        )
+        self._source.currentTextChanged.connect(self._update_source)
+        form.addRow("Samples", self._source)
+
+        row = QHBoxLayout()
+        self._review_edit = QLineEdit()
+        self._review_edit.setPlaceholderText("review.csv of a junction review")
+        self._review_edit.setToolTip(
+            "The review.csv in a QC folder (junction_QC, or junction_analysis/QC). Each "
+            "sample is found from the file the review recorded, or by name in the "
+            "experiment folder."
+        )
+        self._review_edit.editingFinished.connect(self._update_review_summary)
+        row.addWidget(self._review_edit, stretch=1)
+        browse = QPushButton("…")
+        browse.setToolTip("Choose the review file")
+        browse.clicked.connect(lambda: self._browse_review())
+        row.addWidget(browse)
+        self._review_row = QWidget()
+        self._review_row.setLayout(row)
+        row.setContentsMargins(0, 0, 0, 0)
+        form.addRow("Review file", self._review_row)
+
+        decisions = QHBoxLayout()
+        decisions.setContentsMargins(0, 0, 0, 0)
+        self._decisions: dict[str, QCheckBox] = {}
+        for decision, label, on in ((jr.ACCEPT, "accepted", True), (jr.REDRAWN, "redrawn", True),
+                                    (jr.UNDECIDED, "not reviewed yet", False)):
+            check = QCheckBox(label)
+            check.setChecked(on)
+            check.toggled.connect(lambda _on: self._update_review_summary())
+            decisions.addWidget(check)
+            self._decisions[decision] = check
+        decisions.addStretch(1)
+        self._decisions_row = QWidget()
+        self._decisions_row.setLayout(decisions)
+        self._decisions_row.setToolTip(
+            "Which decisions send a sample on. Excluded samples, and those still waiting "
+            "to be redrawn, are never counted."
+        )
+        form.addRow("Count the", self._decisions_row)
+
+        self._review_summary = QLabel("")
+        self._review_summary.setWordWrap(True)
+        form.addRow("", self._review_summary)
+        self._update_source(self._source.currentText())
+        return box
+
     def _build_settings_box(self) -> QGroupBox:
         box = QGroupBox("Cells and what counts as positive")
         form = QFormLayout(box)
@@ -130,15 +200,19 @@ class JunctionAnalysisWidget(QWidget):
         self._image_combo.setToolTip("Any channel of the sample to count in; all of its channels are measured.")
         form.addRow("Sample", self._image_combo)
 
-        self._region_edit = QLineEdit(fu.MANUAL_KEY)
+        self._region_edit = QLineEdit(REGION_KEYWORD)
         self._region_edit.setToolTip(
-            "The stored region to count in — the name the Fusion region panel saved it "
-            "under. A “Fusion region” layer on screen is used in preference, saved or not.\n"
-            f"“{fu.MANUAL_KEY}” (a region drawn or corrected by hand) falls back to the "
-            f"automatic “{fu.DEFAULT_KEY}” for samples that have none, and the sheet says "
-            "which one each sample was counted in."
+            "Which region each sample is counted in, in this order:\n"
+            "1. a junction region drawn by hand: the first stored one (in name order) whose "
+            "name contains this word, whoever drew it;\n"
+            f"2. else the junction finder's own region, “{fu.DEFAULT_KEY}”;\n"
+            "3. else, when ticked below, the junction is found on the spot.\n"
+            "A “Fusion region” layer on screen is used in preference for a single count. "
+            "The table and workbook say, per sample, which region was used and who drew it, "
+            "and what the junction finder said about the sample (status, flags, and whether "
+            "its second search for sections without a dark line made the line)."
         )
-        form.addRow("Region", self._region_edit)
+        form.addRow("Hand-drawn region: name contains", self._region_edit)
 
         self._method = QComboBox()
         self._method.addItems(list(ja.METHODS))
@@ -242,11 +316,12 @@ class JunctionAnalysisWidget(QWidget):
         self._count_button.clicked.connect(self.count_current)
         row.addWidget(self._count_button)
 
-        self._run_button = QPushButton("Run on the selected samples")
+        self._run_button = QPushButton("Run on the samples")
         self._run_button.setToolTip(
-            "Every sample selected in Experiment setup (all when none is). Nothing has to "
-            "be open. The workbook is written to “junction_analysis” in the experiment "
-            "folder when the run ends.\n"
+            "The samples chosen under “Samples to run on”: those selected in Experiment "
+            "setup, or those a junction review sent on. Nothing has to be open. The "
+            "workbook is written to “junction_analysis” in the experiment folder when the "
+            "run ends.\n"
             "Every run, this one and a single count, leaves a QC picture per sample in "
             "“junction_analysis/QC”, sorted into the folders ok, check and fail."
         )
@@ -337,7 +412,8 @@ class JunctionAnalysisWidget(QWidget):
             except Exception:
                 logger.debug("could not read the fusion settings", exc_info=True)
         return ja.CountOptions(
-            band_key=self._region_edit.text().strip() or fu.MANUAL_KEY,
+            band_key=fu.MANUAL_KEY,
+            region_keyword=self._region_edit.text().strip() or REGION_KEYWORD,
             method=self._method.currentText(),
             k=float(self._k.value()),
             statistic=self._statistic.currentText(),
@@ -402,8 +478,82 @@ class JunctionAnalysisWidget(QWidget):
             return None
         return layer
 
+    # -- samples from a review -----------------------------------------------
+
+    def _update_source(self, source: str) -> None:
+        review = source == FROM_REVIEW
+        for widget in (self._review_row, self._decisions_row, self._review_summary):
+            widget.setVisible(review)
+        if review and not self._review_edit.text().strip():
+            default = self._default_review()
+            if default is not None:
+                self._review_edit.setText(str(default))
+        self._update_review_summary()
+
+    def _default_review(self) -> Path | None:
+        """The experiment's newest review file, if it has one."""
+        experiment = getattr(self._app, "experiment_widget", None)
+        folder = experiment.folder() if experiment is not None else None
+        if not folder:
+            return None
+        found = [Path(folder) / source / jr.REVIEW_FILE for _label, source in jr.SOURCES]
+        found = [path for path in found if path.is_file()]
+        return max(found, key=lambda path: path.stat().st_mtime) if found else None
+
+    def _browse_review(self) -> None:
+        start = self._review_edit.text().strip() or str(self._default_review() or Path.home())
+        path, _selected = QFileDialog.getOpenFileName(self, "Choose a junction review", start, "Review (*.csv)")
+        if path:
+            self._review_edit.setText(path)
+            self._update_review_summary()
+
+    def review_decisions(self) -> tuple[str, ...]:
+        return tuple(decision for decision, check in self._decisions.items() if check.isChecked())
+
+    def reviewed_samples(self, review_file: str | Path | None = None, include=None):
+        """The samples the review file sends on, or ``None`` with the reason in the status line."""
+        target = review_file or self._review_edit.text().strip()
+        if not target:
+            self._review_summary.setText("Choose the review file.")
+            return None
+        try:
+            return jr.samples_from_review(target, include=include if include is not None else self.review_decisions())
+        except Exception as exc:
+            self._review_summary.setText(f"Could not read it: {exc}")
+            return None
+
+    def _update_review_summary(self) -> None:
+        if self._source.currentText() != FROM_REVIEW:
+            return
+        picked = self.reviewed_samples()
+        if picked is not None:
+            self._review_summary.setText(_review_line(picked))
+
+    def run_review(self, review_file: str | Path, include=None) -> bool:
+        """Count in the samples *review_file* sends on. Returns whether it started."""
+        if self._worker is not None:
+            self._status.setText("A count is already running.")
+            return False
+        picked = self.reviewed_samples(review_file, include)
+        if picked is None or not picked.paths:
+            self._status.setText("The review sends no sample on. " + (_review_line(picked) if picked else ""))
+            return False
+        paths = list(picked.paths.values())
+        experiment = getattr(self._app, "experiment_widget", None)
+        folder = (experiment.folder() if experiment is not None else None) or paths[0].parent
+        options = self.options()
+        options.review = picked.rows
+        options.qc_dir = self.qc_folder(folder)
+        workbook = Path(folder) / "junction_analysis" / f"{default_stem('junction_counts_reviewed')}.xlsx"
+        self._start(paths, options, workbook=workbook)
+        self._log(_review_line(picked))
+        return True
+
     def run_batch(self) -> None:
-        """Count in every sample selected in Experiment setup."""
+        """Count in the samples chosen under “Samples”: the Experiment selection, or a review's."""
+        if self._source.currentText() == FROM_REVIEW:
+            self.run_review(self._review_edit.text().strip())
+            return
         experiment = getattr(self._app, "experiment_widget", None)
         if experiment is None:
             self._status.setText("The Experiment setup panel is not available.")
@@ -421,22 +571,6 @@ class JunctionAnalysisWidget(QWidget):
         options = self.options(names)
         options.qc_dir = self.qc_folder(folder)
         self._start([entry.path for entry in entries], options, workbook=workbook)
-
-    def run_paths(self, paths) -> bool:
-        """Count in the given samples, as a batch does. Returns whether it started."""
-        paths = [Path(path) for path in paths]
-        if not paths:
-            return False
-        if self._worker is not None:
-            self._status.setText("A count is already running.")
-            return False
-        experiment = getattr(self._app, "experiment_widget", None)
-        folder = (experiment.folder() if experiment is not None else None) or paths[0].parent
-        options = self.options()
-        options.qc_dir = self.qc_folder(folder)
-        workbook = Path(folder) / "junction_analysis" / f"{default_stem('junction_counts_redrawn')}.xlsx"
-        self._start(paths, options, workbook=workbook)
-        return True
 
     def _start(self, paths, options, band=None, draw_on: str = "", workbook: Path | None = None) -> None:
         from napari.qt.threading import thread_worker
@@ -600,3 +734,16 @@ class JunctionAnalysisWidget(QWidget):
             return None
         self._log(f"Workbook written to {written}.")
         return written
+
+
+def _review_line(picked) -> str:
+    """One line: what a review sends on, and what it leaves behind."""
+    said = {jr.ACCEPT: "accepted", jr.REDRAWN: "redrawn", jr.EXCLUDE: "excluded",
+            jr.REDRAW: "still to redraw", jr.UNDECIDED: "not reviewed"}
+    left = ", ".join(f"{n} {said.get(d, d)}" for d, n in sorted(picked.left_out.items()))
+    line = f"{len(picked.paths)} sample(s) to count"
+    if left:
+        line += f"; left out: {left}"
+    if picked.missing:
+        line += f"; {len(picked.missing)} not found: " + ", ".join(picked.missing[:3]) + ("…" if len(picked.missing) > 3 else "")
+    return line + "."

@@ -85,6 +85,13 @@ class CountOptions:
 
     #: The hand-drawn region where a sample has one, else the automatic band.
     band_key: str = fu.MANUAL_KEY
+    #: When set, the hand-drawn region is the first stored junction region whose
+    #: name contains this (any case) — whoever drew it and whatever they named
+    #: it — instead of exactly *band_key*; the automatic one is the fallback.
+    region_keyword: str = ""
+    #: What a review said about each sample, by name (``Status``, ``Decision``,
+    #: ``Note`` of ``review.csv``); carried into the tables.
+    review: dict[str, dict[str, str]] = field(default_factory=dict)
     #: The nuclear stain, by name or index; empty picks DAPI / Hoechst / 405.
     nuclear_channel: int | str = ""
     method: str = METHOD_CELLS
@@ -152,9 +159,21 @@ class JunctionCounts:
     band_area_mm2: float = float("nan")
     junction_length_um: float = float("nan")
     band_source: str = ""
-    #: The junction's own quality status, when it is known.
+    #: Who drew the region counted in: "by hand", "junction finder", or "on screen".
+    region_by: str = ""
+    #: The quality status of the region counted in (a hand-drawn one has none).
     status: str = ""
     flags: str = ""
+    #: What the junction finder said about the sample, whichever region was
+    #: counted in: its status, its flags, and whether its second search (for
+    #: sections without a dark line) made the line. Empty when it never ran.
+    finder_status: str = ""
+    finder_flags: str = ""
+    second_search: str = ""
+    #: What the review decided, when the samples came from one.
+    review_status: str = ""
+    review_decision: str = ""
+    review_note: str = ""
     channels: list[ChannelCount] = field(default_factory=list)
     #: One row per cell (a DataFrame); ``None`` when the run failed.
     cells: Any = None
@@ -575,17 +594,51 @@ def sample_cell_values(
     return {name: np.concatenate(parts) if parts else np.zeros(0) for name, parts in values.items()}
 
 
-def _stored_band(path: Path, key: str, shape_yx: tuple[int, int]):
-    """The stored band, its junction length and what was said about it."""
+def region_candidates(path: str | Path, options: CountOptions) -> list[str]:
+    """The stored regions to try for a sample, in order: hand-drawn first, then automatic.
+
+    With ``options.region_keyword``, every stored junction region (one that
+    keeps its line) whose name contains the keyword, in name order — so with
+    several the first is taken — then the automatic one. Without, the exact
+    ``options.band_key`` and its fallback (:func:`fusion.region_keys`).
+    """
     from . import ims_store
 
-    for used in fu.region_keys(key):
+    keyword = options.region_keyword.strip().lower()
+    if not keyword:
+        return list(fu.region_keys(options.band_key))
+    drawn = [key for key in ims_store.list_labels(path)
+             if keyword in key.lower() and key != fu.DEFAULT_KEY
+             and "line_yx_um" in ims_store.label_attrs(path, key)]
+    return [*drawn, fu.DEFAULT_KEY]
+
+
+def finder_record(path: str | Path) -> dict[str, str]:
+    """What the junction finder stored with its region: status, flags, second search."""
+    from . import ims_store
+
+    attrs = ims_store.label_attrs(path, fu.DEFAULT_KEY)
+    if not attrs:
+        return {}
+    second = attrs.get("second_search")
+    return {"status": ims_store._text(attrs.get("status", "")), "flags": ims_store._text(attrs.get("flags", "")),
+            "second_search": "" if second is None else ("yes" if float(second) else "no")}
+
+
+def _stored_band(path: Path, keys: Sequence[str] | str, shape_yx: tuple[int, int]):
+    """The first stored band of *keys* that fits, its junction length and what was said about it."""
+    from . import ims_store
+
+    for used in ([keys] if isinstance(keys, str) else keys):
+        if not used:
+            continue
         labels, attrs = ims_store.load_labels(path, used)
         if labels is not None and tuple(labels.shape[-2:]) == tuple(shape_yx) and np.any(labels):
             break
     else:
         return None, {}
-    details: dict[str, Any] = {"source": "stored", "region": used}
+    details: dict[str, Any] = {"source": "stored", "region": used,
+                               "by": "junction finder" if used == fu.DEFAULT_KEY else "by hand"}
     if "line_yx_um" in attrs:
         line = np.asarray(attrs["line_yx_um"], dtype=float).reshape(-1, 2)
         if len(line) >= 2:
@@ -615,6 +668,10 @@ def analyse_sample(
     options = options or CountOptions()
     target = Path(path)
     result = JunctionCounts(path=target, name=jn.fu_name(target))
+    reviewed = options.review.get(result.name, {})
+    result.review_status = reviewed.get("Status", "")
+    result.review_decision = reviewed.get("Decision", "")
+    result.review_note = reviewed.get("Note", "")
     say = progress or (lambda _text: None)
     started = time.perf_counter()
     was_open = loaders.is_open(target)
@@ -640,13 +697,17 @@ def analyse_sample(
             if band.shape != shape_yx:
                 raise ValueError(f"the region is {band.shape} and the image {shape_yx}")
             details = {"source": "on screen"}
-            _stored, stored = _stored_band(target, options.band_key, shape_yx)
+            _stored, stored = _stored_band(target, region_candidates(target, options), shape_yx)
             details.update({k: v for k, v in stored.items() if k != "source"})
+            details["by"] = "on screen"
         else:
-            band, details = _stored_band(target, options.band_key, shape_yx)
+            band, details = _stored_band(target, region_candidates(target, options), shape_yx)
+        finder = finder_record(target)
         if band is None:
             if not options.find_junction:
-                tried = " or ".join(f"“{key}”" for key in fu.region_keys(options.band_key))
+                tried = (f"whose name contains “{options.region_keyword}”, nor “{fu.DEFAULT_KEY}”"
+                         if options.region_keyword.strip() else
+                         " or ".join(f"“{key}”" for key in fu.region_keys(options.band_key)))
                 raise ValueError(f"no stored region {tried} — make it in the Fusion region panel")
             say("finding the junction")
             junction = options.junction or jn.JunctionOptions(save=False)
@@ -654,16 +715,22 @@ def analyse_sample(
             if found.line_um is None or found.band is None:
                 raise ValueError("no junction found: " + ("; ".join(found.flags) or "no reason given"))
             band = jn.full_resolution_band(found, overview, junction) > 0
-            details = {"source": "found automatically", "status": found.status,
+            details = {"source": "found automatically", "by": "junction finder", "status": found.status,
                        "flags": "; ".join(found.flags),
                        "length": found.metrics.get("Junction length (um)", float("nan"))}
+            finder = {"status": found.status, "flags": "; ".join(found.flags),
+                      "second_search": "yes" if found.metrics.get("No-seam fallback") else "no"}
         if not band.any():
             raise ValueError("the junction region is empty")
         result.band_source = str(details.get("source", ""))
         if details.get("region"):
             # Which stored region it was: the hand-drawn one, or the automatic fallback.
             result.band_source += f" ({details['region']})"
+        result.region_by = str(details.get("by", ""))
         result.status, result.flags = str(details.get("status", "")), str(details.get("flags", ""))
+        result.finder_status = finder.get("status", "")
+        result.finder_flags = finder.get("flags", "")
+        result.second_search = finder.get("second_search", "")
         result.junction_length_um = float(details.get("length", float("nan")))
         result.band_area_mm2 = float(band.sum()) * voxel[0] * voxel[1] / 1e6
 
@@ -711,7 +778,7 @@ def analyse_sample(
             say("storing the cells")
             full = np.zeros(shape_yx, dtype=result.labels.dtype)
             full[window] = result.labels
-            attrs = {"source": "junction analysis", "region": options.band_key,
+            attrs = {"source": "junction analysis", "region": str(details.get("region", options.band_key)),
                      "method": options.method, "statistic": options.statistic, "k": float(options.k),
                      "expand_um": float(options.expand_um)}
             for count in counts:
@@ -807,8 +874,9 @@ COUNT_COLUMNS = (
     "Positive per mm²", "Positive per mm of junction", "Threshold", "Rule", "Compared",
     "Threshold from", "Cells behind the threshold",
     "Cells median", "Cells SD", "Background median", "Background SD",
-    "Region area (mm²)", "Junction length (µm)", "Region", "Junction status",
-    "Junction flags", "QC", "Problem", "File",
+    "Region area (mm²)", "Junction length (µm)", "Region drawn by", "Region", "Junction status",
+    "Junction flags", "Finder status", "Finder flags", "Finder second search",
+    "Review status", "Review decision", "Review note", "QC", "Problem", "File",
 )
 
 
@@ -823,9 +891,16 @@ def counts_dataframe(results: Sequence[JunctionCounts]):
             "Cells in region": result.n_cells,
             "Region area (mm²)": result.band_area_mm2,
             "Junction length (µm)": result.junction_length_um,
+            "Region drawn by": result.region_by,
             "Region": result.band_source,
             "Junction status": result.status,
             "Junction flags": result.flags,
+            "Finder status": result.finder_status,
+            "Finder flags": result.finder_flags,
+            "Finder second search": result.second_search,
+            "Review status": result.review_status,
+            "Review decision": result.review_decision,
+            "Review note": result.review_note,
             "QC": result.qc,
             "Problem": result.error or "; ".join(result.warnings),
             "File": str(result.path),
@@ -893,7 +968,9 @@ def settings_dataframe(options: CountOptions):
     import pandas as pd
 
     rows = [
-        ("Region", options.band_key),
+        ("Region", f"first stored junction region whose name contains “{options.region_keyword}”, "
+                   f"else “{fu.DEFAULT_KEY}”" if options.region_keyword.strip() else options.band_key),
+        ("Samples from a review", "yes" if options.review else "no"),
         ("Positive when", options.method),
         ("k (SDs)", options.k),
         ("Threshold from", options.threshold_from if options.method in CELL_RULES else "not from cells"),
