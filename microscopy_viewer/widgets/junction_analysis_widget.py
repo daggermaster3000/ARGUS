@@ -1,4 +1,4 @@
-"""Dock panel: count the cells in the junction region and score them per channel.
+"""The analysis of the cells: segment the whole assembloid, count in the junction region, score per channel.
 
 The work is in :mod:`microscopy_viewer.junction_analysis`. This module picks the
 samples — the open one, those selected in Experiment setup, or those a junction
@@ -52,7 +52,8 @@ POSITIVE_SUFFIX = "+ cells"
 #: Columns of the panel's table; the workbook has these and the rest.
 TABLE_COLUMNS = (
     "Sample", "Channel", "Cells in region", "Positive", "Positive (%)",
-    "Positive per mm²", "Positive per mm of junction", "Positive in the whole section", "Threshold",
+    "Cells in the whole section", "Positive in the whole section (%)", "Enrichment in the region",
+    "Positive per mm²", "Positive per mm of junction", "Threshold",
     "Region drawn by", "Finder status", "Finder second search", "Review decision",
 )
 
@@ -235,14 +236,12 @@ class JunctionAnalysisWidget(QWidget):
         self._threshold_from = QComboBox()
         self._threshold_from.addItems(list(ja.THRESHOLD_FROM))
         self._threshold_from.setToolTip(
-            "Which cells the median and SD (or the Otsu split) are taken from. The cells "
-            "counted are those in the region either way.\n"
-            "• The cells in the region: only the region is segmented — fast. The bar is "
-            "set by the region's own cells, so a region where a large share is positive "
-            "raises it and undercounts.\n"
-            "• All cells of the sample: the whole section is segmented, both organoids, "
-            "and the threshold comes from all of its cells. Holds when the region is full "
-            "of positive cells; minutes per slide scan instead of seconds.\n"
+            "Which cells the median and SD (or the Otsu split) are taken from. The same "
+            "threshold then scores the region's cells and every other cell of the section.\n"
+            "• The cells in the region: the bar is set by the region's own cells, so a "
+            "region where a large share is positive raises it and undercounts.\n"
+            "• All cells of the sample: the threshold comes from every cell of the "
+            "section, both organoids. Holds when the region is full of positive cells.\n"
             "Not used by “Above the background” and “Fixed value”, which take nothing "
             "from the cells."
         )
@@ -294,26 +293,26 @@ class JunctionAnalysisWidget(QWidget):
         self._find.setToolTip("With the settings on the Fusion region panel. Off skips samples that have no region yet.")
         form.addRow("", self._find)
 
-        self._whole = QCheckBox("Segment the whole section: every positive cell, with its distances")
-        self._whole.setToolTip(
-            "Besides the count in the region, segment every cell of the section (in tiles, "
-            "bare slide skipped) and score it against the region's thresholds. The workbook "
-            "gets a “Section cells” sheet: every cell positive for a channel, anywhere in the "
-            "section, and the region's cells, each with its distance to the junction line "
-            "(positive on the band's side), to the tissue edge, and whether it is in the "
-            "region. The count in the region is unchanged. Minutes per slide scan instead of "
-            "seconds; with “Threshold from: All cells of the sample” the same pass serves both."
+        self._region_only = QCheckBox("Segment only the junction region (faster; nothing outside it)")
+        self._region_only.setToolTip(
+            "Off (the usual): the whole section is segmented, both organoids, in tiles with "
+            "bare slide skipped; the region's cells are taken from that same pass, and every "
+            "other cell is measured and scored against the region's thresholds, with its "
+            "distance to the junction line and to the tissue edge. Minutes per slide scan.\n"
+            "On: only the region's bounding box is segmented — seconds — and the table has "
+            "nothing about the rest of the section."
         )
-        form.addRow("", self._whole)
-        self._keep_section = QCheckBox("Keep every cell of the section, not only the positive ones")
-        self._keep_section.setToolTip(
-            "For a profile of all cells against the distance to the line. Large: about "
-            "100,000 rows a section; past a sheet's 1,048,575 rows the table is written to a "
-            "CSV beside the workbook."
+        form.addRow("", self._region_only)
+        self._positives_only = QCheckBox("Of the rest of the section, keep only the positive cells")
+        self._positives_only.setToolTip(
+            "Every cell of the section is measured either way, and the counts are the same. "
+            "Off keeps a row for every one of them (about 100,000 a section), for profiles "
+            "against the distance to the line; on keeps the region's cells and those "
+            "positive for a channel. Each sample's cells are written to "
+            "“junction_analysis/cells/<sample>.csv”."
         )
-        self._keep_section.setEnabled(False)
-        self._whole.toggled.connect(self._keep_section.setEnabled)
-        form.addRow("", self._keep_section)
+        self._region_only.toggled.connect(lambda on: self._positives_only.setEnabled(not on))
+        form.addRow("", self._positives_only)
 
         self._save_cells = QCheckBox("Store the counted cells with the sample")
         self._save_cells.setToolTip(
@@ -374,6 +373,11 @@ class JunctionAnalysisWidget(QWidget):
         experiment = getattr(self._app, "experiment_widget", None)
         folder = (experiment.folder() if experiment is not None else None) or fallback
         return Path(folder) / "junction_analysis" / "QC" if folder else None
+
+    def cells_folder(self, fallback: Path | None = None) -> Path | None:
+        """Where a run writes each sample's section cells: “junction_analysis/cells”."""
+        qc = self.qc_folder(fallback)
+        return qc.parent / "cells" if qc is not None else None
 
     def open_qc_folder(self) -> None:
         from qtpy.QtCore import QUrl
@@ -443,8 +447,8 @@ class JunctionAnalysisWidget(QWidget):
             fixed={name: float(self._fixed.value()) for name in (channels or [])},
             expand_um=float(self._expand.value()),
             find_junction=self._find.isChecked(),
-            whole_section=self._whole.isChecked(),
-            keep_section=self._whole.isChecked() and self._keep_section.isChecked(),
+            whole_section=not self._region_only.isChecked(),
+            keep_section=not self._positives_only.isChecked(),
             save_cells=self._save_cells.isChecked(),
             settings=settings,
             junction=junction,
@@ -487,6 +491,7 @@ class JunctionAnalysisWidget(QWidget):
             band = np.asarray(fu_layer.data) > 0
         options = self.options(self._channel_names(image))
         options.qc_dir = self.qc_folder(path.parent)
+        options.cells_dir = self.cells_folder(path.parent)
         self._start([path], options, band=band, draw_on=str(image.name))
 
     def _region_layer(self, image):
@@ -567,6 +572,7 @@ class JunctionAnalysisWidget(QWidget):
         options = self.options()
         options.review = picked.rows
         options.qc_dir = self.qc_folder(folder)
+        options.cells_dir = self.cells_folder(folder)
         workbook = Path(folder) / "junction_analysis" / f"{default_stem('junction_counts_reviewed')}.xlsx"
         self._start(paths, options, workbook=workbook)
         self._log(_review_line(picked))
@@ -593,6 +599,7 @@ class JunctionAnalysisWidget(QWidget):
         workbook = Path(folder) / "junction_analysis" / f"{default_stem('junction_counts')}.xlsx"
         options = self.options(names)
         options.qc_dir = self.qc_folder(folder)
+        options.cells_dir = self.cells_folder(folder)
         self._start([entry.path for entry in entries], options, workbook=workbook)
 
     def _start(self, paths, options, band=None, draw_on: str = "", workbook: Path | None = None) -> None:
@@ -603,8 +610,9 @@ class JunctionAnalysisWidget(QWidget):
         self._cancelled = False
         self._log_view.clear()
         self._busy(True)
-        self._log(f"Counting in {len(paths)} sample(s): {options.method.lower()}, "
-                  f"comparing each cell's {options.statistic}.")
+        self._log(f"Analysing {len(paths)} sample(s)"
+                  + (", the whole section" if options.whole_section else ", the region only")
+                  + f": {options.method.lower()}, comparing each cell's {options.statistic}.")
         relay = self._relay
 
         @thread_worker
@@ -623,6 +631,9 @@ class JunctionAnalysisWidget(QWidget):
             fault = any(r.gpu_fault for r in self._results)
             total = sum(r.n_cells for r in self._results)
             message = f"{total} cell(s) in {len(self._results) - len(failed)} region(s)."
+            section = sum(r.n_cells_section for r in self._results)
+            if section:
+                message += f" {section} in the whole sections; each sample's cells in {options.cells_dir}."
             if failed:
                 message += f" {len(failed)} failed: " + "; ".join(
                     f"{r.name} ({r.error})" for r in failed[:2])

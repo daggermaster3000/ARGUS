@@ -707,32 +707,40 @@ One thing the software cannot do for you: an atlas is a *brain*, so a field
 holding a whole larva has to be cropped to the head, or the fit will spend itself
 matching yolk and trunk to a brain-shaped reference.
 
-### Cells: segmentation and the junction count
+### Cells: the whole analysis in one Run
 
 The **Cells** panel finds cells with [Cellpose](https://cellpose.readthedocs.io), on
-the GPU when there is one. It is one panel for two tasks, which used to be the
-*Segmentation* panel (with its Batch and Train tabs) and the *Junction analysis*
-panel. On top, always in view, are the choices that change what a run does:
+the GPU when there is one, and analyses them in one go. **Run** does, for every
+sample: segment every cell of the whole assembloid (both organoids), count those
+in the junction region, score every cell positive or not per channel, place every
+cell (distance to the junction line and to the tissue edge), and write the counts,
+the per-sample metrics and every cell to a workbook (see
+[Junction analysis](#junction-analysis)). There is no task to choose. On top,
+always in view:
 
 | Control | |
 |---|---|
-| **Task** | *Segment and measure* — Cellpose on one channel, every object measured, labels saved with the sample if you like. *Count in the junction region* — the nuclei in each sample's junction band, scored positive or not per channel, placed relative to the line (see [Junction analysis](#junction-analysis)). |
-| **Samples** | *The image on screen*; *Selected in Experiment setup* (nothing has to be open); for the junction count also *Sent on by a junction review*. |
-| **Channels** | For the image on screen, the layers to segment and to measure; for a batch, the channel names matched in each file (`dapi` finds it wherever it sits). |
+| **Samples** | *The image on screen* (its cells are drawn over it); *Selected in Experiment setup* (nothing has to be open); *Sent on by a junction review*. |
 | **Model**, **Diameter** | Cellpose's model and the expected nucleus diameter in µm — the two settings that matter most. |
-| Junction count only | *Hand-drawn region: name contains*, *Positive when*, *k*, *Segment the whole section*. |
+| **Hand-drawn region: name contains**, **Positive when**, **k** | Which region is counted in, and the rule a cell is positive by. |
 
-**Run** does the task on the samples; **Stop**, **Export…** and, for the junction
-count, **QC…** sit beside it. The results are tabs under the buttons: *Objects*
-(one image), *Batch log*, *Junction counts*.
+**Run** (*Analyse this sample* / *Analyse the samples*), **Stop**, **Export…** and
+**QC…** sit beside each other; the counts table and the progress log are under them.
 
 Everything else is under **Settings**, closed until opened: Cellpose's mode,
 thresholds, stitching, size limits and normalisation; the device and batch size;
-the segmentation's results options (add the layer, save with the sample, restrict
-to stored ROIs) or the junction count's finer rules (threshold from, the figure
-compared, how far nuclei are grown, keeping every cell of the section). Cellpose's
-settings are there once, for both tasks. **Train a Cellpose model** opens the
-retraining described below.
+the analysis's finer rules (threshold from, the figure compared, how far nuclei
+are grown, *Segment only the junction region* for a quick look, *Of the rest of
+the section, keep only the positive cells*, storing the cells with the sample).
+
+Two more sections open the same way:
+
+- **Train a Cellpose model** — the retraining described below.
+- **Segment only: label maps for the Analysis panel** — Cellpose alone on one
+  channel (*Segment* / *Measure*: layers for the image on screen, channel names
+  for a batch — `dapi` finds it wherever it sits), every object measured, label
+  maps written into each sample for the [Analysis](#analysis) panel. No junction,
+  no scoring. Its own button, the *Objects* table and the batch log are inside.
 
 Two things are handled that a bare `model.eval` call is not:
 
@@ -1364,8 +1372,9 @@ outline as an automatic one is — and carries no QC status of its own.
 
 ### Junction analysis
 
-Counts the cells in the junction region and says which channels each one is
-positive for: the *Count in the junction region* task of the **Cells** panel.
+Segments every cell of the assembloid, counts those in the junction region and
+says which channels each cell is positive for, wherever it is: what **Run** in
+the **Cells** panel does.
 
 1. Make the region in **Fusion region macro** (drawn or automatic), and look
    through the run in **Junction review** if you like.
@@ -1376,7 +1385,7 @@ positive for: the *Count in the junction region* task of the **Cells** panel.
      Excluded samples and those still waiting to be redrawn are never counted. The
      panel fills in the experiment's newest review file and says how many samples
      it sends on, how many it leaves out and why, and any whose file it cannot find.
-3. **Count in this sample**, or **Run on the samples** (nothing has to be open).
+3. **Analyse this sample**, or **Analyse the samples** (nothing has to be open).
 
 **Which region each sample is counted in**, in this order:
 
@@ -1404,10 +1413,13 @@ note*.
 
 What happens:
 
-- **Nuclei are segmented only inside the region's bounding box** (Cellpose on the
-  nuclear stain, with the Cells panel's model and diameter). A slide scan
-  is fifty megapixels and the band three; one sample takes seconds, not minutes.
-  A cell is in the region when its centroid is.
+- **Nuclei are segmented over the whole section** (Cellpose on the nuclear
+  stain, with the Cells panel's model and diameter), in tiles of 2048 px, each
+  with 96 px of its neighbours so a cell cut by a tile's edge is counted once,
+  whole; bare slide is skipped. Minutes per slide scan. A cell is in the region
+  when its centroid is; the region's cells come from this same pass. *Segment
+  only the junction region* (Settings) segments the region's bounding box alone
+  — seconds — and then nothing is known about the rest of the section.
 - **Each cell is measured in every channel**, over its nucleus grown by
   *Measure around nuclei* (3 µm; a watershed, so neighbours split the gap) — a
   cytoplasmic label is not under the nucleus. Sizes stay the nucleus's own.
@@ -1426,20 +1438,18 @@ the bar on themselves. *k* defaults to 3. *Compare the cell's* picks which
 figure is tested: mean (default), median, P95 or max.
 
 **Threshold from** says which cells the median and SD (or the Otsu split) are
-taken from; the cells *counted* are those in the region either way.
+taken from. The same threshold then scores the region's cells and every other
+cell of the section.
 
-| Threshold from | What is segmented | Use when |
-|---|---|---|
-| The cells in the region (default) | the region only | most cells in the region are negative. Fast |
-| All cells of the sample | the whole section, both organoids | a large share of the region's cells is positive — they would raise their own bar and be undercounted. Minutes per slide scan instead of seconds |
+| Threshold from | Use when |
+|---|---|
+| The cells in the region (default) | most cells in the region are negative |
+| All cells of the sample (both organoids) | a large share of the region's cells is positive — they would raise their own bar and be undercounted |
 
 It has no effect on *Above the background* and *Fixed value*, which take nothing
-from the cells (and then only the region is segmented). The region is segmented
-and counted exactly as before; the rest of the section is segmented in tiles of
-2048 px, bare slide skipped, only to collect each cell's value. The background is the
-tissue between the cells of the region in both cases. *Threshold from* and
-*Cells behind the threshold* in the *Counts* sheet say what each threshold
-rests on.
+from the cells. The background is the tissue between the cells of the region in
+both cases. *Threshold from* and *Cells behind the threshold* in the *Counts*
+sheet say what each threshold rests on.
 
 Per cell and per channel the workbook has: mean, median, SD, CV, P95, max,
 integrated intensity, SDs over background and fold over background, plus the
@@ -1456,33 +1466,34 @@ channels (`AF555 + AF488`, `none`, …).
   holes filled, as the junction finder sees it), positive inside, negative for a
   cell on the rim past the edge. Good to about 5 µm, the outline's pixel size.
 
-Only the region is segmented, so these describe the cells near the line —
-unless **Segment the whole section** is ticked:
+**The whole section.** Every cell of the section is measured (every figure
+above), scored against the **region's** thresholds exactly as the region's cells
+are, and placed:
 
-- every cell of the section is segmented (in tiles of 2048 px, each with 96 px of
-  its neighbours so a cell cut by a tile's edge is counted once, whole; bare
-  slide skipped) and scored against the **region's** thresholds, exactly as the
-  region's cells are;
-- the workbook gets a **Section cells** sheet: every cell positive for a channel,
-  anywhere in the section, plus the region's cells, each with *In region*, its
-  *Positive for*, its distance to the junction line (positive on the band's side,
-  negative across it) and to the tissue edge. Tick *Keep every cell of the
-  section* to have all cells (about 100,000 rows a section; past a sheet's
-  limit it goes to a CSV beside the workbook);
-- the *Counts* sheet gets *Positive in the whole section* per channel;
-- the count in the region is unchanged. It takes minutes per slide scan instead
-  of seconds; with *Threshold from: All cells of the sample* the same pass serves
-  both.
+- each sample's cells go to `junction_analysis/cells/<sample>.csv`, one row per
+  cell (about 100,000 a section) with *In region*, *Positive for*, `<channel>
+  positive`, its distance to the junction line (positive on the band's side,
+  negative across it) and to the tissue edge. A single sample's are also in the
+  workbook's **Section cells** sheet (past a sheet's limit, in a CSV beside it).
+  *Of the rest of the section, keep only the positive cells* (Settings) keeps the
+  region's cells and the positive ones only;
+- the *Counts* sheet gets, per sample and channel: *Cells in the whole section*,
+  *Positive in the whole section* and its %, *Enrichment in the region* (%
+  positive in the region ÷ % positive in the section: above 1, positive cells
+  gather at the junction), and *Positives: median distance to the line* and *to
+  the edge* (µm) — where the positive cells sit; *Cells file* names the CSV.
 
 Results appear three ways:
 
 - **Table in the panel** — per sample and channel: cells in region, positive,
-  %, positive per mm² of region, positive per mm of junction, threshold, who
+  %, cells in the whole section, % positive there, enrichment in the region,
+  positive per mm² of region, positive per mm of junction, threshold, who
   drew the region, the finder's status and second search, the review decision.
 - **Layers** (single sample) — *Junction cells*: every counted cell as an
   outline; *`<channel>`+ cells*: the positive cells outlined in red.
 - **Workbook** — sheets *Counts*, *Combinations* (how many cells are positive
-  for which set of channels), *Cells* (every cell, every figure) and *Settings*.
+  for which set of channels), *Cells* (every cell of the region, every figure),
+  *Section cells* (a single sample's whole section) and *Settings*.
   A batch writes it to `junction_analysis/` in the experiment folder; **Export…**
   writes it anywhere. A sheet holds 1,048,575 rows; when there are more cells
   than that (a few hundred slide scans), the *Cells* table is written whole to
@@ -1673,7 +1684,7 @@ produced.
 
 #### What the batch export contains
 
-**Export…** in the Cells panel (task *Segment and measure*, samples *Selected in Experiment setup*) writes one workbook with three sheets (the
+**Export objects…** under the Cells panel's *Segment only* (samples *Selected in Experiment setup*) writes one workbook with three sheets (the
 Analysis panel writes the same three and more, straight from the files):
 
 - **Samples** — one row per file: genotype, channel, object count, how many
@@ -2186,9 +2197,9 @@ microscopy_viewer/
     intensity_comparison.py
     timeseries_widget.py    transport controls, the cache status, playback
     registration_widget.py  channel roles, the atlas, the region table
-    cells_widget.py         the Cells panel: segmentation and the junction count, settings in a drop-down
+    cells_widget.py         the Cells panel: the whole analysis in one Run, settings in a drop-down
     segmentation_widget.py  channel, model and diameter; the object table
-    junction_analysis_widget.py  the junction count's controls and run (laid out by cells_widget)
+    junction_analysis_widget.py  the analysis's controls and run (laid out by cells_widget)
     session_state.py        panel settings kept by name, saved as they change
     slide_dialog.py         pick samples, name the stainings, write the .pptx
     movie_dialog.py         pick a range and a rate, render the frames

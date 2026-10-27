@@ -6,10 +6,12 @@ into the other are looked for. This module does the looking:
 
 1. **The band** is read from the sample's store, or found on the spot when the
    sample has none yet.
-2. **The cells** are nuclei, segmented on the nuclear stain — but only inside
-   the band's bounding box. A slide scan is fifty megapixels and the band is
-   three; segmenting the rest would be most of the run and none of the answer.
-   A cell belongs to the band when its centroid is in it.
+2. **The cells** are nuclei, segmented on the nuclear stain over the whole
+   section — both organoids — in tiles (:func:`segment_section`). The cells
+   of the band are those whose centroid is in it; the rest are measured and
+   scored too, so a positive cell is placed wherever it is. With
+   ``CountOptions.whole_section`` off only the band's bounding box is
+   segmented: seconds instead of minutes, and nothing outside the band.
 3. **Each cell is measured in every channel**, over its nucleus grown by a few
    micrometres: the label in an assembloid is cytoplasmic as often as nuclear,
    and the nucleus alone would miss it. Sizes stay the nucleus's own.
@@ -116,13 +118,18 @@ class CountOptions:
     #: band) and to the tissue edge (positive inside); the edge needs the
     #: section's overview, a few seconds a sample.
     distances: bool = True
-    #: Also segment the whole section and score every cell in it against the
-    #: region's thresholds, with its distances (``JunctionCounts.section_cells``):
-    #: where the positive cells are, in the band or not. Minutes per slide scan.
-    whole_section: bool = False
+    #: Segment the whole section (both organoids) and score every cell in it
+    #: against the region's thresholds, with its distances
+    #: (``JunctionCounts.section_cells``); the region's cells are taken from
+    #: the same pass. Off: only the region's bounding box is segmented — seconds
+    #: instead of minutes a slide scan, and nothing known outside the region.
+    whole_section: bool = True
     #: With *whole_section*: keep every cell of the section, not only those
-    #: positive for a channel or in the region. Large: ~100,000 rows a section.
-    keep_section: bool = False
+    #: positive for a channel or in the region. ~100,000 rows a section.
+    keep_section: bool = True
+    #: Folder each sample's section cells are written to, one CSV per sample
+    #: (``<sample>.csv``), as soon as the sample is done; ``None`` writes none.
+    cells_dir: Path | None = None
     #: Store the counted cells with the sample as a label map.
     save_cells: bool = False
     cells_key: str = CELLS_KEY
@@ -156,14 +163,31 @@ class ChannelCount:
     n_threshold_cells: int = 0
     per_mm2: float = float("nan")
     per_mm_junction: float = float("nan")
-    #: With the whole section segmented: cells positive anywhere in it.
+    #: With the whole section segmented: its cells, those positive anywhere
+    #: in it, and where the positive ones lie — the median of their distance to
+    #: the junction line (positive on the band's side) and to the tissue edge.
+    n_cells_section: int = 0
     n_positive_section: float = float("nan")
+    median_line_um: float = float("nan")
+    median_edge_um: float = float("nan")
     #: The nuclear stain: every cell was found on it, so it is not scored.
     reference: bool = False
 
     @property
     def percent(self) -> float:
         return 100.0 * self.n_positive / self.n_cells if self.n_cells else float("nan")
+
+    @property
+    def percent_section(self) -> float:
+        if not self.n_cells_section or not np.isfinite(self.n_positive_section):
+            return float("nan")
+        return 100.0 * self.n_positive_section / self.n_cells_section
+
+    @property
+    def enrichment(self) -> float:
+        """How many times more often a cell is positive in the region than in the whole section."""
+        whole = self.percent_section
+        return self.percent / whole if np.isfinite(whole) and whole > 0 else float("nan")
 
 
 @dataclass
@@ -209,8 +233,11 @@ class JunctionCounts:
     #: The failure was the GPU's: no later sample can be segmented either.
     gpu_fault: bool = False
     #: With ``CountOptions.whole_section``: the section's cells (a DataFrame),
-    #: positive or in the region, with their place; ``None`` otherwise.
+    #: with their place; ``None`` otherwise, and after a batch has written them
+    #: to *cells_file*.
     section_cells: Any = None
+    n_cells_section: int = 0
+    cells_file: Path | None = None
 
     @property
     def ok(self) -> bool:
@@ -578,6 +605,19 @@ def sample_cell_values(
     return {name: table[f"{name} {options.statistic}"].to_numpy(dtype=np.float64) for name in names}
 
 
+@dataclass
+class SectionCells:
+    """The whole section's cells: one row each, and their labels over a crop."""
+
+    #: One row per cell: ``Label``, centroid and size, and every figure of
+    #: :data:`CELL_METRICS` per channel. Labels are unique over the section.
+    table: Any
+    #: The nuclei and their grown regions over the crop asked for, with the
+    #: section's labels; ``None`` when no crop was asked for.
+    labels: np.ndarray | None = None
+    regions: np.ndarray | None = None
+
+
 def section_cells(
     specs: Sequence[Any],
     names: Sequence[str],
@@ -587,6 +627,20 @@ def section_cells(
     segment: Callable[..., np.ndarray] | None = None,
     progress: Callable[[str], None] | None = None,
 ):
+    """Every cell of the section, as a table (see :func:`segment_section`)."""
+    return segment_section(specs, names, nuclear, voxel_yx, options, segment, progress).table
+
+
+def segment_section(
+    specs: Sequence[Any],
+    names: Sequence[str],
+    nuclear: int,
+    voxel_yx: Sequence[float],
+    options: CountOptions,
+    segment: Callable[..., np.ndarray] | None = None,
+    progress: Callable[[str], None] | None = None,
+    crop: tuple[slice, slice] | None = None,
+) -> SectionCells:
     """Every cell of the section: where it is, its size, and its figures in each channel.
 
     The whole section is segmented, in tiles of :data:`TILE_PX` so that it
@@ -595,8 +649,12 @@ def section_cells(
     whose centre is in the tile itself, so a cell cut by a tile's edge is
     counted once and whole. Each cell is measured as the cells in the region
     are — over its nucleus grown by ``options.expand_um`` — giving per channel
-    its mean and ``options.statistic``. A DataFrame, one row per cell, with
-    ``Centroid Y (µm)`` / ``Centroid X (µm)`` on the image's grid.
+    every figure of :data:`CELL_METRICS`. ``Centroid Y (µm)`` /
+    ``Centroid X (µm)`` are on the image's grid.
+
+    With *crop*, the cells are also pasted, nuclei and grown regions, onto a
+    label map of that window, under the same labels as the table's: the
+    region's cells, measured from the same segmentation.
     """
     import pandas as pd
     from scipy import ndimage
@@ -619,8 +677,11 @@ def section_cells(
     tiles = [tile for tile in tiles if float((stain[tile][::8, ::8] > split).mean()) >= TILE_MIN_TISSUE]
 
     voxel = tuple(float(v) for v in tuple(voxel_yx)[-2:])
-    figures = list(dict.fromkeys(("mean", options.statistic)))
     parts: dict[str, list[np.ndarray]] = {}
+    pasted = pasted_regions = None
+    if crop is not None:
+        pasted = np.zeros((crop[0].stop - crop[0].start, crop[1].stop - crop[1].start), dtype=np.int32)
+        pasted_regions = np.zeros_like(pasted)
 
     def add(key, values):
         parts.setdefault(key, []).append(np.asarray(values, dtype=np.float64))
@@ -641,18 +702,44 @@ def section_cells(
             continue
         ids, cy, cx = ids[own], cy[own], cx[own]
         regions = sg.expand_labels(nuclei, voxel, options.expand_um) if options.expand_um > 0 else nuclei
+        labels = np.arange(found + 1, found + 1 + ids.size, dtype=np.int64)
+        area = np.asarray(ndimage.sum(nuclei > 0, nuclei, ids)) * voxel[0] * voxel[1]
+        add("Label", labels)
         add("Centroid Y (µm)", cy * voxel[0])
         add("Centroid X (µm)", cx * voxel[1])
-        add("Nucleus area (µm²)", np.asarray(ndimage.sum(nuclei > 0, nuclei, ids)) * voxel[0] * voxel[1])
+        add("Nucleus area (µm²)", area)
+        add("Equivalent diameter (µm)", 2.0 * np.sqrt(area / np.pi))
         for position, name in enumerate(names):
             image = stain[window] if position == nuclear else _plane(specs[position], window)
             stats = label_stats(regions, image, ids)
-            for figure in figures:
+            for figure in CELL_METRICS:
                 add(f"{name} {figure}", stats[figure])
+        if crop is not None:
+            _paste(pasted, pasted_regions, crop, window, nuclei, regions, ids, labels)
         found += int(ids.size)
-    columns = ["Centroid Y (µm)", "Centroid X (µm)", "Nucleus area (µm²)",
-               *(f"{name} {figure}" for name in names for figure in figures)]
-    return pd.DataFrame({key: np.concatenate(parts[key]) if key in parts else np.zeros(0) for key in columns})
+    columns = ["Label", "Centroid Y (µm)", "Centroid X (µm)", "Nucleus area (µm²)", "Equivalent diameter (µm)",
+               *(f"{name} {figure}" for name in names for figure in CELL_METRICS)]
+    table = pd.DataFrame({key: np.concatenate(parts[key]) if key in parts else np.zeros(0) for key in columns})
+    table["Label"] = table["Label"].astype(np.int64)
+    return SectionCells(table=table, labels=pasted, regions=pasted_regions)
+
+
+def _paste(pasted: np.ndarray, pasted_regions: np.ndarray, crop: tuple[slice, slice], window: tuple[slice, slice],
+           nuclei: np.ndarray, regions: np.ndarray, ids: np.ndarray, labels: np.ndarray) -> None:
+    """Copy one tile's own cells onto the crop, under their section labels; never over another cell."""
+    y0, y1 = max(window[0].start, crop[0].start), min(window[0].stop, crop[0].stop)
+    x0, x1 = max(window[1].start, crop[1].start), min(window[1].stop, crop[1].stop)
+    if y0 >= y1 or x0 >= x1:
+        return
+    lut = np.zeros(int(max(nuclei.max(), regions.max())) + 1, dtype=np.int32)
+    lut[ids] = labels
+    source = (slice(y0 - window[0].start, y1 - window[0].start), slice(x0 - window[1].start, x1 - window[1].start))
+    target = (slice(y0 - crop[0].start, y1 - crop[0].start), slice(x0 - crop[1].start, x1 - crop[1].start))
+    for onto, cells in ((pasted, nuclei), (pasted_regions, regions)):
+        mapped = lut[np.asarray(cells[source])]
+        view = onto[target]
+        free = (mapped > 0) & (view == 0)
+        view[free] = mapped[free]
 
 
 def region_candidates(path: str | Path, options: CountOptions) -> list[str]:
@@ -722,18 +809,23 @@ IN_REGION_COLUMN = "In region"
 
 
 def score_section(section, counts: Sequence[ChannelCount], band: np.ndarray,
-                  voxel: Sequence[float], options: CountOptions):
+                  voxel: Sequence[float], options: CountOptions, region_labels=None):
     """The section's cells scored against the region's thresholds, as the region's cells were.
 
     Adds ``<channel> positive`` per scored channel, *Positive for* and *In
-    region*, and sets each count's ``n_positive_section``. Keeps the cells in
-    the region and those positive for a channel — or all of them with
-    ``options.keep_section``.
+    region*, and sets each count's ``n_cells_section`` and
+    ``n_positive_section``. A cell is in the region when its label is among
+    *region_labels* (the cells counted there, from the same segmentation), or
+    else when its centre is in *band*. Keeps the cells in the region and those
+    positive for a channel — or all of them with ``options.keep_section``.
     """
     table = section.copy()
-    rows = np.clip(np.round(table["Centroid Y (µm)"].to_numpy() / voxel[0]).astype(int), 0, band.shape[0] - 1)
-    cols = np.clip(np.round(table["Centroid X (µm)"].to_numpy() / voxel[1]).astype(int), 0, band.shape[1] - 1)
-    table[IN_REGION_COLUMN] = band[rows, cols]
+    if region_labels is not None and "Label" in table:
+        table[IN_REGION_COLUMN] = np.isin(table["Label"].to_numpy(), np.asarray(region_labels))
+    else:
+        rows = np.clip(np.round(table["Centroid Y (µm)"].to_numpy() / voxel[0]).astype(int), 0, band.shape[0] - 1)
+        cols = np.clip(np.round(table["Centroid X (µm)"].to_numpy() / voxel[1]).astype(int), 0, band.shape[1] - 1)
+        table[IN_REGION_COLUMN] = band[rows, cols]
     names: list[list[str]] = [[] for _ in range(len(table))]
     anywhere = np.zeros(len(table), dtype=bool)
     for count in counts:
@@ -743,6 +835,7 @@ def score_section(section, counts: Sequence[ChannelCount], band: np.ndarray,
         positive = np.isfinite(values) & (values > count.threshold)
         table[f"{count.channel} positive"] = positive
         count.n_positive_section = int(positive.sum())
+        count.n_cells_section = int(len(table))
         anywhere |= positive
         for index in np.flatnonzero(positive):
             names[index].append(count.channel)
@@ -750,6 +843,33 @@ def score_section(section, counts: Sequence[ChannelCount], band: np.ndarray,
     if not options.keep_section:
         table = table[anywhere | table[IN_REGION_COLUMN].to_numpy()].reset_index(drop=True)
     return table
+
+
+def place_positives(table, counts: Sequence[ChannelCount]) -> None:
+    """Where each channel's positive cells of the section lie: their median distances."""
+    if table is None or not len(table):
+        return
+    for count in counts:
+        column = f"{count.channel} positive"
+        if count.reference or column not in table:
+            continue
+        chosen = table[column].to_numpy(dtype=bool)
+        for key, attribute in ((LINE_COLUMN, "median_line_um"), (EDGE_COLUMN, "median_edge_um")):
+            if key in table and chosen.any():
+                values = table.loc[chosen, key].to_numpy(dtype=np.float64)
+                values = values[np.isfinite(values)]
+                setattr(count, attribute, float(np.median(values)) if values.size else float("nan"))
+
+
+def write_section(result: JunctionCounts, folder: Path) -> Path:
+    """Write the sample's section cells to ``<folder>/<sample>.csv``."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"{result.name}.csv"
+    frame = result.section_cells.copy()
+    frame.insert(0, "Sample", result.name)
+    frame.to_csv(target, index=False, encoding="utf-8-sig")
+    return target
 
 
 def place_cells(table, band: np.ndarray, line, voxel: Sequence[float], overview) -> None:
@@ -879,23 +999,27 @@ def analyse_sample(
         images = {name: _plane(spec, window) for name, spec in zip(names, specs)}
 
         # -- the cells --------------------------------------------------------
-        say(f"segmenting {inside.shape[1]} × {inside.shape[0]} px of {names[nuclear]}")
-        nuclei = np.asarray((segment or _segment)(images[names[nuclear]], voxel, options.settings, say))
-        if nuclei.shape != inside.shape:
-            raise ValueError(f"the segmentation came back {nuclei.shape}, expected {inside.shape}")
-        regions = sg.expand_labels(nuclei, voxel, options.expand_um) if options.expand_um > 0 else nuclei
         # A threshold from all the sample's cells needs all of them segmented;
         # a rule that takes nothing from the cells does not, whatever was asked.
         sample_values = None
         section = None
         if options.threshold_from == FROM_SAMPLE and options.method not in CELL_RULES:
             options = replace(options, threshold_from=FROM_REGION)
-        if options.whole_section or options.threshold_from == FROM_SAMPLE:
-            # One pass over the section serves both the threshold and the section's cells.
-            section = section_cells(specs, names, nuclear, voxel, options, segment, say)
+        if options.whole_section:
+            # One pass over the section: its cells, and the region's among them.
+            whole = segment_section(specs, names, nuclear, voxel, options, segment, say, crop=window)
+            section, nuclei, regions = whole.table, whole.labels, whole.regions
+        else:
+            say(f"segmenting {inside.shape[1]} × {inside.shape[0]} px of {names[nuclear]}")
+            nuclei = np.asarray((segment or _segment)(images[names[nuclear]], voxel, options.settings, say))
+            if nuclei.shape != inside.shape:
+                raise ValueError(f"the segmentation came back {nuclei.shape}, expected {inside.shape}")
+            regions = sg.expand_labels(nuclei, voxel, options.expand_um) if options.expand_um > 0 else nuclei
             if options.threshold_from == FROM_SAMPLE:
-                sample_values = {name: section[f"{name} {options.statistic}"].to_numpy(dtype=np.float64)
-                                 for name in names}
+                section = section_cells(specs, names, nuclear, voxel, options, segment, say)
+        if options.threshold_from == FROM_SAMPLE:
+            sample_values = {name: section[f"{name} {options.statistic}"].to_numpy(dtype=np.float64)
+                             for name in names}
         say("measuring the cells")
         table, counts = measure_cells(nuclei, regions, images, voxel, inside, options,
                                       nuclear=names[nuclear], origin=(y0, x0), sample_values=sample_values)
@@ -915,13 +1039,19 @@ def analyse_sample(
                 result.warnings.append(f"no distances: {exc}")
         if options.whole_section and section is not None:
             say(f"scoring the section's {len(section)} cells")
-            result.section_cells = score_section(section, counts, band, voxel, options)
+            result.n_cells_section = int(len(section))
+            result.section_cells = score_section(section, counts, band, voxel, options,
+                                                 region_labels=table["Label"].to_numpy())
             if options.distances and len(result.section_cells):
                 try:
                     place_cells(result.section_cells, band, details.get("line"), voxel, overview_now())
                 except Exception as exc:
                     logger.exception("could not place the section's cells of %s", target.name)
                     result.warnings.append(f"no distances for the section's cells: {exc}")
+            place_positives(result.section_cells, counts)
+            if options.cells_dir is not None and len(result.section_cells):
+                say("writing the section's cells")
+                result.cells_file = write_section(result, Path(options.cells_dir))
         kept = np.isin(nuclei, table["Label"].to_numpy())
         result.labels = np.where(kept, nuclei, 0)
         result.regions = np.where(np.isin(regions, table["Label"].to_numpy()), regions, 0)
@@ -988,6 +1118,8 @@ def run(
     The label maps of the cells are kept only for a single sample, where they
     are drawn (*keep_labels* forces it either way): a few hundred slide scans'
     worth is tens of gigabytes, and a batch needs the tables, not the maps.
+    For the same reason a batch lets go of each sample's section cells once
+    they are written to ``options.cells_dir``.
     """
     keep = len(paths) == 1 if keep_labels is None else bool(keep_labels)
     results: list[JunctionCounts] = []
@@ -1001,6 +1133,9 @@ def run(
         )
         if not keep:
             result.labels = result.regions = None
+            if result.cells_file is not None:
+                # Written already; a hundred sections of every cell do not fit in memory.
+                result.section_cells = None
         results.append(result)
         if progress is not None:
             progress(f"{prefix}: " + (result.error or summary_line(result)))
@@ -1021,7 +1156,12 @@ def run(
 def summary_line(result: JunctionCounts) -> str:
     """One line for the log: the cells, and the positives per channel."""
     parts = [f"{count.channel}+ {count.n_positive}" for count in result.channels if not count.reference]
-    return f"{result.n_cells} cell(s) in the region; " + (", ".join(parts) or "no channel scored")
+    line = f"{result.n_cells} cell(s) in the region; " + (", ".join(parts) or "no channel scored")
+    if result.n_cells_section:
+        whole = [f"{count.channel}+ {count.n_positive_section:.0f}" for count in result.channels
+                 if not count.reference and np.isfinite(count.n_positive_section)]
+        line += f" — {result.n_cells_section} in the section; " + ", ".join(whole)
+    return line
 
 
 # ---------------------------------------------------------------------------
@@ -1031,13 +1171,16 @@ def summary_line(result: JunctionCounts) -> str:
 #: Columns of the per-channel table, as the panel shows them and Excel gets them.
 COUNT_COLUMNS = (
     "Sample", "Channel", "Cells in region", "Positive", "Positive (%)",
-    "Positive per mm²", "Positive per mm of junction", "Positive in the whole section",
+    "Positive per mm²", "Positive per mm of junction",
+    "Cells in the whole section", "Positive in the whole section", "Positive in the whole section (%)",
+    "Enrichment in the region", "Positives: median distance to the line (µm)",
+    "Positives: median distance to the edge (µm)",
     "Threshold", "Rule", "Compared",
     "Threshold from", "Cells behind the threshold",
     "Cells median", "Cells SD", "Background median", "Background SD",
     "Region area (mm²)", "Junction length (µm)", "Region drawn by", "Region", "Junction status",
     "Junction flags", "Finder status", "Finder flags", "Finder second search",
-    "Review status", "Review decision", "Review note", "QC", "Problem", "File",
+    "Review status", "Review decision", "Review note", "QC", "Problem", "Cells file", "File",
 )
 
 
@@ -1050,6 +1193,7 @@ def counts_dataframe(results: Sequence[JunctionCounts]):
         shared = {
             "Sample": result.name,
             "Cells in region": result.n_cells,
+            "Cells in the whole section": result.n_cells_section or float("nan"),
             "Region area (mm²)": result.band_area_mm2,
             "Junction length (µm)": result.junction_length_um,
             "Region drawn by": result.region_by,
@@ -1064,6 +1208,7 @@ def counts_dataframe(results: Sequence[JunctionCounts]):
             "Review note": result.review_note,
             "QC": result.qc,
             "Problem": result.error or "; ".join(result.warnings),
+            "Cells file": str(result.cells_file) if result.cells_file else "",
             "File": str(result.path),
         }
         if not result.channels:
@@ -1078,6 +1223,10 @@ def counts_dataframe(results: Sequence[JunctionCounts]):
                 "Positive per mm²": float("nan") if count.reference else count.per_mm2,
                 "Positive per mm of junction": float("nan") if count.reference else count.per_mm_junction,
                 "Positive in the whole section": float("nan") if count.reference else count.n_positive_section,
+                "Positive in the whole section (%)": float("nan") if count.reference else count.percent_section,
+                "Enrichment in the region": float("nan") if count.reference else count.enrichment,
+                "Positives: median distance to the line (µm)": float("nan") if count.reference else count.median_line_um,
+                "Positives: median distance to the edge (µm)": float("nan") if count.reference else count.median_edge_um,
                 "Threshold": count.threshold,
                 "Rule": count.method,
                 "Compared": count.statistic,
@@ -1154,7 +1303,8 @@ def settings_dataframe(options: CountOptions):
         ("Nuclei grown by (µm)", options.expand_um),
         ("Junction found when none stored", options.find_junction),
         ("Whole section segmented", "yes, every cell kept" if options.whole_section and options.keep_section
-         else "yes, positive and in-region cells kept" if options.whole_section else "no"),
+         else "yes, positive and in-region cells kept" if options.whole_section else "no, the region only"),
+        ("Section cells written to", str(options.cells_dir) if options.cells_dir else "the workbook"),
     ]
     rows.extend((f"Fixed threshold: {name}", value) for name, value in options.fixed.items())
     settings = options.settings

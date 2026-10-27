@@ -195,8 +195,9 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
     stack = np.stack([np.clip(images[name], 1, 65535).astype(np.uint16)[None] for name in ("AF555", "AF488", "AF405")])
 
     def segment(plane, voxel, settings, progress=None):
-        # The crop the engine is handed is the region's bounding box plus a margin.
-        return labels[segment.window]
+        # The whole section (one tile here), or with whole_section off the
+        # region's bounding box plus a margin.
+        return labels if plane.shape == labels.shape else labels[segment.window]
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -308,7 +309,8 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
             return labels if plane.shape == labels.shape else labels[segment.window]
 
         everywhere = ja.analyse_sample(paths[0], ja.CountOptions(
-            expand_um=0.0, find_junction=False, threshold_from=ja.FROM_SAMPLE), segment=segment_all)
+            expand_um=0.0, find_junction=False, threshold_from=ja.FROM_SAMPLE, whole_section=False),
+            segment=segment_all)
         check(everywhere.ok and handed == [(120, 170), labels.shape],
               f"the region is segmented for the count and the whole section for the threshold ({handed})")
         check(sorted(everywhere.cells["Label"]) == expected and everywhere.labels.shape == (120, 170)
@@ -318,7 +320,8 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
               f"with the threshold from every cell ({everywhere.channels[0].n_threshold_cells})")
         handed.clear()
         fixed = ja.analyse_sample(paths[0], ja.CountOptions(
-            expand_um=0.0, find_junction=False, threshold_from=ja.FROM_SAMPLE, method=ja.METHOD_BACKGROUND),
+            expand_um=0.0, find_junction=False, threshold_from=ja.FROM_SAMPLE, method=ja.METHOD_BACKGROUND,
+            whole_section=False),
             segment=lambda plane, voxel, settings, progress=None: handed.append(plane.shape) or labels[segment.window])
         check(fixed.ok and handed == [(120, 170)], "a rule that takes nothing from the cells segments only the region")
 
@@ -364,8 +367,12 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
               f"cells across a tile's edge are counted once and whole ({len(cut)} of {len(centres)})")
 
         # The whole section: every cell scored against the region's thresholds, and placed.
-        whole = ja.analyse_sample(paths[0], ja.CountOptions(expand_um=0.0, find_junction=False, whole_section=True),
-                                  segment=segment_all)
+        handed.clear()
+        whole = ja.analyse_sample(paths[0], ja.CountOptions(expand_um=0.0, find_junction=False, whole_section=True,
+                                                            keep_section=False), segment=segment_all)
+        check(handed == [labels.shape], f"the whole section is segmented once, the region's cells taken from it ({handed})")
+        check(sorted(whole.cells["Label"]) == expected and whole.labels.shape == (120, 170),
+              "the region's cells are the same, on the region's crop")
         section = whole.section_cells
         green_count = next(count for count in whole.channels if count.channel == "AF488")
         check(whole.ok and section is not None and int(section[ja.IN_REGION_COLUMN].sum()) == whole.n_cells,
@@ -378,9 +385,27 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
               "each with its distances: cells across the line are negative")
         kept = (section["Positive for"] != "none").to_numpy() | section[ja.IN_REGION_COLUMN].to_numpy()
         check(len(section) > 0 and bool(kept.all()), "only positive and in-region cells are kept")
-        every = ja.analyse_sample(paths[0], ja.CountOptions(expand_um=0.0, find_junction=False, whole_section=True,
-                                                            keep_section=True), segment=segment_all)
-        check(len(every.section_cells) == int(labels.max()), f"or every cell, when asked ({len(every.section_cells)})")
+        every = ja.analyse_sample(paths[0], ja.CountOptions(expand_um=0.0, find_junction=False,
+                                                            cells_dir=root / "cells"), segment=segment_all)
+        check(len(every.section_cells) == int(labels.max()) == every.n_cells_section,
+              f"by default every cell of the section is kept ({len(every.section_cells)})")
+        green_all = next(count for count in every.channels if count.channel == "AF488")
+        check(green_all.n_cells_section == int(labels.max())
+              and abs(green_all.percent_section - 100.0 * len(green_cells) / int(labels.max())) < 1e-9,
+              f"with the share positive in the whole section ({green_all.percent_section:.1f} %)")
+        check(abs(green_all.enrichment - green_all.percent / green_all.percent_section) < 1e-9
+              and np.isfinite(green_all.median_line_um) and np.isfinite(green_all.median_edge_um),
+              "how enriched the region is, and where the positives lie")
+        check(every.cells_file == root / "cells" / "assembloid_s0.csv" and every.cells_file.is_file(),
+              "and the section's cells are written to their own CSV")
+        row = ja.counts_dataframe([every]).set_index("Channel").loc["AF488"]
+        check(row["Cells in the whole section"] == int(labels.max())
+              and abs(row["Enrichment in the region"] - green_all.enrichment) < 1e-9,
+              "the counts table carries the section's figures")
+        batch = ja.run([paths[0], paths[0]], ja.CountOptions(expand_um=0.0, find_junction=False,
+                                                             cells_dir=root / "cells"), segment=segment_all)
+        check(all(r.section_cells is None and r.cells_file is not None for r in batch),
+              "a batch lets go of the section's cells once they are written")
         written = ja.export([whole], root / "section.xlsx", ja.CountOptions(whole_section=True))
         import openpyxl
 
@@ -429,7 +454,8 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         import pandas as pd
 
         sheets = pd.read_excel(written, sheet_name=None)
-        check(set(sheets) == {"Counts", "Combinations", "Cells", "Settings"}, f"the workbook has its four sheets ({sorted(sheets)})")
+        check(set(sheets) == {"Counts", "Combinations", "Cells", "Section cells", "Settings"},
+              f"the workbook has its five sheets, the section's cells among them ({sorted(sheets)})")
         check(len(sheets["Cells"]) == results[0].n_cells and "AF488 SD" in sheets["Cells"].columns,
               "with every cell and its figures")
 
@@ -445,7 +471,7 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         beside = root / "many_cells.csv"
         check(beside.exists() and len(pd.read_csv(beside)) == results[0].n_cells,
               "a table too long for a sheet is written whole to a csv beside the workbook")
-        check(set(sheets) == {"Counts", "Combinations", "Cells", "Settings"}
+        check(set(sheets) == {"Counts", "Combinations", "Cells", "Section cells", "Settings"}
               and sheets["Cells"]["Written to"].iloc[0] == beside.name,
               "and its sheet says where it went")
         check(len(sheets["Counts"]) == 3 + 1, "the other sheets are written as before")
