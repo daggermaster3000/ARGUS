@@ -4,6 +4,7 @@ Used by ``classical_vs_cellpose.ipynb``; run on its own to (re)compute the cache
 
     python notebooks/validation/classical_vs_cellpose.py        # every sample not done yet
     python notebooks/validation/classical_vs_cellpose.py 2      # just the first two, to time it
+    python notebooks/validation/classical_vs_cellpose.py cached # only bring the samples done up to date
 
 The Cellpose side is not run again: each sample's cells, nuclei and grown
 regions are read from the newest cells-analysis run that saved them
@@ -20,6 +21,12 @@ The classical side segments the AF488 channel itself, at full resolution:
    background-subtracted tissue for k = 3, 5 and 8 (``kmad3`` …), *triangle*
    (made for a histogram with one big peak and a long tail) and *Otsu*;
 4. objects smaller than :data:`MIN_OBJECT_UM2` dropped, small holes filled.
+
+Each cell is also called by **median + 7 SD on the median-filtered channel**
+(the rule ``positivity_metrics`` found best; ``count_cells.less_local_median``).
+For the samples Quillan clicked (the earlier annotated set), only the masks are
+made, in ``junction_eval/classical_clicked/<name>/``; the notebook scores them
+and the Cellpose rules against the clicks.
 
 What is kept, per sample, in ``junction_eval/classical/<name>/``:
 
@@ -53,6 +60,7 @@ from pathlib import Path  # noqa: E402
 import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import count_cells as cc  # noqa: E402
 import junction_tuning as jt  # noqa: E402
 
 from microscopy_viewer import fusion as fu  # noqa: E402,F401
@@ -63,8 +71,13 @@ from microscopy_viewer import loaders  # noqa: E402
 #: Where the samples and their cells-analysis runs are, and where this writes.
 DATA = Path(r"D:\Slidescanner extracted")
 OUT = jt.OUT / "classical"
-#: Bump to recompute what is cached.
-VERSION = 1
+#: Bump to recompute what is cached. Version 2 adds median + 7 SD on the
+#: median-filtered channel (version-1 caches are upgraded in place).
+VERSION = 2
+#: Masks of the samples Quillan clicked (from the earlier annotated set, whose
+#: Cellpose cells are ``count_cells.py``'s): masks only, scored in the notebook.
+OUT_CLICKED = jt.OUT / "classical_clicked"
+MANUAL_COUNTS = "Manual counts Quillan"
 
 LABEL_HINT = "488"
 SMOOTH_UM = 0.5
@@ -80,6 +93,9 @@ COVER = 0.25
 #: The two Cellpose rules compared.
 RING_RATIO = ja.RING_RATIO
 K_SD = 3.0
+#: The rule ``positivity_metrics`` found best (21 Oct): median + 7 SD of the
+#: region's cells, on the channel less its local median (``count_cells``).
+K_SD_FILTERED = 7.0
 
 
 def below_normal_priority() -> None:
@@ -171,6 +187,35 @@ def cellpose_cells(sample: ja.SegmentedSample, voxel: tuple[float, float]):
     return table, {"median_3sd_threshold": centre + K_SD * spread}
 
 
+def add_median_filtered(cells, af488: np.ndarray, grown: np.ndarray, voxel: float) -> float:
+    """Add each cell's AF488 mean on the median-filtered channel and the median + 7 SD call; return the cut."""
+    from scipy import ndimage
+
+    filtered = cc.less_local_median(af488, voxel)
+    ids = cells["Label"].to_numpy(dtype=np.int64)
+    cells["AF488 mean (median filter)"] = np.asarray(ndimage.mean(filtered, grown, ids), dtype=float)
+    region = cells[ja.IN_REGION_COLUMN].astype(bool).to_numpy()
+    centre, spread = ja.robust_centre_and_spread(cells.loc[region, "AF488 mean (median filter)"].to_numpy(dtype=float))
+    cut = centre + K_SD_FILTERED * spread
+    cells["median + 7 SD (median filter)"] = cells["AF488 mean (median filter)"] > cut
+    return float(cut)
+
+
+def read_planes(path: Path):
+    """AF488 and the nuclear stain, flattened over Z, and the pixel size."""
+    specs = loaders.load_path(path)
+    try:
+        names = [str(spec.channel_name or spec.name) for spec in specs]
+        label_index = next(i for i, name in enumerate(names) if LABEL_HINT in name)
+        nuclear_index = jn.pick_channel(names, "", jn.NUCLEAR_HINTS)
+        voxel = float(specs[0].scale[-1])
+        first = specs[0].data[0] if specs[0].multiscale else specs[0].data
+        whole = (slice(0, int(first.shape[-2])), slice(0, int(first.shape[-1])))
+        return ja._plane(specs[label_index], whole).astype(np.float32), ja._plane(specs[nuclear_index], whole), voxel
+    finally:
+        loaders.release(path)
+
+
 def object_table(mask: np.ndarray, nuclei: np.ndarray, voxel: float, band: np.ndarray | None, line):
     """Every object of *mask*: size, shape, skeleton, nuclei touched, place."""
     import pandas as pd
@@ -220,18 +265,7 @@ def run_sample(sample: ja.SegmentedSample) -> dict:
     started = time.perf_counter()
     timings = {}
     path = sample.path
-    specs = loaders.load_path(path)
-    try:
-        names = [str(spec.channel_name or spec.name) for spec in specs]
-        label_index = next(i for i, name in enumerate(names) if LABEL_HINT in name)
-        nuclear_index = jn.pick_channel(names, "", jn.NUCLEAR_HINTS)
-        voxel = float(specs[0].scale[-1])
-        first = specs[0].data[0] if specs[0].multiscale else specs[0].data
-        whole = (slice(0, int(first.shape[-2])), slice(0, int(first.shape[-1])))
-        af488 = ja._plane(specs[label_index], whole).astype(np.float32)
-        nuclear = ja._plane(specs[nuclear_index], whole)
-    finally:
-        loaders.release(path)
+    af488, nuclear, voxel = read_planes(path)
     timings["read"] = time.perf_counter() - started
 
     t = time.perf_counter()
@@ -251,6 +285,7 @@ def run_sample(sample: ja.SegmentedSample) -> dict:
     size = np.asarray(ndimage.sum(grown > 0, grown, ids), dtype=float)
     for method, mask in masks.items():
         cells[f"cover {method}"] = np.asarray(ndimage.sum(mask, grown, ids)) / np.where(size > 0, size, np.nan)
+    rules["median_7sd_filtered_threshold"] = add_median_filtered(cells, af488, grown, voxel)
     timings["cells"] = time.perf_counter() - t
 
     t = time.perf_counter()
@@ -277,14 +312,59 @@ def run_sample(sample: ja.SegmentedSample) -> dict:
     return summary
 
 
-def done(name: str) -> bool:
+def cached_version(name: str) -> int:
     target = OUT / name / "summary.json"
-    if not target.is_file():
-        return False
     try:
-        return json.loads(target.read_text(encoding="utf-8")).get("version") == VERSION
+        return int(json.loads(target.read_text(encoding="utf-8")).get("version", 0)) if target.is_file() else 0
     except Exception:
-        return False
+        return 0
+
+
+def upgrade(sample: ja.SegmentedSample) -> None:
+    """A version-1 cache: add median + 7 SD (median filter) to its cells, nothing else redone."""
+    import pandas as pd
+
+    folder = OUT / sample.name
+    summary = json.loads((folder / "summary.json").read_text(encoding="utf-8"))
+    cells = pd.read_parquet(folder / "cells.parquet")
+    specs = loaders.load_path(sample.path)
+    try:
+        names = [str(spec.channel_name or spec.name) for spec in specs]
+        spec = specs[next(i for i, name in enumerate(names) if LABEL_HINT in name)]
+        first = spec.data[0] if spec.multiscale else spec.data
+        af488 = ja._plane(spec, (slice(0, int(first.shape[-2])), slice(0, int(first.shape[-1])))).astype(np.float32)
+    finally:
+        loaders.release(sample.path)
+    grown = ja.read_labels(sample.file("grown_file"))
+    summary["median_7sd_filtered_threshold"] = add_median_filtered(cells, af488, grown, summary["voxel_um"])
+    summary["version"] = VERSION
+    cells.to_parquet(folder / "cells.parquet")
+    (folder / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
+
+
+def clicked_samples() -> list[tuple[str, Path]]:
+    """The annotated samples Quillan clicked AF488-positive cells in."""
+    from microscopy_viewer import ims_store
+
+    table = jt.annotated_samples()
+    return [(row.name, Path(row.path)) for row in table.itertuples()
+            if Path(row.path).is_file() and MANUAL_COUNTS in ims_store.list_labels(row.path)]
+
+
+def run_masks_only(name: str, path: Path) -> dict:
+    """The classical masks of a clicked sample, for the notebook to score against the clicks."""
+    import tifffile
+
+    folder = OUT_CLICKED / name
+    folder.mkdir(parents=True, exist_ok=True)
+    af488, nuclear, voxel = read_planes(path)
+    masks, info = classical_masks(af488, tissue_mask(nuclear), voxel)
+    for method, mask in masks.items():
+        tifffile.imwrite(folder / f"{method}.tif", mask.astype(np.uint8), compression="zlib")
+    summary = {"version": VERSION, "sample": name, "file": str(path), "voxel_um": voxel,
+               "shape": [int(v) for v in af488.shape], **info}
+    (folder / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
+    return summary
 
 
 def samples() -> list[ja.SegmentedSample]:
@@ -304,18 +384,35 @@ def samples() -> list[ja.SegmentedSample]:
 
 def main(argv: list[str]) -> int:
     below_normal_priority()
-    todo = [sample for sample in samples() if not done(sample.name)]
-    if argv:
+    todo = [sample for sample in samples() if cached_version(sample.name) < VERSION]
+    if argv and argv[0] == "cached":
+        # Bring the samples done already up to date (and mask the clicked ones); no new samples.
+        todo = [sample for sample in todo if cached_version(sample.name) >= 1]
+    elif argv:
         todo = todo[: int(argv[0])]
     print(f"{len(todo)} sample(s) to do -> {OUT}", flush=True)
     for index, sample in enumerate(todo, start=1):
         started = time.perf_counter()
         try:
-            summary = run_sample(sample)
-            print(f"[{index}/{len(todo)}] {sample.name}: {time.perf_counter() - started:.0f} s {summary['timings_s']}",
-                  flush=True)
+            if cached_version(sample.name) == 1:
+                upgrade(sample)
+                print(f"[{index}/{len(todo)}] {sample.name}: median + 7 SD added, {time.perf_counter() - started:.0f} s",
+                      flush=True)
+            else:
+                summary = run_sample(sample)
+                print(f"[{index}/{len(todo)}] {sample.name}: {time.perf_counter() - started:.0f} s {summary['timings_s']}",
+                      flush=True)
         except Exception as exc:
             print(f"[{index}/{len(todo)}] {sample.name}: FAILED {exc!r}", flush=True)
+    clicked = [(name, path) for name, path in clicked_samples() if not (OUT_CLICKED / name / "summary.json").is_file()]
+    print(f"{len(clicked)} clicked sample(s) to mask -> {OUT_CLICKED}", flush=True)
+    for index, (name, path) in enumerate(clicked, start=1):
+        started = time.perf_counter()
+        try:
+            run_masks_only(name, path)
+            print(f"[{index}/{len(clicked)}] {name}: {time.perf_counter() - started:.0f} s", flush=True)
+        except Exception as exc:
+            print(f"[{index}/{len(clicked)}] {name}: FAILED {exc!r}", flush=True)
     return 0
 
 
