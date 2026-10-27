@@ -1531,6 +1531,27 @@ def tissue_of(overview: Overview, all_channels: bool = TISSUE_ALL_CHANNELS) -> n
     return ndimage.binary_fill_holes(tissue)
 
 
+def edge_distance(overview: Overview, y_px: np.ndarray, x_px: np.ndarray,
+                  filled: np.ndarray | None = None) -> np.ndarray:
+    """Distance (µm) from each point to the section's outline: positive inside, negative outside.
+
+    *y_px*, *x_px* are on the image's own pixel grid; the outline is
+    :func:`tissue_of` on the overview (pass it as *filled* when already made),
+    so the distance is good to about one overview pixel (~5 µm).
+    """
+    from scipy import ndimage
+
+    if filled is None:
+        filled = tissue_of(overview)
+    um, step = overview.um, overview.step
+    inside = ndimage.distance_transform_edt(filled) * um - um / 2
+    outside = ndimage.distance_transform_edt(~filled) * um - um / 2
+    signed = np.where(filled, inside, -outside)
+    coords = np.vstack([(np.asarray(y_px, float) - (step - 1) / 2) / step,
+                        (np.asarray(x_px, float) - (step - 1) / 2) / step])
+    return ndimage.map_coordinates(signed, coords, order=1, mode="nearest").astype(np.float32)
+
+
 def band_along_tissue(
     overview: Overview,
     filled: np.ndarray,

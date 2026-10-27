@@ -1416,6 +1416,19 @@ integrated intensity, SDs over background and fold over background, plus the
 nucleus area, diameter and position, and a *Positive for* column naming the
 channels (`AF555 + AF488`, `none`, …).
 
+**Where each cell is**, in the *Cells* sheet:
+
+- *Distance to the junction line (µm)*: from the cell's centre to the line the
+  region was built on (the hand-drawn one, or the finder's), positive on the
+  band's side. *Beside the junction line* is `False` for a cell nearest one of
+  the line's ends, past it rather than beside it, where the distance says little.
+- *Distance to the tissue edge (µm)*: to the section's outline (all channels,
+  holes filled, as the junction finder sees it), positive inside, negative for a
+  cell on the rim past the edge. Good to about 5 µm, the outline's pixel size.
+
+Only the region is segmented, so these describe the cells near the line; for a
+profile across the whole section use the whole-dataset run.
+
 Results appear three ways:
 
 - **Table in the panel** — per sample and channel: cells in region, positive,

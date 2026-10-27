@@ -115,6 +115,26 @@ def fit_spline(points: Sequence[Sequence[float]], spacing: float = 1.0) -> np.nd
     return np.asarray(CubicSpline(along, line, bc_type="natural")(samples), dtype=float)
 
 
+def signed_distance(points: Sequence[Sequence[float]], line: Sequence[Sequence[float]],
+                    spacing: float = 2.0) -> tuple[np.ndarray, np.ndarray, float]:
+    """How far each point is from *line*, and on which side: ``(distance, beside, length)``.
+
+    *points* and *line* are ``(y, x)`` in the same units (µm). The distance is
+    to the nearest point of the smoothed line (:func:`fit_spline`), positive on
+    its left (:func:`normals`) and negative on its right. *beside* is ``False``
+    for a point nearest one of the line's two ends — past the line rather than
+    beside it, where its side means little. *length* is the smoothed line's.
+    """
+    from scipy.spatial import cKDTree
+
+    curve = fit_spline(line, spacing)
+    normal = normals(curve)
+    pts = np.asarray(points, dtype=float).reshape(-1, 2)
+    distance, nearest = cKDTree(curve).query(pts)
+    side = np.einsum("ij,ij->i", pts - curve[nearest], normal[nearest])
+    return distance * np.where(side < 0, -1.0, 1.0), (nearest > 0) & (nearest < len(curve) - 1), line_length(curve)
+
+
 def _unit(vectors: np.ndarray) -> np.ndarray:
     lengths = np.linalg.norm(vectors, axis=-1, keepdims=True)
     return vectors / np.where(lengths == 0, 1.0, lengths)

@@ -136,6 +136,16 @@ def test_a_bent_junction_has_no_holes() -> None:
     check(len(raw) == len(arc), "without the spline the line is used as drawn")
 
 
+def test_points_know_their_distance_and_side() -> None:
+    print("distance and side of a point to the line")
+    line = [[0.0, 0.0], [0.0, 100.0]]  # walking right along y = 0
+    distance, beside, length = fu.signed_distance([[-5.0, 50.0], [5.0, 50.0], [0.0, 130.0]], line)
+    check(np.allclose(distance[:2], [5.0, -5.0], atol=0.2), f"left of the line is positive, right negative ({distance[:2]})")
+    check(list(beside) == [True, True, False] and abs(distance[2] - 30.0) < 0.5,
+          "a point past the end is not beside it, and is as far as the end")
+    check(abs(length - 100.0) < 0.5, "the line's length comes back too")
+
+
 def main() -> int:
     for test in (
         test_the_spline_goes_through_the_clicks,
@@ -143,6 +153,7 @@ def main() -> int:
         test_the_outer_caps_splay_the_ends,
         test_the_region_is_in_micrometres,
         test_a_bent_junction_has_no_holes,
+        test_points_know_their_distance_and_side,
     ):
         test()
         print()

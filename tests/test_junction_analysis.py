@@ -231,6 +231,17 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         check(result.band_source == f"stored ({fu.DEFAULT_KEY})" and result.status == "ok",
               f"with no hand-drawn region, the automatic one is used, with its status ({result.band_source})")
         check(abs(result.junction_length_um - 110.0) < 1.0, f"the junction length comes with it ({result.junction_length_um:.0f} µm)")
+        cells = result.cells
+        beside = cells[ja.BESIDE_COLUMN].to_numpy()
+        depth = cells[ja.LINE_COLUMN].to_numpy()
+        expected_depth = cells["Centroid Y (µm)"].to_numpy() - 30.0
+        check(beside.any() and np.allclose(depth[beside], expected_depth[beside], atol=1.5),
+              "each cell has its distance to the line, positive into the band")
+        check(ja.EDGE_COLUMN in cells and np.isfinite(cells[ja.EDGE_COLUMN]).all(),
+              "and to the tissue edge")
+        plain = ja.analyse_sample(paths[0], ja.CountOptions(expand_um=0.0, find_junction=False, distances=False),
+                                  segment=segment)
+        check(plain.ok and ja.LINE_COLUMN not in plain.cells, "distances can be left out")
         check(abs(result.band_area_mm2 - 80 * 110 / 1e6) < 1e-9, "and the region's area")
         green = next(count for count in result.channels if count.channel == "AF488")
         check(green.n_positive == len(set(green_cells) & set(expected)), "GFP-positive cells are counted")

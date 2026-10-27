@@ -121,11 +121,7 @@ def short(name: str) -> str:
 
 def _side(points_um, line_um):
     """Raw signed distance of points to a line (+ on its normals' side), and whether beside it."""
-    curve = fu.fit_spline(np.asarray(line_um, dtype=float).reshape(-1, 2), 2.0)
-    normal = fu.normals(curve)
-    distance, nearest = cKDTree(curve).query(points_um)
-    side = np.einsum("ij,ij->i", points_um - curve[nearest], normal[nearest])
-    return distance * np.sign(side), (nearest > 0) & (nearest < len(curve) - 1), fu.line_length(curve)
+    return fu.signed_distance(points_um, np.asarray(line_um, dtype=float).reshape(-1, 2))
 
 
 def _automatic(name):
@@ -140,14 +136,7 @@ def _automatic(name):
 
 
 def _edge(name, y_px, x_px):
-    overview = jt.load_case(name)[0]
-    filled = jn.tissue_of(overview)
-    um, step = overview.um, overview.step
-    inside = ndimage.distance_transform_edt(filled) * um - um / 2
-    outside = ndimage.distance_transform_edt(~filled) * um - um / 2
-    signed = np.where(filled, inside, -outside)
-    coords = np.vstack([(y_px - (step - 1) / 2) / step, (x_px - (step - 1) / 2) / step])
-    return ndimage.map_coordinates(signed, coords, order=1, mode="nearest").astype(np.float32)
+    return jn.edge_distance(jt.load_case(name)[0], y_px, x_px)
 
 
 def _geometry(name, path, df, voxel, shape):

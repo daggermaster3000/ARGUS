@@ -108,6 +108,10 @@ class CountOptions:
     expand_um: float = 3.0
     #: Find the junction when the sample has no stored band.
     find_junction: bool = True
+    #: Give every cell its distance to the junction line (positive into the
+    #: band) and to the tissue edge (positive inside); the edge needs the
+    #: section's overview, a few seconds a sample.
+    distances: bool = True
     #: Store the counted cells with the sample as a label map.
     save_cells: bool = False
     cells_key: str = CELLS_KEY
@@ -643,10 +647,45 @@ def _stored_band(path: Path, keys: Sequence[str] | str, shape_yx: tuple[int, int
         line = np.asarray(attrs["line_yx_um"], dtype=float).reshape(-1, 2)
         if len(line) >= 2:
             details["length"] = fu.line_length(fu.fit_spline(line, 5.0))
+            details["line"] = line
     for name in ("status", "flags"):
         if name in attrs:
             details[name] = ims_store._text(attrs[name])
     return np.asarray(labels).reshape(labels.shape[-2:]) > 0, details
+
+
+#: Per-cell columns giving where the cell is.
+LINE_COLUMN = "Distance to the junction line (µm)"
+BESIDE_COLUMN = "Beside the junction line"
+EDGE_COLUMN = "Distance to the tissue edge (µm)"
+
+
+def place_cells(table, band: np.ndarray, line, voxel: Sequence[float], overview) -> None:
+    """Add to *table* each cell's distance to the junction *line* and to the tissue edge.
+
+    The line distance is signed so the band's side is positive (cells on the
+    other side, when a band reaches across, are negative); *Beside the junction
+    line* is ``False`` for a cell nearest one of the line's ends, past it rather
+    than beside it. The edge distance is positive inside the section's outline,
+    negative outside it (cells on the rim past the tissue edge). Without a line
+    the line columns are left empty.
+    """
+    ys = table["Centroid Y (µm)"].to_numpy(dtype=float)
+    xs = table["Centroid X (µm)"].to_numpy(dtype=float)
+    rows = np.clip(np.round(ys / voxel[0]).astype(int), 0, band.shape[0] - 1)
+    cols = np.clip(np.round(xs / voxel[1]).astype(int), 0, band.shape[1] - 1)
+    if line is not None and len(np.asarray(line).reshape(-1, 2)) >= 2:
+        raw, beside, _length = fu.signed_distance(np.column_stack([ys, xs]), line)
+        inside = band[rows, cols]
+        chosen = inside & beside if (inside & beside).any() else inside
+        flip = np.sign(np.median(np.sign(raw[chosen]))) if chosen.any() else 1.0
+        table[LINE_COLUMN] = (raw * (flip or 1.0)).astype(np.float32)
+        table[BESIDE_COLUMN] = beside
+    else:
+        table[LINE_COLUMN] = np.float32(np.nan)
+        table[BESIDE_COLUMN] = False
+    if overview is not None:
+        table[EDGE_COLUMN] = jn.edge_distance(overview, ys / voxel[0], xs / voxel[1])
 
 
 def analyse_sample(
@@ -692,6 +731,7 @@ def analyse_sample(
 
         # -- the band ---------------------------------------------------------
         details: dict[str, Any] = {}
+        seen_overview = None
         if band is not None:
             band = np.asarray(band).reshape(np.shape(band)[-2:]) > 0
             if band.shape != shape_yx:
@@ -715,8 +755,9 @@ def analyse_sample(
             if found.line_um is None or found.band is None:
                 raise ValueError("no junction found: " + ("; ".join(found.flags) or "no reason given"))
             band = jn.full_resolution_band(found, overview, junction) > 0
+            seen_overview = overview
             details = {"source": "found automatically", "by": "junction finder", "status": found.status,
-                       "flags": "; ".join(found.flags),
+                       "flags": "; ".join(found.flags), "line": np.asarray(found.line_um, float),
                        "length": found.metrics.get("Junction length (um)", float("nan"))}
             finder = {"status": found.status, "flags": "; ".join(found.flags),
                       "second_search": "yes" if found.metrics.get("No-seam fallback") else "no"}
@@ -762,6 +803,15 @@ def analyse_sample(
         say("measuring the cells")
         table, counts = measure_cells(nuclei, regions, images, voxel, inside, options,
                                       nuclear=names[nuclear], origin=(y0, x0), sample_values=sample_values)
+        if options.distances and len(table):
+            say("placing the cells: distance to the line and to the tissue edge")
+            try:
+                place_cells(table, band, details.get("line"), voxel,
+                            seen_overview if seen_overview is not None
+                            else jn.build_overview(specs, options.junction or jn.JunctionOptions(save=False)))
+            except Exception as exc:
+                logger.exception("could not place the cells of %s", target.name)
+                result.warnings.append(f"no distances: {exc}")
         kept = np.isin(nuclei, table["Label"].to_numpy())
         result.labels = np.where(kept, nuclei, 0)
         result.regions = np.where(np.isin(regions, table["Label"].to_numpy()), regions, 0)

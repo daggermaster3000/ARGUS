@@ -104,15 +104,8 @@ def selection() -> pd.DataFrame:
 
 
 def edge_distance(overview, y_px, x_px):
-    from scipy import ndimage
-
     filled = jn.tissue_of(overview)
-    um, step = overview.um, overview.step
-    inside = ndimage.distance_transform_edt(filled) * um - um / 2
-    outside = ndimage.distance_transform_edt(~filled) * um - um / 2
-    signed = np.where(filled, inside, -outside)
-    coords = np.vstack([(y_px - (step - 1) / 2) / step, (x_px - (step - 1) / 2) / step])
-    return ndimage.map_coordinates(signed, coords, order=1, mode="nearest").astype(np.float32), filled
+    return jn.edge_distance(overview, y_px, x_px, filled), filled
 
 
 def near_lines_mask(overview, filled, lines):
