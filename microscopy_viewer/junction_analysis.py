@@ -1598,16 +1598,101 @@ class SegmentedSample:
         return bool(self.info.get("complete")) and self.info.get("segmentation") == segmentation_key(options)
 
 
+def _rows_in(path: Path) -> int:
+    """Rows of a CSV file, without parsing it."""
+    with open(path, "rb") as handle:
+        return max(sum(chunk.count(b"\n") for chunk in iter(lambda: handle.read(1 << 20), b"")) - 1, 0)
+
+
+def _sample_file(base: Path, name: str) -> str:
+    """The image of sample *name* in *base*, when its run did not say."""
+    found = [path for path in Path(base).glob(f"{name}.*")
+             if path.is_file() and not path.name.lower().endswith((".h5", ".json", ".csv"))]
+    return str(sorted(found, key=lambda path: len(path.name))[0]) if found else ""
+
+
+def legacy_info(run: Path, cells_file: Path, counts=None, base: Path | None = None) -> dict[str, Any]:
+    """What a run made before ``<sample>.json`` existed says about a sample, rebuilt from its tables.
+
+    The channels and nuclear stain, the background per channel, the region and
+    the finder's verdict come from the run's *Counts* sheet (*counts*, read
+    once per run); the voxel size and image shape are read from the image when
+    it is re-scored. No region was saved, so the sample's stored one is used,
+    and what the cells were segmented with is unknown (``segmentation`` is
+    ``None``): such a sample is re-scored on request, never skipped by Run.
+    """
+    name = cells_file.stem
+    rows = counts[counts["Sample"] == name] if counts is not None and "Sample" in counts else None
+    info: dict[str, Any] = {"version": 0, "sample": name, "written": time.strftime(
+        "%Y-%m-%d %H:%M", time.localtime(cells_file.stat().st_mtime)), "segmentation": None,
+        "cells_file": str(cells_file.relative_to(run)), "line": None}
+    labels = run / LABELS_FOLDER
+    for key, suffix in (("nuclei_file", NUCLEI_SUFFIX), ("grown_file", GROWN_SUFFIX)):
+        candidate = labels / f"{name}{suffix}"
+        info[key] = str(candidate.relative_to(run)) if candidate.is_file() else None
+    if rows is not None and len(rows):
+        first = rows.iloc[0]
+
+        def text(column):
+            value = first.get(column, "")
+            return "" if value is None or (isinstance(value, float) and not np.isfinite(value)) else str(value)
+
+        info["file"] = text("File")
+        info["channels"] = [str(c) for c in rows["Channel"] if str(c)]
+        info["nuclear"] = next((str(r["Channel"]) for _i, r in rows.iterrows()
+                                if str(r.get("Rule", "")).startswith("reference")), "")
+        info["background"] = {str(r["Channel"]): [float(r.get("Background median", np.nan)),
+                                                  float(r.get("Background SD", np.nan))] for _i, r in rows.iterrows()}
+        for key, column in (("band_source", "Region"), ("region_by", "Region drawn by"), ("status", "Junction status"),
+                            ("flags", "Junction flags"), ("finder_status", "Finder status"),
+                            ("finder_flags", "Finder flags"), ("second_search", "Finder second search")):
+            info[key] = text(column)
+        info["junction_length_um"] = float(first.get("Junction length (µm)", np.nan))
+        whole = first.get("Cells in the whole section", np.nan)
+        info["complete"] = bool(np.isfinite(whole) and _rows_in(cells_file) >= int(whole))
+    else:
+        import pandas as pd
+
+        columns = list(pd.read_csv(cells_file, nrows=0).columns)
+        info["channels"] = [c[:-5] for c in columns if c.endswith(" mean") and not c.endswith(" ring mean")]
+        info["nuclear"] = next((c for c in info["channels"] if any(h in c.lower() for h in jn.NUCLEAR_HINTS)), "")
+        info["background"] = {}
+        info["complete"] = True
+    if not info.get("file") and base is not None:
+        info["file"] = _sample_file(base, name)
+    return info
+
+
 def segmented_samples(base: str | Path) -> dict[str, SegmentedSample]:
     """Every sample segmented under ``<base>/cells_analysis``, by name: the newest run's of each.
 
     Only samples whose every cell was kept (``CountOptions.keep_section``)
-    and whose cells file is still there.
+    and whose cells file is still there. Runs made before ``<sample>.json``
+    existed are read too (:func:`legacy_info`).
     """
     folder = Path(base) / RESULTS_FOLDER
     found: dict[str, SegmentedSample] = {}
     runs = sorted(path for path in folder.iterdir() if path.is_dir()) if folder.is_dir() else []
     for run in runs:
+        described = {path.stem for path in (run / CELLS_FOLDER).glob(f"*{INFO_SUFFIX}")}
+        older = [path for path in sorted((run / CELLS_FOLDER).glob("*.csv")) if path.stem not in described]
+        if older:
+            counts = None
+            if (run / WORKBOOK_NAME).is_file():
+                try:
+                    import pandas as pd
+
+                    counts = pd.read_excel(run / WORKBOOK_NAME, sheet_name="Counts")
+                except Exception:
+                    logger.warning("could not read the counts of %s", run, exc_info=True)
+            for cells_file in older:
+                try:
+                    info = legacy_info(run, cells_file, counts, Path(base))
+                except Exception:
+                    logger.warning("could not read what %s holds", cells_file, exc_info=True)
+                    continue
+                if info.get("complete") and info.get("file"):
+                    found[cells_file.stem] = SegmentedSample(name=cells_file.stem, run=run, info=info)
         for info_file in sorted((run / CELLS_FOLDER).glob(f"*{INFO_SUFFIX}")):
             try:
                 info = json.loads(info_file.read_text(encoding="utf-8"))
@@ -1658,6 +1743,17 @@ def rescore(
         table = pd.read_csv(sample.file("cells_file"))
         scored = [c for c in table.columns if c.endswith(" positive") or c in ("Positive for", "Sample")]
         table = table.drop(columns=scored)
+        if "voxel_yx" not in info or "shape_yx" not in info:
+            # A run from before <sample>.json: the image's header says.
+            was_open = loaders.is_open(result.path)
+            specs = loaders.load_path(result.path)
+            try:
+                first = specs[0].data[0] if specs[0].multiscale else specs[0].data
+                info = {**info, "shape_yx": [int(n) for n in first.shape[-2:]],
+                        "voxel_yx": [float(v) for v in specs[0].scale[-2:]]}
+            finally:
+                if not was_open:
+                    loaders.release(result.path)
         voxel = tuple(float(v) for v in info["voxel_yx"])
         shape = tuple(int(v) for v in info["shape_yx"])
         result.voxel_yx, result.shape_yx = voxel, shape
@@ -1702,7 +1798,11 @@ def rescore(
             count = ChannelCount(channel=channel, n_cells=int(len(region)), statistic=options.statistic,
                                  background=float(centre), background_sd=float(spread),
                                  reference=channel == info.get("nuclear"))
-            population = (table if from_sample else region)[f"{channel} {options.statistic}"].to_numpy(dtype=float)
+            column = f"{channel} {options.statistic}"
+            if column not in table or (options.method == METHOD_RING and f"{channel} ring mean" not in table):
+                raise ValueError(f"the saved cells have no “{column if column not in table else channel + ' ring mean'}” "
+                                 "— they were saved before it was measured; segment the sample again")
+            population = (table if from_sample else region)[column].to_numpy(dtype=float)
             count.cells_median, count.cells_sd = robust_centre_and_spread(population)
             count.threshold_from = FROM_SAMPLE if from_sample else FROM_REGION
             count.n_threshold_cells = int(len(population))
@@ -1755,6 +1855,7 @@ def rescore(
             write_sample_info(result, counts, replace(options, keep_section=bool(info.get("complete"))), band, line)
             saved = json.loads((Path(options.cells_dir) / f"{result.name}{INFO_SUFFIX}").read_text(encoding="utf-8"))
             saved["segmentation"] = info.get("segmentation")
+            saved["complete"] = bool(info.get("complete"))
             (Path(options.cells_dir) / f"{result.name}{INFO_SUFFIX}").write_text(json.dumps(saved, indent=1),
                                                                                 encoding="utf-8")
         if (options.qc_dir is not None or options.pictures_dir is not None) and result.path.is_file():

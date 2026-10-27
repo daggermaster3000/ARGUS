@@ -1521,7 +1521,11 @@ sample's cells, what it was segmented with and the region it was counted in
   line follow it. Counts, metrics, pictures, tables and label maps go to a new
   results folder (`… re-scored`). Samples never segmented are left out, and
   named in the log. With the same settings the answer is the same as the run
-  that segmented them.
+  that segmented them. Runs made before `<sample>.json` existed are read too:
+  what the sample needs is rebuilt from the run's *Counts* sheet and the image's
+  header, and it is counted in its stored region. Their segmentation settings
+  are unknown, so *Skip samples already segmented* does not skip them; *Re-score
+  positivity* uses them.
 - **Skip samples already segmented** (Settings, on by default): *Analyse the
   samples* segments only the samples with no saved cells made with the same
   model, diameter, Cellpose thresholds, *Measure around nuclei* and nuclear

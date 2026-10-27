@@ -469,6 +469,23 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         redrawn = ja.rescore(saved["assembloid_s0"], same, band=moved)
         check(redrawn.ok and abs(redrawn.band_area_mm2 - 50 * 110 / 1e6) < 1e-9 and redrawn.region_by == "on screen"
               and redrawn.n_cells != drawn.n_cells, "a region redrawn since is counted in, cells placed against it")
+        # A run from before <sample>.json: its cells are re-scored all the same.
+        import shutil
+
+        old_base = root / "older"
+        old_run = old_base / ja.RESULTS_FOLDER / run_dir.name
+        shutil.copytree(run_dir, old_run)
+        (old_run / ja.CELLS_FOLDER / "assembloid_s0.json").unlink()
+        for companion in paths[0].parent.glob(f"{paths[0].name}*"):  # the image and its store of regions
+            shutil.copyfile(companion, old_base / companion.name)
+        older = ja.segmented_samples(old_base)
+        check(set(older) == {"assembloid_s0"} and older["assembloid_s0"].info["version"] == 0
+              and not older["assembloid_s0"].matches(same),
+              "a run without <sample>.json is found, but never skipped by Run (its settings are unknown)")
+        from_older = ja.rescore(older["assembloid_s0"], same)
+        check(from_older.ok and from_older.n_cells == drawn.n_cells
+              and next(c for c in from_older.channels if c.channel == "AF488").n_positive == green_before.n_positive,
+              f"and re-scored like any other ({from_older.error or from_older.n_cells})")
         readme = ja.write_readme(run_dir, [drawn], ja.CountOptions())
         check(readme.is_file() and ja.POSITIVE_FOLDER in readme.read_text(encoding="utf-8"),
               "and a README says what is where")
