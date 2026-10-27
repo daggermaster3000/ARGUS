@@ -47,8 +47,20 @@ COLUMNS = ("Sample", "Status", "Decision", "Note", "Reviewed", "File")
 #: shows. The overview is the one a line is judged on.
 SOURCES = (
     ("Junction: whole section, line and band", Path("junction_QC")),
-    ("Junction analysis: the counted region", Path("junction_analysis") / "QC"),
+    ("Cells analysis: the counted region (newest run)", Path("cells_analysis")),
+    ("Junction analysis: the counted region (older runs)", Path("junction_analysis") / "QC"),
 )
+
+
+def source_folder(experiment: str | Path, relative: str | Path) -> Path:
+    """The QC folder a source names: for the cells analysis, its newest run's region pictures."""
+    from . import junction_analysis as ja
+
+    if Path(relative) == Path(ja.RESULTS_FOLDER):
+        latest = ja.latest_run(experiment)
+        if latest is not None:
+            return latest / ja.REGION_FOLDER
+    return Path(experiment) / relative
 
 
 @dataclass
@@ -177,7 +189,7 @@ def samples_from_review(
 
     A sample's file is the one the review recorded; failing that, the sample of
     that name in *sample_folder* — by default the experiment folder the QC
-    folder sits in (``junction_QC/`` or ``junction_analysis/QC/``).
+    folder sits in (``junction_QC/``, ``cells_analysis/<run>/region/`` or ``junction_analysis/QC/``).
     """
     target = Path(review_file)
     if target.is_dir():
@@ -186,9 +198,10 @@ def samples_from_review(
         raise FileNotFoundError(f"no review file at {target}")
     rows = _read_rows(target)
     found: dict[str, Path] = {}
-    # The experiment folder holds junction_QC/ and junction_analysis/QC/: one or two levels up.
+    # The experiment folder holds junction_QC/, junction_analysis/QC/ and
+    # cells_analysis/<run>/region/: one, two or three levels up.
     for folder in ([Path(sample_folder)] if sample_folder is not None
-                   else [target.parent.parent, target.parent.parent.parent]):
+                   else [target.parent.parent, target.parent.parent.parent, target.parent.parent.parent.parent]):
         found = find_samples(folder)
         if any(name in found for name in rows):
             break

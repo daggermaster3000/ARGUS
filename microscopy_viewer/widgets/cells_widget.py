@@ -125,8 +125,8 @@ class CellsWidget(QWidget):
         note = QLabel(
             "Segments every cell of each sample, counts those in the junction region, "
             "scores every cell positive or not per channel, and places it (distance to "
-            "the junction line and to the tissue edge). One Run; the workbook is written "
-            "when it ends."
+            "the junction line and to the tissue edge). One Run; everything goes to one new "
+            "folder, cells_analysis/<date>_<time> — Results folder… opens it."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -179,14 +179,15 @@ class CellsWidget(QWidget):
         self._export_button.setToolTip(
             "The counts and metrics per sample and channel, the combinations of channels, "
             "the region's cells, the section's cells (when still in memory) and the "
-            "settings, in one workbook. A run over samples writes it by itself."
+            "settings, in one workbook, wherever you like. Every run already writes one to its "
+            "results folder."
         )
         self._export_button.clicked.connect(lambda: ja.export())
         row.addWidget(self._export_button)
-        self._qc_button = QPushButton("QC…")
-        self._qc_button.setToolTip("Open the QC pictures of the counted regions, sorted into ok, check and fail.")
-        self._qc_button.clicked.connect(ja.open_qc_folder)
-        row.addWidget(self._qc_button)
+        self._results_button = QPushButton("Results folder…")
+        self._results_button.setToolTip(jaw.RESULTS_TIP)
+        self._results_button.clicked.connect(ja.open_results_folder)
+        row.addWidget(self._results_button)
         layout.addLayout(row)
 
         # -- settings, closed until asked for -------------------------------------

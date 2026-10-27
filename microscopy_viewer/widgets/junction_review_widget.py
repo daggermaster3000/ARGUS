@@ -260,7 +260,7 @@ class JunctionReviewWidget(QWidget):
         """Point at the chosen run's QC folder in the experiment folder, and read it."""
         folder = self._experiment_folder()
         if folder is not None:
-            self._folder_edit.setText(str(folder / jr.SOURCES[self._source.currentIndex()][1]))
+            self._folder_edit.setText(str(jr.source_folder(folder, jr.SOURCES[self._source.currentIndex()][1])))
         self.reload()
 
     def browse(self) -> None:

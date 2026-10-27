@@ -725,7 +725,9 @@ always in view:
 | **Hand-drawn region: name contains**, **Positive when**, **k** | Which region is counted in, and the rule a cell is positive by. |
 
 **Run** (*Analyse this sample* / *Analyse the samples*), **Stop**, **Export…** and
-**QC…** sit beside each other; the counts table and the progress log are under them.
+**Results folder…** sit beside each other; the counts table and the progress log are
+under them. Every run writes everything to one new folder — see *Results* under
+[Junction analysis](#junction-analysis).
 While a run goes, one line under the log shows how far it is and about how long
 is left:
 
@@ -1331,7 +1333,8 @@ drawing by hand the junctions that need it. It is two steps, in this order.
 
 **1. Review.** Pick whose pictures: *Junction* (`junction_QC/` — the whole
 section with the line and the band, which is what a line is judged on) or
-*Junction analysis* (`junction_analysis/QC/` — the counted region only).
+*Cells analysis* (the newest run's `cells_analysis/<run>/region/` — the counted
+region only), or older runs' *Junction analysis* (`junction_analysis/QC/`).
 **Reload** reads the folder. The samples are listed worst first (`fail`,
 `check`, `ok`) and the selected one's picture is shown on the canvas, where it
 can be zoomed. Decide each:
@@ -1481,12 +1484,10 @@ channels (`AF555 + AF488`, `none`, …).
 above), scored against the **region's** thresholds exactly as the region's cells
 are, and placed:
 
-- each sample's cells go to `junction_analysis/cells/<sample>.csv`, one row per
+- each sample's cells go to `cells/<sample>.csv` in the run's folder, one row per
   cell (about 100,000 a section) with *In region*, *Positive for*, `<channel>
   positive`, its distance to the junction line (positive on the band's side,
-  negative across it) and to the tissue edge. A single sample's are also in the
-  workbook's **Section cells** sheet (past a sheet's limit, in a CSV beside it).
-  *Of the rest of the section, keep only the positive cells* (Settings) keeps the
+  negative across it) and to the tissue edge. *Of the rest of the section, keep only the positive cells* (Settings) keeps the
   region's cells and the positive ones only;
 - the *Counts* sheet gets, per sample and channel: *Cells in the whole section*,
   *Positive in the whole section* and its %, *Enrichment in the region* (%
@@ -1503,32 +1504,56 @@ viewer, OASIS, a notebook) hold most of its memory, Windows lends Cellpose syste
 memory instead and a tile takes ~50 s instead of ~3 s. The log says *slow: the GPU
 has only … free* when that is the case.
 
-Results appear three ways:
+**Results.** Every run — one sample or a hundred — writes one new folder in the
+experiment folder (or beside the sample when no experiment is open), and
+**Results folder…** opens it; the log's last line names it:
 
-- **Table in the panel** — per sample and channel: cells in region, positive,
-  %, cells in the whole section, % positive there, enrichment in the region,
-  positive per mm² of region, positive per mm of junction, threshold, who
-  drew the region, the finder's status and second search, the review decision.
-- **Layers** (single sample) — *Junction cells*: every counted cell as an
-  outline; *`<channel>`+ cells*: the positive cells outlined in red.
-- **Workbook** — sheets *Counts*, *Combinations* (how many cells are positive
-  for which set of channels), *Cells* (every cell of the region, every figure),
-  *Section cells* (a single sample's whole section) and *Settings*.
-  A batch writes it to `junction_analysis/` in the experiment folder; **Export…**
-  writes it anywhere. A sheet holds 1,048,575 rows; when there are more cells
-  than that (a few hundred slide scans), the *Cells* table is written whole to
-  `<workbook name>_cells.csv` beside the workbook and the *Cells* sheet says so.
-  Excel cannot open that many rows either — read it with pandas, R or Power
-  Query.
-- **QC pictures** — every run, a single count included, leaves a picture per
-  sample in `junction_analysis/QC/`, sorted into `ok/`, `check/` and `fail/`
-  (**QC…** opens the folder). The picture is the counted region: each stain in
-  its colour, the region outlined in white and its surroundings dimmed, a ring
-  round every positive cell in the colour its channel has in the caption, and
-  the counts. `fail` is a sample that could not be counted or whose junction
-  failed; `check` one whose junction was flagged or whose region holds no cell;
-  a region drawn by hand has no status of its own and counts as `ok`. The same
-  word is the *QC* column of the *Counts* sheet.
+```
+cells_analysis/2026-10-27_165517/            (a single sample: "… <sample name>",
+  counts.xlsx                                  from a review: "… reviewed")
+  cells/<sample>.csv
+  region/ok/, check/, fail/<sample>.png
+  positive cells/<sample>.png
+  README.txt
+```
+
+- **`counts.xlsx`** — sheets *Counts* (per sample and channel: everything in the
+  table below and what it rests on), *Combinations* (how many cells are positive
+  for which set of channels), *Cells* (every cell of the region, every figure)
+  and *Settings*. **Export…** writes another copy anywhere. A sheet holds
+  1,048,575 rows; when the region's cells are more than that (a few hundred
+  slide scans) the *Cells* table goes whole to `counts_cells.csv` beside it.
+- **`cells/<sample>.csv`** — every cell of the whole section (above).
+- **`region/`** — the counted region of each sample (up to 2,000 px across):
+  each stain in its colour, the region outlined in white and its surroundings
+  dimmed, a ring round every positive cell in the colour its channel has in the
+  caption, and the counts. Sorted into `ok/`, `check/` and `fail/`: `fail` is a
+  sample that could not be counted or whose junction failed; `check` one whose
+  junction was flagged or whose region holds no cell; a region drawn by hand has
+  no status of its own and counts as `ok`. The same word is the *QC* column of
+  the *Counts* sheet. The Junction review panel goes through them (*Cells
+  analysis: the counted region (newest run)*).
+- **`positive cells/`** — each whole section (up to 2,500 px across, ~1.3 µm a
+  pixel on a slide scan: a nucleus is a few pixels, its ring clear): the stains,
+  the region outlined in white, the junction line in yellow, a ring round every
+  positive cell anywhere in the section, and per channel the positives in the
+  section and in the region.
+- **`README.txt`** — what is where, the QC tally, the settings, and any sample
+  that failed and why.
+
+In the panel:
+
+- **Table** — per sample and channel: cells in region, positive, %, cells in the
+  whole section, % positive there, enrichment in the region, positive per mm² of
+  region, positive per mm of junction, threshold, who drew the region, the
+  finder's status and second search, the review decision.
+- **Layers** (*Analyse this sample*) — over the whole section: *Nuclei (whole
+  section)*, every cell found, as outlines; *Nuclei grown by 3 µm*, the regions
+  each cell was measured over (hidden at first); *`<channel>`+ cells*, the
+  positive cells of each channel anywhere in the section, outlined in red; and
+  *Junction cells*, the region's cells (hidden at first). Each whole-section
+  layer is a label map the size of the scan, ~250 MB. With *Segment only the
+  junction region* the layers cover the region only.
 
 **When the GPU faults.** A CUDA error such as *an illegal memory access was
 encountered* is not a failure of one sample: the card stops answering this

@@ -402,6 +402,34 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         check(row["Cells in the whole section"] == int(labels.max())
               and abs(row["Enrichment in the region"] - green_all.enrichment) < 1e-9,
               "the counts table carries the section's figures")
+        # One dated folder per run: tables, every cell, region and section pictures, a README.
+        run_dir = ja.run_folder(root, "assembloid_s0", when=0.0)
+        check(run_dir.parent == root / ja.RESULTS_FOLDER and run_dir.name.endswith(" assembloid_s0"),
+              f"a run gets its own dated folder ({run_dir.name})")
+        drawn = ja.analyse_sample(paths[0], ja.results_options(
+            ja.CountOptions(expand_um=0.0, find_junction=False, full_labels=True), run_dir), segment=segment_all)
+        check(drawn.ok and drawn.section_labels is not None and drawn.section_labels.shape == labels.shape
+              and int(drawn.section_labels.max()) == drawn.n_cells_section,
+              "the whole section's nuclei come back on the image's grid, one label per cell")
+        check(np.array_equal(drawn.section_labels[drawn.origin[0]:drawn.origin[0] + drawn.labels.shape[0],
+                                                  drawn.origin[1]:drawn.origin[1] + drawn.labels.shape[1]] > 0,
+                             np.isin(drawn.section_labels[drawn.origin[0]:drawn.origin[0] + drawn.labels.shape[0],
+                                                          drawn.origin[1]:drawn.origin[1] + drawn.labels.shape[1]],
+                                     drawn.section_cells["Label"]))
+              and drawn.section_regions is not None, "with their grown regions, under the same labels")
+        check(drawn.section_picture == run_dir / ja.POSITIVE_FOLDER / "assembloid_s0.png"
+              and drawn.section_picture.is_file(), "the whole section is pictured with its positive cells")
+        check((run_dir / ja.REGION_FOLDER / "ok" / "assembloid_s0.png").is_file()
+              and (run_dir / ja.CELLS_FOLDER / "assembloid_s0.csv").is_file(),
+              "the region picture and every cell land in the same run folder")
+        readme = ja.write_readme(run_dir, [drawn], ja.CountOptions())
+        check(readme.is_file() and ja.POSITIVE_FOLDER in readme.read_text(encoding="utf-8"),
+              "and a README says what is where")
+        check(ja.latest_run(root) == run_dir, "the newest run is found again")
+        from microscopy_viewer import junction_review as jr
+
+        check(jr.source_folder(root, ja.RESULTS_FOLDER) == run_dir / ja.REGION_FOLDER,
+              "the junction review looks at the newest run's region pictures")
         batch = ja.run([paths[0], paths[0]], ja.CountOptions(expand_um=0.0, find_junction=False,
                                                              cells_dir=root / "cells"), segment=segment_all)
         check(all(r.section_cells is None and r.cells_file is not None for r in batch),

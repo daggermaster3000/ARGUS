@@ -81,6 +81,24 @@ TILE_OVERLAP_PX = 96
 #: nuclear stain, than the split between slide and tissue.
 TILE_MIN_TISSUE = 0.02
 
+#: Where a run's results go, inside the experiment folder: one dated folder
+#: per run (:func:`run_folder`) holding the workbook (:data:`WORKBOOK_NAME`),
+#: every cell of each section (:data:`CELLS_FOLDER`), a picture of each counted
+#: region sorted by QC status (:data:`REGION_FOLDER`) and a picture of each
+#: whole section with its positive cells (:data:`POSITIVE_FOLDER`).
+RESULTS_FOLDER = "cells_analysis"
+WORKBOOK_NAME = "counts.xlsx"
+CELLS_FOLDER = "cells"
+REGION_FOLDER = "region"
+POSITIVE_FOLDER = "positive cells"
+README_NAME = "README.txt"
+
+#: Longest side of the pictures, in pixels: the counted region, and the whole
+#: section. A 7,600 px slide scan at 2,500 px is ~1 µm a pixel — a nucleus is
+#: ten pixels across, its ring clear.
+REGION_PICTURE_PX = 2000
+SECTION_PICTURE_PX = 2500
+
 #: Threads that measure the tiles already segmented while the GPU segments the
 #: next one. Measuring a 2240 px tile in three channels is about four seconds
 #: of CPU; Cellpose on it about three of GPU.
@@ -136,6 +154,14 @@ class CountOptions:
     #: Folder each sample's section cells are written to, one CSV per sample
     #: (``<sample>.csv``), as soon as the sample is done; ``None`` writes none.
     cells_dir: Path | None = None
+    #: Folder each sample's whole-section picture is written to
+    #: (``<sample>.png``: the stains, the region, a ring round every positive
+    #: cell); ``None`` writes none.
+    pictures_dir: Path | None = None
+    #: Keep the label maps of the whole section — every nucleus, and grown —
+    #: for drawing (``JunctionCounts.section_labels`` / ``section_regions``).
+    #: ~250 MB each on a slide scan: for a single sample, not a batch.
+    full_labels: bool = False
     #: Store the counted cells with the sample as a label map.
     save_cells: bool = False
     cells_key: str = CELLS_KEY
@@ -244,6 +270,12 @@ class JunctionCounts:
     section_cells: Any = None
     n_cells_section: int = 0
     cells_file: Path | None = None
+    #: With ``CountOptions.full_labels``: every nucleus of the section and the
+    #: same grown, on the image's grid, under the labels of *section_cells*.
+    section_labels: np.ndarray | None = None
+    section_regions: np.ndarray | None = None
+    #: The whole-section picture, when one was written.
+    section_picture: Path | None = None
 
     @property
     def ok(self) -> bool:
@@ -499,7 +531,8 @@ MARKER_COLOURS = ((255, 255, 0), (0, 255, 255), (255, 255, 255), (255, 150, 0))
 _FALLBACK_RGB = ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 1.0), (0.0, 1.0, 1.0))
 
 
-def count_picture(result: JunctionCounts, images: dict[str, np.ndarray], band: np.ndarray, size: int = 900):
+def count_picture(result: JunctionCounts, images: dict[str, np.ndarray], band: np.ndarray,
+                  size: int = REGION_PICTURE_PX):
     """The counted region as a picture: the stains, the region, the positive cells.
 
     A PIL image of the crop the cells were counted in. Every channel is shown
@@ -553,6 +586,88 @@ def count_picture(result: JunctionCounts, images: dict[str, np.ndarray], band: n
         for index, count in enumerate(scored)
     ]:
         draw.text((x, jn.CAPTION_PX - 1), text, fill=colour)
+        x += int(draw.textlength(text)) + 18
+    return canvas
+
+
+def _thumbnail(spec: Any, step: int) -> np.ndarray:
+    """One channel flattened over Z, every *step*-th pixel."""
+    array = spec.data[0] if getattr(spec, "multiscale", False) else spec.data
+    stack = array.reshape((-1, *array.shape[-2:]))
+    best: np.ndarray | None = None
+    for z in range(int(stack.shape[0])):
+        plane = np.asarray(stack[z][::step, ::step])
+        best = plane if best is None else np.maximum(best, plane)
+    return best
+
+
+def section_picture(result: JunctionCounts, specs: Sequence[Any], band: np.ndarray, line=None,
+                    size: int = SECTION_PICTURE_PX):
+    """The whole section as a picture: the stains, the region, a ring round each positive cell.
+
+    Every channel in its wavelength's colour, stretched over the tissue; the
+    region's edge in white and the junction line in yellow; each cell positive
+    for a channel ringed in that channel's marker colour (as in
+    :func:`count_picture`), wherever it is in the section. The caption gives,
+    per channel, the positive cells in the region and in the whole section.
+    """
+    from PIL import Image, ImageDraw
+    from scipy import ndimage
+
+    from .loaders.layer_spec import color_for_wavelength, wavelength_from_name
+
+    band = np.asarray(band, dtype=bool)
+    step = max(1, int(np.ceil(max(band.shape) / float(size))))
+    small = band[::step, ::step]
+    planes = {str(spec.channel_name or spec.name): _thumbnail(spec, step).astype(np.float32) for spec in specs}
+    planes = {name: plane[:small.shape[0], :small.shape[1]] for name, plane in planes.items()}
+    nuclear = next((name for name in planes if any(h in name.lower() for h in jn.NUCLEAR_HINTS)), next(iter(planes)))
+    stain = planes[nuclear]
+    tissue = stain > (np.percentile(stain, 50) if stain.size else 0)
+    if not tissue.any():
+        tissue = np.ones(stain.shape, dtype=bool)
+    rgb = np.zeros((*small.shape, 3), dtype=np.float32)
+    fallback = iter(_FALLBACK_RGB * 4)
+    for name, plane in planes.items():
+        nm = wavelength_from_name(name)
+        colour = color_for_wavelength(nm)[1] if nm is not None else next(fallback)
+        rgb += jn._stretch(plane, tissue)[..., None] * np.asarray(colour, dtype=np.float32)
+    pixels = (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
+    pixels[ndimage.binary_dilation(small, iterations=2) & ~small] = (255, 255, 255)
+    image = Image.fromarray(pixels)
+    draw = ImageDraw.Draw(image)
+    voxel = result.voxel_yx
+    if line is not None and len(np.asarray(line).reshape(-1, 2)) >= 2:
+        points = [(float(x) / voxel[1] / step, float(y) / voxel[0] / step) for y, x in np.asarray(line).reshape(-1, 2)]
+        draw.line(points, fill=(255, 230, 0), width=2)
+
+    scored = [count for count in result.channels if not count.reference]
+    table = result.section_cells
+    if table is not None and len(table):
+        ys = table["Centroid Y (µm)"].to_numpy() / voxel[0] / step
+        xs = table["Centroid X (µm)"].to_numpy() / voxel[1] / step
+        for index, count in enumerate(scored):
+            column = f"{count.channel} positive"
+            if column not in table:
+                continue
+            colour = MARKER_COLOURS[index % len(MARKER_COLOURS)]
+            radius = 4 + 2 * index
+            for row in np.flatnonzero(table[column].to_numpy()):
+                x, y = float(xs[row]), float(ys[row])
+                draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=colour)
+
+    strip = jn.CAPTION_PX + 16
+    canvas = Image.new("RGB", (max(image.size[0], 900), image.size[1] + strip), "black")
+    canvas.paste(image, (0, strip))
+    jn.caption(canvas, result.name, result.qc,
+               f"whole section: {result.n_cells_section} cells, {result.n_cells} in the region (white outline); "
+               "junction line yellow")
+    draw = ImageDraw.Draw(canvas)
+    x = 4
+    for index, count in enumerate(scored):
+        text = (f"{count.channel}+ {count.n_positive_section:.0f} in section ({count.percent_section:.1f} %), "
+                f"{count.n_positive} in region ({count.percent:.1f} %)")
+        draw.text((x, jn.CAPTION_PX - 1), text, fill=MARKER_COLOURS[index % len(MARKER_COLOURS)])
         x += int(draw.textlength(text)) + 18
     return canvas
 
@@ -1047,8 +1162,13 @@ def analyse_sample(
             options = replace(options, threshold_from=FROM_REGION)
         if options.whole_section:
             # One pass over the section: its cells, and the region's among them.
-            whole = segment_section(specs, names, nuclear, voxel, options, segment, say, crop=window)
+            everything = (slice(0, shape_yx[0]), slice(0, shape_yx[1]))
+            whole = segment_section(specs, names, nuclear, voxel, options, segment, say,
+                                    crop=everything if options.full_labels else window)
             section, nuclei, regions = whole.table, whole.labels, whole.regions
+            if options.full_labels:
+                result.section_labels, result.section_regions = nuclei, regions
+                nuclei, regions = nuclei[window], regions[window]
         else:
             say(f"segmenting {inside.shape[1]} × {inside.shape[0]} px of {names[nuclear]}")
             nuclei = np.asarray((segment or _segment)(images[names[nuclear]], voxel, options.settings, say))
@@ -1103,6 +1223,17 @@ def analyse_sample(
                 count.per_mm_junction = count.n_positive / (result.junction_length_um / 1000.0)
         if not result.n_cells:
             result.warnings.append("no cells in the region")
+        if options.pictures_dir is not None and result.section_cells is not None:
+            say("drawing the section's positive cells")
+            try:
+                picture = section_picture(result, specs, band, details.get("line"))
+                folder = Path(options.pictures_dir)
+                folder.mkdir(parents=True, exist_ok=True)
+                result.section_picture = folder / f"{result.name}.png"
+                picture.save(result.section_picture)
+            except Exception as exc:
+                logger.exception("could not draw the section of %s", target.name)
+                result.warnings.append(f"no section picture: {exc}")
 
         if options.save_cells and result.n_cells:
             say("storing the cells")
@@ -1177,6 +1308,7 @@ def run(
         )
         if not keep:
             result.labels = result.regions = None
+            result.section_labels = result.section_regions = None
             if result.cells_file is not None:
                 # Written already; a hundred sections of every cell do not fit in memory.
                 result.section_cells = None
@@ -1398,12 +1530,13 @@ def cells_dataframe(results: Sequence[JunctionCounts]):
 
 
 def section_dataframe(results: Sequence[JunctionCounts]):
-    """The section's cells of every sample segmented whole, with the sample they came from."""
+    """The section's cells of every sample segmented whole and not written to a CSV, with their sample."""
     import pandas as pd
 
     frames = []
     for result in results:
-        if result.section_cells is None or not len(result.section_cells):
+        # Written to its own CSV already: a second copy in the workbook only slows it down.
+        if result.section_cells is None or not len(result.section_cells) or result.cells_file is not None:
             continue
         frame = result.section_cells.copy()
         frame.insert(0, "Sample", result.name)
@@ -1458,6 +1591,62 @@ def settings_dataframe(options: CountOptions):
             ("Flow threshold", settings.flow_threshold),
         ])
     return pd.DataFrame(rows, columns=["Setting", "Value"])
+
+
+def run_folder(base: str | Path, label: str = "", when: float | None = None) -> Path:
+    """A new folder for one run's results: ``<base>/cells_analysis/<date>_<time>[ <label>]``."""
+    stamp = time.strftime("%Y-%m-%d_%H%M%S", time.localtime(when))
+    name = f"{stamp} {label}".strip() if label else stamp
+    return Path(base) / RESULTS_FOLDER / name
+
+
+def latest_run(base: str | Path) -> Path | None:
+    """The newest run folder under ``<base>/cells_analysis``, if there is one."""
+    folder = Path(base) / RESULTS_FOLDER
+    runs = sorted(path for path in folder.iterdir() if path.is_dir()) if folder.is_dir() else []
+    return runs[-1] if runs else None
+
+
+def results_options(options: CountOptions, folder: str | Path) -> CountOptions:
+    """*options* writing into the run folder *folder*: cells, region pictures, section pictures."""
+    folder = Path(folder)
+    return replace(options, cells_dir=folder / CELLS_FOLDER, qc_dir=folder / REGION_FOLDER,
+                   pictures_dir=folder / POSITIVE_FOLDER)
+
+
+def write_readme(folder: str | Path, results: Sequence[JunctionCounts], options: CountOptions) -> Path:
+    """Say in the run folder what is in it, and how the run was made."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    tally = ", ".join(f"{sum(r.qc == status for r in results)} {status}" for status in jn.STATUSES)
+    lines = [
+        f"Cells analysis, {time.strftime('%Y-%m-%d %H:%M')} — {len(results)} sample(s): {tally}.",
+        "",
+        f"{WORKBOOK_NAME}",
+        "    Counts: per sample and channel — cells and positive cells in the junction region",
+        "    and in the whole section, %, enrichment in the region, where the positives lie,",
+        "    thresholds, who drew the region, the finder's and the review's verdicts.",
+        "    Combinations: how many cells are positive for which set of channels.",
+        "    Cells: every cell of the region, every figure. Settings: how the run was made.",
+        f"{CELLS_FOLDER}/<sample>.csv",
+        "    Every cell of the whole section: position, size, every figure per channel,",
+        "    positive or not, in the region or not, distance to the junction line and edge.",
+        f"{REGION_FOLDER}/ok, check, fail/<sample>.png",
+        "    The counted region, a ring round each positive cell, sorted by QC status.",
+        "    Look through them in the Junction review panel.",
+        f"{POSITIVE_FOLDER}/<sample>.png",
+        "    The whole section: the region outlined in white, the junction line in yellow,",
+        "    a ring round every positive cell (one colour per channel, as in the caption).",
+        "",
+        "Settings:",
+        *(f"    {row.Setting}: {row.Value}" for row in settings_dataframe(options).itertuples()),
+    ]
+    failed = [r for r in results if not r.ok]
+    if failed:
+        lines += ["", "Failed:", *(f"    {r.name}: {r.error}" for r in failed)]
+    target = folder / README_NAME
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
 
 
 def export(results: Sequence[JunctionCounts], path: str | Path, options: CountOptions | None = None) -> Path:

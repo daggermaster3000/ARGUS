@@ -44,8 +44,21 @@ from .sample_files import source_of, tie_to_sample
 
 logger = get_logger("junction_analysis_widget")
 
-#: Layer names. The all-cells layer, and a suffix for one layer per channel.
+#: Layer names: the region's cells; with the whole section, every nucleus and
+#: the same grown; and a suffix for one layer per channel of its positive cells.
 CELLS_LAYER = "Junction cells"
+NUCLEI_LAYER = "Nuclei (whole section)"
+GROWN_LAYER = "Nuclei grown by {um} µm"
+
+#: What the results folder holds, for the button that opens it.
+RESULTS_TIP = (
+    "Open this run's folder, “cells_analysis/<date>_<time>” in the experiment folder:\n"
+    "• counts.xlsx — counts and metrics per sample and channel, combinations, the region's cells, settings;\n"
+    "• cells/<sample>.csv — every cell of the whole section;\n"
+    "• region/ok, check, fail/ — a picture of each counted region, positive cells ringed;\n"
+    "• positive cells/ — each whole section, its positive cells ringed;\n"
+    "• README.txt — what is where, and how the run was made."
+)
 #: Marks the layers this panel drew, whatever channel they are named after.
 DRAWN_KEY = "argus_junction_cells"
 POSITIVE_SUFFIX = "+ cells"
@@ -85,7 +98,7 @@ class JunctionAnalysisWidget(QWidget):
         self._worker = None
         self._cancelled = False
         self._results: list[ja.JunctionCounts] = []
-        self._qc_dir: Path | None = None
+        self._run_dir: Path | None = None
         self._options = ja.CountOptions()
         self._relay = _Relay()
         self._relay.message.connect(self._log)
@@ -169,7 +182,7 @@ class JunctionAnalysisWidget(QWidget):
         self._review_edit = QLineEdit()
         self._review_edit.setPlaceholderText("review.csv of a junction review")
         self._review_edit.setToolTip(
-            "The review.csv in a QC folder (junction_QC, or junction_analysis/QC). Each "
+            "The review.csv in a QC folder (junction_QC, or a run's cells_analysis/<run>/region). Each "
             "sample is found from the file the review recorded, or by name in the "
             "experiment folder."
         )
@@ -356,11 +369,10 @@ class JunctionAnalysisWidget(QWidget):
         self._run_button = QPushButton("Run on the samples")
         self._run_button.setToolTip(
             "The samples chosen under “Samples to run on”: those selected in Experiment "
-            "setup, or those a junction review sent on. Nothing has to be open. The "
-            "workbook is written to “junction_analysis” in the experiment folder when the "
-            "run ends.\n"
-            "Every run, this one and a single count, leaves a QC picture per sample in "
-            "“junction_analysis/QC”, sorted into the folders ok, check and fail."
+            "setup, or those a junction review sent on. Nothing has to be open.\n"
+            "Every run, this one and a single sample, writes everything to one new folder, "
+            "“cells_analysis/<date>_<time>” in the experiment folder: counts.xlsx, cells/, "
+            "region/ (sorted into ok, check and fail), positive cells/ and a README."
         )
         self._run_button.clicked.connect(self.run_batch)
         row.addWidget(self._run_button)
@@ -375,36 +387,45 @@ class JunctionAnalysisWidget(QWidget):
         export.clicked.connect(self.export)
         row.addWidget(export)
 
-        qc = QPushButton("QC…")
-        qc.setToolTip(
-            "Open “junction_analysis/QC”: a picture of every counted region — the stains, "
-            "the region, a ring round each positive cell — in the folder of its status: "
-            "ok, check (junction flagged, or no cells) or fail."
-        )
-        qc.clicked.connect(self.open_qc_folder)
-        row.addWidget(qc)
+        results = QPushButton("Results folder…")
+        results.setToolTip(RESULTS_TIP)
+        results.clicked.connect(self.open_results_folder)
+        row.addWidget(results)
         return row
 
-    def qc_folder(self, fallback: Path | None = None) -> Path | None:
-        """Where a run sorts its pictures: “junction_analysis/QC” in the experiment folder."""
+    def results_base(self, fallback: Path | None = None) -> Path | None:
+        """The folder runs are written under: the experiment folder, else *fallback*."""
         experiment = getattr(self._app, "experiment_widget", None)
         folder = (experiment.folder() if experiment is not None else None) or fallback
-        return Path(folder) / "junction_analysis" / "QC" if folder else None
+        return Path(folder) if folder else None
 
-    def cells_folder(self, fallback: Path | None = None) -> Path | None:
-        """Where a run writes each sample's section cells: “junction_analysis/cells”."""
-        qc = self.qc_folder(fallback)
-        return qc.parent / "cells" if qc is not None else None
+    def new_run(self, options: ja.CountOptions, fallback: Path | None, label: str = ""):
+        """*options* writing into a new run folder, and that folder (``None`` with nowhere to write)."""
+        base = self.results_base(fallback)
+        if base is None:
+            return options, None
+        folder = ja.run_folder(base, label)
+        return ja.results_options(options, folder), folder
 
-    def open_qc_folder(self) -> None:
+    def results_folder(self) -> Path | None:
+        """The last run's folder, or the newest one in the experiment folder."""
+        if self._run_dir is not None and Path(self._run_dir).is_dir():
+            return Path(self._run_dir)
+        base = self.results_base()
+        return ja.latest_run(base) if base is not None else None
+
+    def open_results_folder(self) -> None:
         from qtpy.QtCore import QUrl
         from qtpy.QtGui import QDesktopServices
 
-        folder = self._qc_dir or self.qc_folder()
-        if folder is None or not Path(folder).is_dir():
-            self._status.setText("No QC pictures yet — count first.")
+        folder = self.results_folder()
+        if folder is None:
+            self._status.setText("No results yet — run first.")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    # The QC button of older layouts.
+    open_qc_folder = open_results_folder
 
     def _update_sensitivity(self, method: str) -> None:
         self._k.setEnabled(method in (ja.METHOD_CELLS, ja.METHOD_BACKGROUND))
@@ -514,9 +535,11 @@ class JunctionAnalysisWidget(QWidget):
         if fu_layer := self._region_layer(image):
             band = np.asarray(fu_layer.data) > 0
         options = self.options(self._channel_names(image))
-        options.qc_dir = self.qc_folder(path.parent)
-        options.cells_dir = self.cells_folder(path.parent)
-        self._start([path], options, band=band, draw_on=str(image.name))
+        # Every nucleus of the section and its grown region, to draw.
+        options.full_labels = options.whole_section
+        options, folder = self.new_run(options, path.parent, label=jn.fu_name(path))
+        self._start([path], options, band=band, draw_on=str(image.name),
+                    workbook=folder / ja.WORKBOOK_NAME if folder else None)
 
     def _region_layer(self, image):
         """The Fusion region layer on screen, when it fits this image."""
@@ -548,7 +571,7 @@ class JunctionAnalysisWidget(QWidget):
         folder = experiment.folder() if experiment is not None else None
         if not folder:
             return None
-        found = [Path(folder) / source / jr.REVIEW_FILE for _label, source in jr.SOURCES]
+        found = [jr.source_folder(folder, source) / jr.REVIEW_FILE for _label, source in jr.SOURCES]
         found = [path for path in found if path.is_file()]
         return max(found, key=lambda path: path.stat().st_mtime) if found else None
 
@@ -595,10 +618,8 @@ class JunctionAnalysisWidget(QWidget):
         folder = (experiment.folder() if experiment is not None else None) or paths[0].parent
         options = self.options()
         options.review = picked.rows
-        options.qc_dir = self.qc_folder(folder)
-        options.cells_dir = self.cells_folder(folder)
-        workbook = Path(folder) / "junction_analysis" / f"{default_stem('junction_counts_reviewed')}.xlsx"
-        self._start(paths, options, workbook=workbook)
+        options, run = self.new_run(options, Path(folder), label="reviewed")
+        self._start(paths, options, workbook=run / ja.WORKBOOK_NAME)
         self._log(_review_line(picked))
         return True
 
@@ -620,17 +641,14 @@ class JunctionAnalysisWidget(QWidget):
             return
         names = list(dict.fromkeys(name for entry in entries for name in entry.channel_names))
         folder = experiment.folder() or entries[0].path.parent
-        workbook = Path(folder) / "junction_analysis" / f"{default_stem('junction_counts')}.xlsx"
-        options = self.options(names)
-        options.qc_dir = self.qc_folder(folder)
-        options.cells_dir = self.cells_folder(folder)
-        self._start([entry.path for entry in entries], options, workbook=workbook)
+        options, run = self.new_run(self.options(names), Path(folder))
+        self._start([entry.path for entry in entries], options, workbook=run / ja.WORKBOOK_NAME)
 
     def _start(self, paths, options, band=None, draw_on: str = "", workbook: Path | None = None) -> None:
         from napari.qt.threading import thread_worker
 
         self._options = options
-        self._qc_dir = options.qc_dir
+        self._run_dir = workbook.parent if workbook is not None else None
         self._cancelled = False
         self._log_view.clear()
         self._busy(True)
@@ -665,7 +683,7 @@ class JunctionAnalysisWidget(QWidget):
             message = f"{total} cell(s) in {len(self._results) - len(failed)} region(s)."
             section = sum(r.n_cells_section for r in self._results)
             if section:
-                message += f" {section} in the whole sections; each sample's cells in {options.cells_dir}."
+                message += f" {section} in the whole sections."
             if failed:
                 message += f" {len(failed)} failed: " + "; ".join(
                     f"{r.name} ({r.error})" for r in failed[:2])
@@ -674,8 +692,9 @@ class JunctionAnalysisWidget(QWidget):
             if workbook is not None and self._results:
                 try:
                     workbook.parent.mkdir(parents=True, exist_ok=True)
-                    written = ja.export(self._results, workbook, self._options)
-                    message += f" Workbook: {written}"
+                    ja.export(self._results, workbook, self._options)
+                    ja.write_readme(workbook.parent, self._results, self._options)
+                    message += f" Results: {workbook.parent}"
                 except Exception as exc:
                     logger.exception("could not write the junction counts")
                     message += f" Could not write the workbook: {exc}"
@@ -686,7 +705,7 @@ class JunctionAnalysisWidget(QWidget):
             if options.qc_dir is not None and self._results:
                 tally = ", ".join(f"{sum(r.qc == status for r in self._results)} {status}"
                                   for status in jn.STATUSES)
-                message += f" QC: {tally} — pictures in {options.qc_dir}"
+                message += f" (QC: {tally})"
             self._log(message)
 
         def _finished() -> None:
@@ -747,7 +766,7 @@ class JunctionAnalysisWidget(QWidget):
         def put(name: str, data: np.ndarray, **kwargs):
             if name in self._viewer.layers:
                 self._viewer.layers.remove(name)
-            layer = self._viewer.add_labels(data, name=name, **common, **kwargs)
+            layer = self._viewer.add_labels(data, name=name, **kwargs)
             tie_to_sample(layer, str(result.path))
             layer.metadata[DRAWN_KEY] = True
             return layer
@@ -757,13 +776,35 @@ class JunctionAnalysisWidget(QWidget):
         self.remove_layers()
 
         try:
-            cells = put(CELLS_LAYER, result.labels, opacity=0.9)
-            cells.contour = 1  # outlines: the signal underneath stays visible
             scored = [count for count in result.channels if not count.reference]
+            if result.section_labels is not None:
+                # The whole section: every nucleus, the same grown, and each
+                # channel's positive cells wherever they are.
+                whole = {**common, "translate": offset}
+                nuclei = put(NUCLEI_LAYER, result.section_labels, opacity=0.8, **whole)
+                nuclei.contour = 1
+                grown = put(GROWN_LAYER.format(um=format_number(self._options.expand_um)),
+                            result.section_regions, opacity=0.5, visible=False, **whole)
+                grown.contour = 1
+                table = result.section_cells
+                for count in scored:
+                    column = f"{count.channel} positive"
+                    if table is None or column not in table:
+                        continue
+                    wanted = table.loc[table[column], "Label"].to_numpy(dtype=np.int64)
+                    mask = np.isin(result.section_regions, wanted).astype(np.uint8)
+                    layer = put(f"{count.channel}{POSITIVE_SUFFIX}", mask, opacity=1.0, **whole)
+                    layer.contour = POSITIVE_CONTOUR
+                    self._tint(layer, POSITIVE_COLOR)
+                region = put(CELLS_LAYER, result.labels, opacity=0.9, visible=False, **common)
+                region.contour = 1
+                return
+            cells = put(CELLS_LAYER, result.labels, opacity=0.9, **common)
+            cells.contour = 1  # outlines: the signal underneath stays visible
             for count in scored:
                 wanted = result.positive_labels(count.channel)
                 mask = np.where(np.isin(result.regions, wanted), 1, 0).astype(np.uint8)
-                layer = put(f"{count.channel}{POSITIVE_SUFFIX}", mask, opacity=1.0)
+                layer = put(f"{count.channel}{POSITIVE_SUFFIX}", mask, opacity=1.0, **common)
                 # Red outlines, the same for every channel: the layer's name
                 # says which, and a red ring reads as "this one" over any stain.
                 layer.contour = POSITIVE_CONTOUR
