@@ -125,7 +125,7 @@ white window, which looks like a hung application rather than a loading one.
 So the window is kept hidden until it is built, and a loading animation is shown
 in its place — drawn in code (`microscopy_viewer/loader.py`): a plain spinner, one
 arc turning on a faint ring — with the step currently running underneath it:
-*Building the Segmentation panel…*, *Opening 3 file(s)…*, *Ready*. The window then
+*Building the Cells panel…*, *Opening 3 file(s)…*, *Ready*. The window then
 appears complete, with the files already open.
 
 The animation only advances while something is processing events, and building a
@@ -244,9 +244,17 @@ of last time's images; the panels and settings still come back. Start on an empt
 window with `microscopy-viewer --fresh`. The session lives in `session.json` in
 the per-user data directory, next to the log; deleting it does the same once.
 
-A panel's settings are read off its controls, so they only go back onto the same
-form: after an update that adds or removes a control in a panel, that panel
-starts from its defaults once.
+A panel's settings are read off its controls and kept under each control's own
+name, so they come back even after an update moves a control elsewhere in its
+panel (the **Cells** panel, for one, is built from the old Segmentation and
+Junction analysis panels and keeps their settings by name). They are also saved
+a second or two after any change, not only when the window closes, so a viewer
+that is killed rather than closed still keeps what was set. A control a panel
+does not name (rare) only goes back onto the same layout of its panel.
+
+The first launch after this change starts the Cells panel from its defaults once:
+the old Segmentation and Junction analysis settings were kept by position, not by
+name.
 
 ### 3D and maximum-intensity projection
 
@@ -699,10 +707,32 @@ One thing the software cannot do for you: an atlas is a *brain*, so a field
 holding a whole larva has to be cropped to the head, or the fit will spend itself
 matching yolk and trunk to a brain-shaped reference.
 
-### Cellpose segmentation
+### Cells: segmentation and the junction count
 
-**Segmentation** labels cells or nuclei with [Cellpose](https://cellpose.readthedocs.io)
-and measures every object it finds, on the GPU when there is one.
+The **Cells** panel finds cells with [Cellpose](https://cellpose.readthedocs.io), on
+the GPU when there is one. It is one panel for two tasks, which used to be the
+*Segmentation* panel (with its Batch and Train tabs) and the *Junction analysis*
+panel. On top, always in view, are the choices that change what a run does:
+
+| Control | |
+|---|---|
+| **Task** | *Segment and measure* — Cellpose on one channel, every object measured, labels saved with the sample if you like. *Count in the junction region* — the nuclei in each sample's junction band, scored positive or not per channel, placed relative to the line (see [Junction analysis](#junction-analysis)). |
+| **Samples** | *The image on screen*; *Selected in Experiment setup* (nothing has to be open); for the junction count also *Sent on by a junction review*. |
+| **Channels** | For the image on screen, the layers to segment and to measure; for a batch, the channel names matched in each file (`dapi` finds it wherever it sits). |
+| **Model**, **Diameter** | Cellpose's model and the expected nucleus diameter in µm — the two settings that matter most. |
+| Junction count only | *Hand-drawn region: name contains*, *Positive when*, *k*, *Segment the whole section*. |
+
+**Run** does the task on the samples; **Stop**, **Export…** and, for the junction
+count, **QC…** sit beside it. The results are tabs under the buttons: *Objects*
+(one image), *Batch log*, *Junction counts*.
+
+Everything else is under **Settings**, closed until opened: Cellpose's mode,
+thresholds, stitching, size limits and normalisation; the device and batch size;
+the segmentation's results options (add the layer, save with the sample, restrict
+to stored ROIs) or the junction count's finer rules (threshold from, the figure
+compared, how far nuclei are grown, keeping every cell of the section). Cellpose's
+settings are there once, for both tasks. **Train a Cellpose model** opens the
+retraining described below.
 
 Two things are handled that a bare `model.eval` call is not:
 
@@ -905,10 +935,10 @@ Without it the panel still appears and says exactly that, the way the atlas pane
 reports a missing `antspyx`. `Backend` is a three-method interface here too, so
 StarDist or micro-SAM can be added beside Cellpose.
 
-#### Retraining Cellpose on your own corrections (Train tab)
+#### Retraining Cellpose on your own corrections
 
 When the model misses nuclei, merges neighbours or finds nuclei in debris, teach
-it with your own corrections. The **Train** tab of the Segmentation panel does it
+it with your own corrections. **Train a Cellpose model**, at the bottom of the Cells panel, does it
 in three steps:
 
 1. **Corrected crops.** Segment as usual, then fix the Labels layer by hand with
@@ -916,7 +946,7 @@ in three steps:
    is not a nucleus, and repaint a merged pair as two. **Draw rectangles** adds a
    `Training rectangles` layer; draw one round each area you corrected, a few
    hundred µm across. **Add to the training set** cuts each rectangle out of the
-   image (the Setup tab's *Segment* channel, at full resolution, on the plane on
+   image (the Cells panel's *Segment* channel, at full resolution, on the plane on
    screen) and out of the chosen Labels layer, and stores the pair. Inside a
    rectangle **every nucleus has to be labelled**: one left out is taught as
    background. A crop with fewer than 5 objects, or over 4096 px a side, is
@@ -927,12 +957,12 @@ in three steps:
    line read too: `0001.tif` beside `0001_masks.tif`, plus `0001.json` recording
    the sample, channel, rectangle and voxel size. Keep one folder per kind of
    object and stain.
-3. **Train.** Fine-tunes the Setup tab's model (cpsam by default) on the set, on
-   the GPU the Setup tab shows, with Cellpose's own defaults: 100 epochs,
+3. **Train.** Fine-tunes the Cells panel's model (cpsam by default) on the set, on
+   the GPU its Settings show, with Cellpose's own defaults: 100 epochs,
    learning rate 1e-5, weight decay 0.1. With 5 crops or more, a fifth is held out
    and its test loss reported. The new model is saved into Cellpose's model folder
    (`~/.cellpose/models`) under the name you give it (an existing model is never
-   overwritten), appears in the Setup tab's model list, and is selected, so the
+   overwritten), appears in the Cells panel's model list, and is selected, so the
    next **Segment** uses it. Each run is recorded in the set's `runs.jsonl`.
 
 A few dozen corrected crops is usually enough to fix a systematic mistake. On an
@@ -1322,11 +1352,11 @@ finished first (double-click its last point). Wrong side: **Other side**; then
 **Save and next**. To have a line proposed automatically, use the Fusion region
 panel's *Find the junction on this image*.
 
-**Count the redrawn samples** runs the Junction analysis panel, with its
+**Count the redrawn samples** runs the Cells panel's junction count, with its
 settings, on the samples redrawn here (the *redrawn* rows of this `review.csv`);
 their stored region is now the hand-drawn one. It writes a workbook of those
 samples only (`junction_counts_reviewed_<date>.xlsx`). To count every accepted
-and redrawn sample at once, use the Junction analysis panel's *Sent on by a
+and redrawn sample at once, use the Cells panel's junction count with *Sent on by a
 junction review* (below).
 
 A band drawn by hand is a strip beside the line — not clipped to the tissue
@@ -1335,7 +1365,7 @@ outline as an automatic one is — and carries no QC status of its own.
 ### Junction analysis
 
 Counts the cells in the junction region and says which channels each one is
-positive for. The **Junction analysis** panel sits with the right-hand tabs.
+positive for: the *Count in the junction region* task of the **Cells** panel.
 
 1. Make the region in **Fusion region macro** (drawn or automatic), and look
    through the run in **Junction review** if you like.
@@ -1375,7 +1405,7 @@ note*.
 What happens:
 
 - **Nuclei are segmented only inside the region's bounding box** (Cellpose on the
-  nuclear stain, with the Segmentation panel's model and diameter). A slide scan
+  nuclear stain, with the Cells panel's model and diameter). A slide scan
   is fifty megapixels and the band three; one sample takes seconds, not minutes.
   A cell is in the region when its centroid is.
 - **Each cell is measured in every channel**, over its nucleus grown by
@@ -1617,7 +1647,7 @@ The workflow the panel is shaped around:
    outline 200 µm out of place. **Load from sample** reads them back.
 4. **Segment them** in the **Segmentation** panel's **Batch** tab, beside the
    settings it runs with: **Run on selected** segments the samples selected here,
-   with the model, mode, diameters and device on the Setup tab — one set of
+   with the model, mode, diameters and device of the Cells panel — one set of
    controls for one set of parameters. A batch and a scan never run at once,
    since the batch is writing into the files the scan reads. **Load labels**
    (here, under the grid) reads a stored label map back into the viewer.
@@ -1643,7 +1673,7 @@ produced.
 
 #### What the batch export contains
 
-**Export…** on the Batch tab writes one workbook with three sheets (the
+**Export…** in the Cells panel (task *Segment and measure*, samples *Selected in Experiment setup*) writes one workbook with three sheets (the
 Analysis panel writes the same three and more, straight from the files):
 
 - **Samples** — one row per file: genotype, channel, object count, how many
@@ -2156,7 +2186,10 @@ microscopy_viewer/
     intensity_comparison.py
     timeseries_widget.py    transport controls, the cache status, playback
     registration_widget.py  channel roles, the atlas, the region table
+    cells_widget.py         the Cells panel: segmentation and the junction count, settings in a drop-down
     segmentation_widget.py  channel, model and diameter; the object table
+    junction_analysis_widget.py  the junction count's controls and run (laid out by cells_widget)
+    session_state.py        panel settings kept by name, saved as they change
     slide_dialog.py         pick samples, name the stainings, write the .pptx
     movie_dialog.py         pick a range and a rate, render the frames
     overview_window.py      the folder's overview with every sample outlined

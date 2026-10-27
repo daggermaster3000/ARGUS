@@ -77,12 +77,13 @@ def _register_builtin_panels() -> None:
 
         return MetadataWidget(app.viewer)
 
-    def _segmentation(app):
-        from .segmentation_widget import SegmentationWidget
+    def _cells(app):
+        from .cells_widget import CellsWidget
 
-        # The app is passed for the Batch tab, which segments the samples
-        # selected in the Experiment setup panel.
-        return SegmentationWidget(app.viewer, app=app)
+        # Segmentation (one image or the Experiment selection) and the junction
+        # count in one panel. It also sets app.segmentation_widget and
+        # app.junction_analysis_widget, the parts other panels borrow from.
+        return CellsWidget(app)
 
     def _regions(app):
         from .regions_widget import RegionsWidget
@@ -115,13 +116,6 @@ def _register_builtin_panels() -> None:
 
         # Takes the app: saving into an .ims closes and reopens the sample.
         return FusionWidget(app)
-
-    def _junction_analysis(app):
-        from .junction_analysis_widget import JunctionAnalysisWidget
-
-        # Takes the app: it borrows the Segmentation and Fusion panels' settings
-        # and runs on the Experiment panel's selection.
-        return JunctionAnalysisWidget(app)
 
     def _positive_counter(app):
         from .positive_counter_widget import PositiveCounterWidget
@@ -166,9 +160,9 @@ def _register_builtin_panels() -> None:
     register_panel(
         PanelSpec(
             identifier="segmentation",
-            title="Segmentation",
-            factory=_segmentation,
-            attribute="segmentation_widget",
+            title="Cells",
+            factory=_cells,
+            attribute="cells_widget",
             # The first of the right-hand tab stack; the others tabify with it.
             order=50,
         )
@@ -229,16 +223,6 @@ def _register_builtin_panels() -> None:
             attribute="fusion_widget",
             tabify_with="segmentation",
             order=57,
-        )
-    )
-    register_panel(
-        PanelSpec(
-            identifier="junction_analysis",
-            title="Junction analysis",
-            factory=_junction_analysis,
-            attribute="junction_analysis_widget",
-            tabify_with="segmentation",
-            order=58,
         )
     )
     register_panel(

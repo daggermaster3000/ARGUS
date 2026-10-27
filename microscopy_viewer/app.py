@@ -138,6 +138,14 @@ class MicroscopyViewer:
                 # cellpose is seconds on its own, so each is named as it is built.
                 self._progress(f"Building the {spec.title} panel…")
                 widget = spec.factory(self)
+                try:
+                    # Each control kept under its own name, so a setting survives
+                    # the panel being laid out differently (see session_state).
+                    from .widgets.session_state import name_controls
+
+                    name_controls(widget, spec.identifier)
+                except Exception:
+                    logger.debug("could not name the %s panel's controls", spec.identifier, exc_info=True)
                 # In a scroll area so no panel can make the window taller or
                 # wider than the screen (see :mod:`microscopy_viewer.window_fit`).
                 dock = self.viewer.window.add_dock_widget(
@@ -488,6 +496,8 @@ class MicroscopyViewer:
         window = getattr(self.viewer.window, "_qt_window", None)
         if window is not None:
             self.session_keeper = SessionKeeper(self, window)
+            # After the restore: putting last time's values back is not a change.
+            self.session_keeper.watch()
 
     # -- the tour -------------------------------------------------------------
 

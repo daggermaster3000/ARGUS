@@ -94,19 +94,19 @@ TOUR: tuple[TourStep, ...] = (
     ),
     TourStep(
         "5 · Set up segmentation",
-        "Choose the Cellpose model, 2D or 3D mode (we will do 2D + Stitch), the expected nucleus diameter and "
-        "the device. Segment tries it on the channel on screen.",
+        "In the Cells panel choose the task, the channel, the Cellpose model and the expected nucleus "
+        "diameter; the finer settings (2D or 3D mode — we will do 2D + Stitch —, thresholds, the device) "
+        "are under Settings. With “The image on screen”, Run tries it on the open image.",
         panel="segmentation",
-        tab="Setup",
-        target="segmentation_widget._run_button",
+        target="cells_widget._run_button",
     ),
     TourStep(
         "6 · Segment the whole folder",
-        "Run on selected segments every sample selected in the folder panel with "
-        "those settings, and writes each label map back into its own file.",
+        "Set Samples to “Selected in Experiment setup”: Run then segments every sample "
+        "selected in the folder panel with those settings, and writes each label map back "
+        "into its own file.",
         panel="segmentation",
-        tab="Batch",
-        target="segmentation_widget.batch._run_button",
+        target="cells_widget._samples",
     ),
     TourStep(
         "7 · Analyse",

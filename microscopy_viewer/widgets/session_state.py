@@ -3,13 +3,20 @@
 The Qt half of :mod:`microscopy_viewer.session`. Panel settings are read off the
 input widgets themselves rather than declared panel by panel, so a control added
 to a panel is remembered without anything else having to change.
+
+Each control a panel keeps as an attribute is named after it
+(:func:`name_controls`), and saved under that name: moving a control to another
+place in a panel, or to another panel built from the same parts, keeps its
+value. Controls with no name fall back to their position, which only holds while
+the panel's layout does. The session is written shortly after any setting
+changes (:class:`SessionKeeper`), not only when the window closes.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from qtpy.QtCore import QEvent, QObject
+from qtpy.QtCore import QEvent, QObject, QTimer
 from qtpy.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -45,13 +52,56 @@ _KINDS = (
 )
 
 
+#: Object names given by :func:`name_controls` start with this.
+NAME_PREFIX = "argus:"
+#: A control with this Qt property set is not kept: it only mirrors another.
+NOSAVE_PROPERTY = "argus_nosave"
+#: How long after the last change the session is written, in ms.
+AUTOSAVE_MS = 1500
+
+
+def name_controls(panel: QWidget, prefix: str) -> int:
+    """Name every control *panel* keeps as an attribute after that attribute.
+
+    ``panel._diameter`` becomes ``argus:<prefix>._diameter``; a control kept by
+    a part of the panel, ``panel.junction._k``, ``argus:<prefix>.junction._k``;
+    one in a dict, ``…._decisions[accept]``. Controls already named keep their
+    name. Returns how many were named.
+    """
+    seen: set[int] = set()
+    named = 0
+
+    def visit(owner, path: str, depth: int) -> None:
+        nonlocal named
+        if id(owner) in seen or depth > 3:
+            return
+        seen.add(id(owner))
+        for attribute, value in list(vars(owner).items()):
+            items = value.items() if isinstance(value, dict) else ((None, value),)
+            for key, item in items:
+                if not isinstance(item, QWidget):
+                    continue
+                name = f"{path}.{attribute}" + ("" if key is None else f"[{key}]")
+                if isinstance(item, _KINDS):
+                    if not item.objectName():
+                        item.setObjectName(NAME_PREFIX + name)
+                        named += 1
+                else:
+                    visit(item, name, depth + 1)
+
+    visit(panel, prefix, 0)
+    return named
+
+
 def _controls(panel: QWidget) -> dict[str, QWidget]:
     """Every setting-holding control in *panel*, under a key that is stable.
 
-    The key is the control's kind and its position among that kind, which only
-    changes when the panel's code does; :func:`_fingerprint` catches that.
-    Controls inside a table or list are left out: those rows come and go with
-    the data, and belong to it rather than to the panel.
+    A control named by :func:`name_controls` is kept under its name. Any other
+    is kept under its kind and its position among the unnamed ones of that kind,
+    which only holds while the panel's code does; :func:`_fingerprint` catches
+    that. Controls inside a table or list are left out: those rows come and go
+    with the data, and belong to it rather than to the panel. So are those
+    marked :data:`NOSAVE_PROPERTY`.
     """
     found: dict[str, QWidget] = {}
     for kind in _KINDS:
@@ -62,6 +112,12 @@ def _controls(panel: QWidget) -> dict[str, QWidget]:
             if isinstance(widget, QGroupBox) and not widget.isCheckable():
                 continue
             if isinstance(widget, QLineEdit) and widget.isReadOnly():
+                continue
+            if widget.property(NOSAVE_PROPERTY):
+                continue
+            name = widget.objectName()
+            if name.startswith(NAME_PREFIX):
+                found.setdefault(name, widget)
                 continue
             found[f"{kind.__name__}:{index}"] = widget
             index += 1
@@ -79,9 +135,11 @@ def _inside_view_or_editor(widget: QWidget, panel: QWidget) -> bool:
 
 
 def _fingerprint(controls: dict[str, QWidget]) -> str:
-    """How many of each kind: saved values only go back onto the same form."""
+    """How many unnamed controls of each kind: positions only mean the same on the same form."""
     counts: dict[str, int] = {}
     for key in controls:
+        if key.startswith(NAME_PREFIX):
+            continue
         kind = key.split(":")[0]
         counts[kind] = counts.get(kind, 0) + 1
     return ",".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
@@ -139,15 +197,29 @@ def capture_settings(panel: QWidget) -> dict:
 
 
 def restore_settings(panel: QWidget, saved: dict) -> int:
-    """Put saved values back onto *panel*. Returns how many controls were set."""
-    controls = _controls(panel)
-    if not saved or saved.get("form") != _fingerprint(controls):
-        # The panel has changed since: positions no longer mean the same control.
+    """Put saved values back onto *panel*. Returns how many controls were set.
+
+    Named controls always get their value back. Unnamed ones only when the
+    panel's form is the one they were saved from: otherwise a position no longer
+    means the same control.
+    """
+    if not saved:
         return 0
+    controls = _controls(panel)
+    same_form = saved.get("form") == _fingerprint(controls)
+    # Twice: a choice can depend on another (the review source exists only for
+    # the junction task), and the first pass may set them in the wrong order.
+    _restore_values(controls, saved, same_form)
+    return _restore_values(controls, saved, same_form)
+
+
+def _restore_values(controls: dict[str, QWidget], saved: dict, same_form: bool) -> int:
     done = 0
     for key, value in (saved.get("values") or {}).items():
         widget = controls.get(key)
         if widget is None or value is None:
+            continue
+        if not key.startswith(NAME_PREFIX) and not same_form:
             continue
         try:
             _write(widget, value)
@@ -281,16 +353,36 @@ def restore(app, state: dict, reopen_files: bool = True, progress=None) -> None:
 
 
 class SessionKeeper(QObject):
-    """Saves the session as the main window closes.
+    """Saves the session as the main window closes, and shortly after a setting changes.
 
     On the close *event* rather than at quit: by the time the application is
     quitting napari has emptied the viewer, and there is nothing left to read.
+    And after every change too (once the changes stop for :data:`AUTOSAVE_MS`),
+    so a setting survives the viewer being killed rather than closed.
     """
 
     def __init__(self, app, window: QWidget):
         super().__init__(window)
         self._app = app
         window.installEventFilter(self)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(AUTOSAVE_MS)
+        self._timer.timeout.connect(self.save)
+
+    def watch(self) -> int:
+        """Save soon after any panel setting changes. Returns how many controls are watched."""
+        watched = 0
+        for panel in getattr(self._app, "panels", {}).values():
+            for widget in _controls(panel).values():
+                signal = _changed_signal(widget)
+                if signal is not None:
+                    signal.connect(self._soon)
+                    watched += 1
+        return watched
+
+    def _soon(self, *_args) -> None:
+        self._timer.start()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 (Qt naming)
         if event.type() == QEvent.Close:
@@ -303,3 +395,18 @@ class SessionKeeper(QObject):
         except Exception:
             logger.exception("could not save the session")
             return False
+
+
+def _changed_signal(widget: QWidget):
+    """The signal a control sends when its value changes."""
+    if isinstance(widget, (QSpinBox, QDoubleSpinBox, QSlider)):
+        return widget.valueChanged
+    if isinstance(widget, (QCheckBox, QRadioButton, QGroupBox)):
+        return widget.toggled
+    if isinstance(widget, QComboBox):
+        return widget.currentTextChanged
+    if isinstance(widget, QLineEdit):
+        return widget.textChanged
+    if isinstance(widget, QTabWidget):
+        return widget.currentChanged
+    return None

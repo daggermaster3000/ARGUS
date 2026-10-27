@@ -471,8 +471,8 @@ def main() -> int:
     session.session_file = lambda: rules_home / "session.json"
     from qtpy.QtWidgets import QDoubleSpinBox
 
-    controls = session_state._controls(app.segmentation_widget)
-    key = next(k for k, w in controls.items() if isinstance(w, QDoubleSpinBox))
+    controls = session_state._controls(app.cells_widget)
+    key = next(k for k, w in controls.items() if k.endswith("._diameter"))
     before = controls[key].value()
     controls[key].setValue(before + controls[key].singleStep())
     changed = controls[key].value()
@@ -490,11 +490,14 @@ def main() -> int:
     app.restore_session(reopen_files=False)
     opened = sorted(name for name, dock in app.docks.items() if not dock.isHidden())
     check(opened == ["experiment", "segmentation"], f"restoring puts the panels back ({opened})")
-    check(session_state._controls(app.segmentation_widget)[key].value() == changed,
+    check(session_state._controls(app.cells_widget)[key].value() == changed,
           "and the setting")
+    controls[key].setValue(before)
     stale = dict(kept["settings"]["segmentation"], form="QSpinBox=1")
-    check(session_state.restore_settings(app.segmentation_widget, stale) == 0,
-          "settings saved from a different form are left alone")
+    session_state.restore_settings(app.cells_widget, stale)
+    check(controls[key].value() == changed,
+          "a setting kept by name comes back even when the panel's layout changed")
+    check(app.session_keeper.watch() > 0, "and settings are watched, to be saved as they change")
     controls[key].setValue(before)
     actions["segmentation"].trigger()
     check("slide" in app.toolbar._buttons, "the slide export button is on the toolbar")
@@ -1055,12 +1058,9 @@ def main() -> int:
         from microscopy_viewer.widgets.batch_segmentation_widget import channel_spec
 
         batch = app.segmentation_widget.batch
-        check(batch is not None, "the segmentation panel has a Batch tab")
-        check(
-            [app.segmentation_widget._tabs.tabText(i)
-             for i in range(app.segmentation_widget._tabs.count())][-1] == "Batch",
-            "beside Setup and Objects",
-        )
+        check(batch is not None, "the Cells panel has a batch part")
+        check(app.cells_widget._samples.findText("Selected in Experiment setup") >= 0,
+              "reached through Samples: Selected in Experiment setup")
         check(not hasattr(exp_panel, "run_batch"), "and the experiment panel no longer has one")
         borrowed = batch.batch_settings()
         check(
@@ -1515,8 +1515,9 @@ def main() -> int:
                 "the step's panel was brought forward",
             )
             tour.go(8)
-            tabs = guided.segmentation_widget._tabs
-            check(tabs.tabText(tabs.currentIndex()) == "Batch", "and the step's tab chosen")
+            for _ in range(10):
+                QCoreApplication.processEvents()
+            check(tour.target is guided.cells_widget._samples, "and the step's control is the Samples choice")
 
             outcomes = []
             tour.finished.connect(outcomes.append)
