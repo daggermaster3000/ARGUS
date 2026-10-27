@@ -138,6 +138,10 @@ Visual plausibility is not enough; measure against hand annotations.
   best single predictor of a bad line (Spearman 0.40). Dominant seeds everywhere help seamless
   sections but break seamed ones (first 30: 67 → 88 µm); seeding from every AF488 patch is worse
   (+25 µm). "default" in `seeding.jsonl` is the fallback off (`junction_seeding.BASE`).
+- Label change in the price (`label_change`, 27 Oct, `junction_labels.py`, `labels.jsonl`): the
+  steepness of AF488 − AF555 multiplies the price down to 0.3. Off: with tears priced it is best on
+  tuning (130 → 118 µm) but held out only 159 → 154 µm (p 0.67, 7 fixed / 8 broken); the factor map
+  is full of rings round every cell patch, not one valley at the junction.
   Triage: draw by hand when status is fail or Shape is Damaged (7/8 failures, no
   good line sent); the "check" status is not useful for triage. On kept samples
   % positive agrees within ~±2 pp, no bias.

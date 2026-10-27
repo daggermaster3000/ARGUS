@@ -112,6 +112,15 @@ TEAR_PRICE = 0.0
 #: How much a cut pays for running where the labelled cells do not change (see
 #: :func:`edge_cost`), on top of the dark-line price.
 EDGE_WEIGHT = 0.0
+#: How strongly the cut is drawn to where the labels change from one organoid's
+#: to the other's (see :func:`label_change_price`): the price is multiplied by
+#: a factor from 1 (labels flat) down to :data:`LABEL_CHANGE_FLOOR` (steepest
+#: change); 0 leaves it out.
+LABEL_CHANGE = 0.0
+#: Smoothing (µm) of the label densities the change is measured on: finer than
+#: the 100 µm density that places the seeds, so the change is a narrow valley.
+LABEL_CHANGE_UM = 50.0
+LABEL_CHANGE_FLOOR = 0.3
 
 #: How the tissue is split between the seeds: ``"cut"`` (the minimum cut, then
 #: straightened), ``"walk"`` (a random walker: each pixel goes to the seed a
@@ -215,6 +224,10 @@ class JunctionOptions:
     #: Extra price for cutting where the labelled cells do not change, 0–1
     #: per pixel at most (see :func:`edge_cost`); 0 leaves it out.
     edge_weight: float = EDGE_WEIGHT
+    #: Discount for cutting where the labels change, and the smoothing it is
+    #: measured at (see :func:`label_change_price`); 0 leaves it out.
+    label_change: float = LABEL_CHANGE
+    label_change_um: float = LABEL_CHANGE_UM
     #: ``"cut"``, ``"walk"`` or ``"auto"`` (see :data:`SPLIT_METHOD`).
     split_method: str = SPLIT_METHOD
     walk_beta: float = WALK_BETA
@@ -667,6 +680,45 @@ def edge_cost(
         return np.zeros(filled.shape, dtype=np.float32)
     share = np.mean(parts, axis=0)
     return np.where(filled, (2.0 * (share - 0.5)) ** 2, 0.0).astype(np.float32)
+
+
+def label_change_price(
+    label: np.ndarray, tissue: np.ndarray, filled: np.ndarray, um: float,
+    other: np.ndarray | None = None, strength: float = 1.0,
+    radius_um: float = LABEL_CHANGE_UM, median: bool = True, median_um: float = MEDIAN_UM,
+) -> np.ndarray:
+    """A factor on the cutting price: 1 where the labels are flat, lower where they change.
+
+    Where two organoids meet, one label falls and the other rises, whether or
+    not the nuclear stain shows a dark line there. Each label channel becomes
+    a density (:func:`cell_density`, smoothed over *radius_um*) scaled 0–1;
+    with the other organoid's label the two are subtracted, so the change is
+    twice as clear where one falls as the other rises. The steepness of that
+    map, as a share of its 99th percentile over the tissue, times *strength*,
+    is taken off 1, down to :data:`LABEL_CHANGE_FLOOR`.
+
+    Outside the tissue the map takes the value of the nearest tissue pixel,
+    so the section's own edge is not read as a change.
+    """
+    from scipy import ndimage
+
+    ones = np.ones(filled.shape, dtype=np.float32)
+    share = _normalised(cell_density(label, tissue, filled, um, radius_um, median, median_um), filled)
+    if share is None or not filled.any():
+        return ones
+    if other is not None:
+        second = _normalised(cell_density(other, tissue, filled, um, radius_um, median, median_um), filled)
+        if second is not None:
+            share = share - second
+    nearest = ndimage.distance_transform_edt(~filled, return_distances=False, return_indices=True)
+    share = share[nearest[0], nearest[1]].astype(np.float32)
+    rows, cols = np.gradient(share)
+    steep = np.hypot(rows, cols)
+    top = float(np.percentile(steep[filled], 99))
+    if top <= 0:
+        return ones
+    factor = 1.0 - float(strength) * np.clip(steep / top, 0, 1)
+    return np.where(filled, np.clip(factor, LABEL_CHANGE_FLOOR, 1.0), 1.0).astype(np.float32)
 
 
 def _min_cut(filled: np.ndarray, hot: np.ndarray, cold: np.ndarray, cost: np.ndarray) -> np.ndarray | None:
@@ -1186,17 +1238,26 @@ def find_junction(overview: Overview, options: JunctionOptions | None = None) ->
             and has_cells(channels[overview.other], tissue, um)):
         other_density = cell_density(channels[overview.other], tissue, filled, um,
                                      median=options.use_median, median_um=options.median_um)
+    change = None
+    if options.label_change > 0:
+        change = label_change_price(
+            channels[overview.label], tissue, filled, um,
+            channels[overview.other] if other_density is not None else None,
+            options.label_change, options.label_change_um, options.use_median, options.median_um)
+
     def split(seeds, edge_weight):
         """The halves between *seeds*, and the figures the cut gives about itself."""
         found: dict[str, float] = {}
         price = cost
-        if options.tear_price > 0 or edge_weight > 0:
+        if options.tear_price > 0 or edge_weight > 0 or change is not None:
             price = np.ones(filled.shape, np.float32) if cost is None else np.asarray(cost, np.float32).copy()
             if options.tear_price > 0:
                 torn = tear_mask(channels[overview.nuclear], tissue, filled, um)
                 price[torn] = np.maximum(price[torn], float(options.tear_price))
             if edge_weight > 0:
                 price += float(edge_weight) * edge_cost(density, filled, *seeds[:2], other_density)
+            if change is not None:
+                price *= change
         bend = float(options.bend_um) if price is not None else 0.0
         walk_price = price if price is not None else np.ones(filled.shape, np.float32)
         if options.split_method == "walk":

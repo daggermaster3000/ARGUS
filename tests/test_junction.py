@@ -86,6 +86,52 @@ def _assembloid(gap: int = 0, seed: int = 0, holes: bool = False, faint_right: b
     return [spec("AF555", red), spec("AF488", gfp), spec("AF405", dapi)], 180
 
 
+def _no_neck(seed: int = 0):
+    """One long fused section, no dark line, no neck; the labels switch at column 140."""
+    rng = np.random.default_rng(seed)
+    shape = (240, 360)
+    rows, cols = np.ogrid[:shape[0], :shape[1]]
+    tissue = ((rows - 120) / 75.0) ** 2 + ((cols - 180) / 165.0) ** 2 <= 1
+    dapi = np.where(tissue, 3000.0, 200.0) + rng.normal(0, 30, shape)
+    gfp = np.where(tissue, 400.0, 200.0) + rng.normal(0, 15, shape)
+    red = np.where(tissue, 300.0, 200.0) + rng.normal(0, 15, shape)
+    for plane, side in ((gfp, cols < 140), (red, cols >= 140)):
+        points = np.argwhere(tissue & side)
+        chosen = points[rng.choice(len(points), 600, replace=False)]
+        plane[chosen[:, 0], chosen[:, 1]] += 4000.0
+
+    def spec(name, plane):
+        data = np.clip(plane, 1, 65535).astype(np.uint16)[None]
+        return SimpleNamespace(data=data, scale=(4.0, UM, UM), multiscale=False, channel_name=name, name=name)
+
+    return [spec("AF555", red), spec("AF488", gfp), spec("AF405", dapi)], 140
+
+
+def test_the_cut_can_follow_where_the_labels_change() -> None:
+    print("the change between the two labels in the price")
+    specs, column = _no_neck()
+    overview, _ = jn.analyse_specs(specs)
+    channels = overview.channels
+    tissue = jn.tissue_mask(channels[overview.nuclear], (channels > 0).all(axis=0), UM)
+    change = jn.label_change_price(channels[overview.label], tissue, tissue, UM, channels[overview.other])
+    check(float(change.min()) >= jn.LABEL_CHANGE_FLOOR and float(change.max()) <= 1.0, "a factor between the floor and 1")
+    at = change[100:140, column - 5: column + 6].mean()
+    away = change[100:140, 40:60].mean()
+    check(at < 0.7 < away, f"low where the labels switch ({at:.2f}), about 1 inside an organoid ({away:.2f})")
+    check(change[:, :8].min() == 1.0 and change[tissue].size > 0, "the section's edge is not a change")
+    off = jn.JunctionOptions(save=False, no_seam_price=0.0)
+    on = jn.JunctionOptions(save=False, no_seam_price=0.0, label_change=1.0)
+    lines = {}
+    for name, options in (("off", off), ("on", on)):
+        _overview, result = jn.analyse_specs(specs, options)
+        lines[name] = None if result.line_um is None else float(np.median(result.line_um[:, 1] / UM))
+    check(lines["on"] is not None and abs(lines["on"] - column) < 15,
+          f"with the change priced the line is at the switch (x={lines['on']}, switch at {column})")
+    check(lines["off"] is None or abs(lines["off"] - column) > abs(lines["on"] - column),
+          f"and closer than without it (x={lines['off']})")
+    check(jn.JunctionOptions().label_change == jn.LABEL_CHANGE, "the option mirrors its constant")
+
+
 def test_channels_are_found_by_name() -> None:
     print("picking the channels")
     names = ["AF555", "AF488", "AF405"]
@@ -598,6 +644,7 @@ def main() -> int:
         test_an_organoid_faint_in_the_nuclear_stain_is_still_tissue,
         test_the_labelled_seed_can_cover_every_patch,
         test_with_no_seam_the_seeds_can_come_from_the_labels,
+        test_the_cut_can_follow_where_the_labels_change,
         test_a_drawn_line_gets_a_band_that_follows_the_tissue,
         test_bending_costs_so_a_crack_round_a_corner_is_not_followed,
         test_a_tear_is_not_a_cheap_road_and_the_cut_sits_where_the_cells_change,
