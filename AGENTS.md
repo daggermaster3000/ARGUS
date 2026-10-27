@@ -142,6 +142,11 @@ Visual plausibility is not enough; measure against hand annotations.
   steepness of AF488 − AF555 multiplies the price down to 0.3. Off: with tears priced it is best on
   tuning (130 → 118 µm) but held out only 159 → 154 µm (p 0.67, 7 fixed / 8 broken); the factor map
   is full of rings round every cell patch, not one valley at the junction.
+- Per-class settings (27 Oct, `junction_classes.py`, `classes.jsonl`, 32 combinations): the second
+  search after a no-line first cut takes its own settings (`no_seam_*`, defaults = the old fallback).
+  Chosen per class on tuning: tuning 130 → 108 µm but held out 159 → 150 µm (p 0.29) and the first
+  30 get worse (66 → 80 µm); both classes pick dominant seeds, so seam price is not the right split.
+  Defaults unchanged.
   Triage: draw by hand when status is fail or Shape is Damaged (7/8 failures, no
   good line sent); the "check" status is not useful for triage. On kept samples
   % positive agrees within ~±2 pp, no bias.

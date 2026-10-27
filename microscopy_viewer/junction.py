@@ -149,6 +149,14 @@ TISSUE_ALL_CHANNELS = True
 #: follow: the sample is flagged, and with ``no_seam_price`` set the junction
 #: is found again from the labels instead (see :func:`dominant_seeds`).
 NO_SEAM_PRICE = 0.4
+#: The settings for sections without a dark line, used for the second search
+#: (see ``JunctionOptions.no_seam_price``): seeds, their lead, and the price.
+NO_SEAM_SEED_RULE = "dominant"
+NO_SEAM_LEAD: float | None = None
+NO_SEAM_EDGE = 0.5
+NO_SEAM_LABEL_CHANGE = 0.0
+NO_SEAM_TEAR_PRICE = 0.0
+NO_SEAM_BEND_UM = 1000.0
 #: How far one organoid's label must lead the other's (both scaled 0–1 over
 #: the tissue) for a pixel to join its seed in :func:`dominant_seeds`.
 SEED_LEAD = 0.25
@@ -243,7 +251,15 @@ class JunctionOptions:
     #: 26 Oct 2026: 172 -> 159 um held out on 138 hand-drawn sections, no change
     #: where there is a dark line (``junction_seeding.ipynb``).
     no_seam_price: float = NO_SEAM_PRICE
-    no_seam_edge: float = 0.5
+    #: The settings of that second search, for sections without a dark line
+    #: (see :data:`NO_SEAM_SEED_RULE` and below); ``no_seam_lead`` None is
+    #: :data:`SEED_LEAD`.
+    no_seam_edge: float = NO_SEAM_EDGE
+    no_seam_seed_rule: str = NO_SEAM_SEED_RULE
+    no_seam_lead: float | None = NO_SEAM_LEAD
+    no_seam_label_change: float = NO_SEAM_LABEL_CHANGE
+    no_seam_tear_price: float = NO_SEAM_TEAR_PRICE
+    no_seam_bend_um: float = NO_SEAM_BEND_UM
     #: Find the tissue in every channel, not only the nuclear stain.
     tissue_all_channels: bool = TISSUE_ALL_CHANNELS
     #: Keep only the part of the band that is on tissue.
@@ -1238,27 +1254,37 @@ def find_junction(overview: Overview, options: JunctionOptions | None = None) ->
             and has_cells(channels[overview.other], tissue, um)):
         other_density = cell_density(channels[overview.other], tissue, filled, um,
                                      median=options.use_median, median_um=options.median_um)
-    change = None
-    if options.label_change > 0:
-        change = label_change_price(
-            channels[overview.label], tissue, filled, um,
-            channels[overview.other] if other_density is not None else None,
-            options.label_change, options.label_change_um, options.use_median, options.median_um)
+    changes: dict[float, np.ndarray] = {}
 
-    def split(seeds, edge_weight):
-        """The halves between *seeds*, and the figures the cut gives about itself."""
+    def label_factor(strength):
+        """The label-change factor at *strength*, made once."""
+        if strength not in changes:
+            changes[strength] = label_change_price(
+                channels[overview.label], tissue, filled, um,
+                channels[overview.other] if other_density is not None else None,
+                strength, options.label_change_um, options.use_median, options.median_um)
+        return changes[strength]
+
+    torn_cache: list[np.ndarray] = []
+
+    def torn():
+        if not torn_cache:
+            torn_cache.append(tear_mask(channels[overview.nuclear], tissue, filled, um))
+        return torn_cache[0]
+
+    def split(seeds, how):
+        """The halves between *seeds* under the settings *how*, and the figures the cut gives about itself."""
         found: dict[str, float] = {}
         price = cost
-        if options.tear_price > 0 or edge_weight > 0 or change is not None:
+        if how["tear_price"] > 0 or how["edge_weight"] > 0 or how["label_change"] > 0:
             price = np.ones(filled.shape, np.float32) if cost is None else np.asarray(cost, np.float32).copy()
-            if options.tear_price > 0:
-                torn = tear_mask(channels[overview.nuclear], tissue, filled, um)
-                price[torn] = np.maximum(price[torn], float(options.tear_price))
-            if edge_weight > 0:
-                price += float(edge_weight) * edge_cost(density, filled, *seeds[:2], other_density)
-            if change is not None:
-                price *= change
-        bend = float(options.bend_um) if price is not None else 0.0
+            if how["tear_price"] > 0:
+                price[torn()] = np.maximum(price[torn()], float(how["tear_price"]))
+            if how["edge_weight"] > 0:
+                price += float(how["edge_weight"]) * edge_cost(density, filled, *seeds[:2], other_density)
+            if how["label_change"] > 0:
+                price *= label_factor(float(how["label_change"]))
+        bend = float(how["bend_um"]) if price is not None else 0.0
         walk_price = price if price is not None else np.ones(filled.shape, np.float32)
         if options.split_method == "walk":
             halves = walk_halves(filled, walk_price, *seeds[:2], um, options.walk_beta, bend)
@@ -1278,23 +1304,30 @@ def find_junction(overview: Overview, options: JunctionOptions | None = None) ->
             found["Seam price"] = cut_signs(halves, cost, um).get("Cut price", float("nan"))
         return halves, found
 
-    seeds = None
-    if options.seed_rule == "dominant":
-        seeds = dominant_seeds(filled, density, other_density)
-    elif options.seed_rule in ("patches", "patches_pulled"):
-        seeds = find_seeds(filled, density, other_density, patches=options.seed_rule)
-    if seeds is None:
-        seeds = find_seeds(filled, density, other_density)
+    def seeds_by(rule, lead=None):
+        found = None
+        if rule == "dominant":
+            found = dominant_seeds(filled, density, other_density, lead)
+        elif rule in ("patches", "patches_pulled"):
+            found = find_seeds(filled, density, other_density, patches=rule)
+        return found if found is not None else find_seeds(filled, density, other_density)
+
+    first_how = {"tear_price": options.tear_price, "edge_weight": options.edge_weight,
+                 "label_change": options.label_change, "bend_um": options.bend_um}
+    seeds = seeds_by(options.seed_rule)
     halves = None
     if seeds is not None:
         result.seeds, result.second_seed = seeds[:2], seeds[2]
-        halves, found = split(seeds, options.edge_weight)
+        halves, found = split(seeds, first_how)
         result.metrics.update(found)
         if (options.no_seam_price > 0 and halves is not None
                 and found.get("Seam price", 0.0) > options.no_seam_price):
-            again = dominant_seeds(filled, density, other_density)
+            # No dark line: the second set of settings, made for sections without one.
+            again = seeds_by(options.no_seam_seed_rule, options.no_seam_lead)
             if again is not None:
-                retry, found_again = split(again, options.no_seam_edge)
+                retry, found_again = split(again, {
+                    "tear_price": options.no_seam_tear_price, "edge_weight": options.no_seam_edge,
+                    "label_change": options.no_seam_label_change, "bend_um": options.no_seam_bend_um})
                 if retry is not None:
                     # The first cut's seam price stays: it is why this one was made.
                     found_again.pop("Seam price", None)

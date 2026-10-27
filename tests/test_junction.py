@@ -270,6 +270,12 @@ def test_with_no_seam_the_seeds_can_come_from_the_labels() -> None:
         check(narrower is None or narrower[0].sum() < hot.sum(), "the lead is read when called, not when defined")
     _overview, again = jn.analyse_specs(specs, jn.JunctionOptions(no_seam_price=0.01))
     check(again.metrics.get("No-seam fallback") == 1.0, "a cut dearer than the no-seam price is made again")
+    _overview, core_again = jn.analyse_specs(specs, jn.JunctionOptions(no_seam_price=0.01, no_seam_seed_rule="core"))
+    _overview, first = jn.analyse_specs(specs, jn.JunctionOptions(no_seam_price=0.0))
+    check(core_again.seeds is not None and first.seeds is not None
+          and all(np.array_equal(a, b) for a, b in zip(core_again.seeds, first.seeds))
+          and not np.array_equal(core_again.seeds[0], again.seeds[0]),
+          "the second search takes its own settings (here: the core seeds again)")
     if again.line_um is not None:
         x = again.line_um[:, 1] / UM
         check(abs(float(np.median(x)) - column) < 15, f"and still finds the neck (x={np.median(x):.0f})")
