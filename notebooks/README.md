@@ -41,6 +41,7 @@ Scripts beside them, run from the repository root:
 | `junction_seeding.py` | Finds every section with a hand-drawn junction, splits them, runs every variant → `junction_eval/seeding.jsonl`, seed diagnostics; with variant names, reruns only those. |
 | `junction_labels.py` | The change between the two labels as part of the cutting price, on the same sections → `junction_eval/labels.jsonl` (section 6 of `junction_seeding.ipynb`). |
 | `junction_classes.py` | Every combination of five finder settings on every hand-drawn section, to choose settings separately for sections with and without a dark line → `junction_eval/classes.jsonl` (section 7 of `junction_seeding.ipynb`). |
+| `junction_browser.py` + `.html` | An interactive page of all hand-drawn sections: error against any figure (including organoid polarity), each section's picture with the hand-drawn and found lines on hover → `junction_eval/browser/`. |
 | `junction_downstream.py` | Junction analysis counts in each annotator's band and the finder's. |
 
 ## `dataset/` — the whole dataset

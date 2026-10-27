@@ -1,0 +1,246 @@
+<title>Junction Browser</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a dark bench. Scatter of sections on the left, the section under the cursor large on the right, contact sheet below. */
+:root{
+  --bg:#0d1013; --panel:#151a1f; --raise:#1d242b; --rule:#2a323a; --fg:#dde2e7; --muted:#8b96a1;
+  --accent:#f0b44c; --hand:#ffffff; --today:#ff5fd2; --class:#43d3ff; --seed1:#3ddc8f; --seed2:#ff8a5c;
+  --good:#5ccf8a; --bad:#ef6a5a;
+  --sans:"IBM Plex Sans Condensed","Arial Narrow",system-ui,sans-serif; --mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
+  color-scheme:dark;
+}
+html,body{background:var(--bg);color:var(--fg)}
+body{font:14px/1.45 var(--sans);padding-inline:16px;padding-block:14px 40px}
+h1{font-size:20px;font-weight:600;margin:0;letter-spacing:.01em}
+.top{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:baseline;justify-content:space-between;margin-bottom:12px}
+.sub{color:var(--muted);font-size:13px;max-width:70ch}
+.controls{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;background:var(--panel);border:1px solid var(--rule);border-radius:8px;padding:8px 12px;margin-bottom:12px}
+.controls label{display:flex;gap:6px;align-items:center;color:var(--muted);font-size:12.5px;text-transform:uppercase;letter-spacing:.05em}
+select{font:13px var(--sans);background:var(--raise);color:var(--fg);border:1px solid var(--rule);border-radius:6px;padding:4px 6px;max-width:min(62vw,340px)}
+select:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:14px;align-items:start}
+@media (max-width:900px){.main{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--rule);border-radius:8px;padding:10px;min-width:0}
+#plot{width:100%;display:block;touch-action:none;cursor:crosshair}
+#plot text{fill:var(--muted);font:11px var(--mono)}
+#plot .axis{stroke:var(--rule)}
+#plot .grid{stroke:#1f262d}
+#plot .title{fill:var(--fg);font:12px var(--sans)}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--muted);margin-top:6px}
+.legend span{display:inline-flex;align-items:center;gap:5px}
+.legend i{width:10px;height:10px;border-radius:50%;display:inline-block}
+.viewer{position:sticky;top:calc(env(safe-area-inset-top,0px) + 8px)}
+.vhead{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline;justify-content:space-between;margin-bottom:6px}
+.vname{font:500 15px var(--mono)}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chip{font-size:11.5px;border:1px solid var(--rule);border-radius:999px;padding:1px 8px;color:var(--muted)}
+.chip.warn{border-color:var(--accent);color:var(--accent)}
+.stage{position:relative;background:#000;border-radius:6px;overflow:hidden}
+.stage img{display:block;width:100%;height:auto;image-rendering:auto}
+.stage svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.vctl{display:flex;flex-wrap:wrap;gap:6px 12px;margin:8px 0;font-size:12.5px;color:var(--muted)}
+.vctl label{display:inline-flex;gap:5px;align-items:center;cursor:pointer}
+.sw{width:18px;height:0;border-top:3px solid;display:inline-block}
+.seg{display:inline-flex;border:1px solid var(--rule);border-radius:6px;overflow:hidden}
+.seg button{font:12.5px var(--sans);background:transparent;color:var(--muted);border:0;padding:3px 10px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--raise);color:var(--fg)}
+.nav{display:flex;gap:6px;align-items:center;font-size:12.5px;color:var(--muted)}
+.nav button{font:12.5px var(--sans);background:var(--raise);color:var(--fg);border:1px solid var(--rule);border-radius:6px;padding:3px 10px;cursor:pointer}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px 18px;margin-top:8px}
+.facts h3{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px;font-weight:500}
+.facts table{width:100%;border-collapse:collapse;font-size:12.5px}
+.facts td{padding:2px 0;vertical-align:top}
+.facts td.n{text-align:right;font:12px var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap;padding-left:8px}
+.bar{height:6px;border-radius:3px;background:var(--raise);position:relative;min-width:50px}
+.bar b{position:absolute;inset:0 auto 0 0;border-radius:3px}
+.sheet{margin-top:14px}
+.sheet .shead{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;align-items:baseline;margin-bottom:8px}
+.sheet h2{font-size:15px;margin:0;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:8px}
+.thumb{background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:4px;cursor:pointer;text-align:left;color:var(--fg);font:inherit}
+.thumb.on{border-color:var(--accent)}
+.thumb .tp{position:relative;background:#000;border-radius:4px;overflow:hidden;aspect-ratio:1}
+.thumb img{width:100%;height:100%;object-fit:contain;display:block}
+.thumb svg{position:absolute;inset:0;width:100%;height:100%}
+.thumb .tl{display:flex;justify-content:space-between;gap:4px;font:11px var(--mono);margin-top:3px;color:var(--muted)}
+.thumb .tl b{font-weight:500}
+.hint{color:var(--muted);font-size:12px}
+.empty{color:var(--muted);padding:40px 10px;text-align:center}
+</style>
+
+<div class="top">
+  <h1>Junction Browser</h1>
+  <p class="sub">138 hand-drawn sections. Each dot is one section; hover it to see the section, click to keep it. The arrow keys step through the sections in the order of the error.</p>
+</div>
+
+<div class="controls" role="group" aria-label="Plot settings">
+  <label for="ysel">Error of</label><select id="ysel"></select>
+  <label for="xsel">against</label><select id="xsel"></select>
+  <label for="csel">colour by</label><select id="csel"></select>
+</div>
+
+<div class="main">
+  <div class="card">
+    <svg id="plot" viewBox="0 0 640 470" role="img" aria-label="Scatter of sections"></svg>
+    <div class="legend" id="legend"></div>
+    <p class="hint">Error: mean distance between the finder's line and the hand-drawn one, capped at 300 µm (no line counts 300). Dashed line: 100 µm.</p>
+  </div>
+  <div class="card viewer">
+    <div class="vhead"><span class="vname" id="vname">–</span><div class="chips" id="chips"></div></div>
+    <div class="stage" id="stage"><img id="vimg" alt=""><svg id="vsvg" preserveAspectRatio="none"></svg></div>
+    <div class="vctl">
+      <span class="seg" role="group" aria-label="Picture"><button type="button" id="pic-n" aria-pressed="true">nuclear stain</button><button type="button" id="pic-l" aria-pressed="false">labels</button></span>
+      <label><input type="checkbox" id="l-hand" checked><span class="sw" style="border-color:var(--hand);border-top-style:dashed"></span>by hand</label>
+      <label><input type="checkbox" id="l-today" checked><span class="sw" style="border-color:var(--today)"></span>today</label>
+      <label><input type="checkbox" id="l-class"><span class="sw" style="border-color:var(--class)"></span>per-class settings</label>
+      <label><input type="checkbox" id="l-seeds"><span class="sw" style="border-color:var(--seed1)"></span>today's seeds</label>
+    </div>
+    <div class="nav"><button type="button" id="prev">◀ better</button><button type="button" id="next">worse ▶</button><span id="rank"></span></div>
+    <div class="facts" id="facts"></div>
+  </div>
+</div>
+
+<section class="sheet card">
+  <div class="shead"><h2>All sections, worst first</h2><span class="hint" id="sheethint">Sorted by the error chosen above; click one to look at it.</span></div>
+  <div class="grid" id="grid"></div>
+</section>
+
+<script>
+'use strict';
+const $=s=>document.querySelector(s);
+const NS='http://www.w3.org/2000/svg';
+const sv=(t,a={},p)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e;};
+const fmt=(v,d=2)=>v==null||!isFinite(v)?'–':Math.abs(v)>=100?v.toFixed(0):Math.abs(v)>=10?v.toFixed(1):v.toFixed(d);
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const PAL=['#7fb6ff','#ffb35c','#b48cff','#5ccf8a','#ff7a8a','#e6d36a','#6fe0d0','#c9a27a'];
+let S=[], cur=null, pinned=null, pic='n', order=[];
+const show={hand:true,today:true,class:false,seeds:false};
+
+fetch('data.json').then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); }).then(d=>{ S=d.sections; init(); })
+  .catch(e=>{ $('#vname').textContent='Could not load data.json ('+e.message+'). Build it with junction_browser.py.'; });
+
+function xOptions(){
+  const o=[['first cut seam price','Seam price of today\'s first cut',s=>s['first cut seam price']]];
+  const mk=new Set(), pk=new Set();
+  S.forEach(s=>{Object.keys(s.metrics||{}).forEach(k=>mk.add(k));Object.keys(s.polarity||{}).forEach(k=>pk.add(k));});
+  for(const k of pk) o.push(['p:'+k,'Polarity · '+k,s=>s.polarity?.[k]]);
+  for(const k of mk) o.push(['m:'+k,k,s=>s.metrics?.[k]]);
+  o.push(['e:today','Error today (µm)',s=>s.errors.today]);
+  for(const k of Object.keys(S[0].errors)) if(k!=='today') o.push(['e:'+k,'Error, '+k+' (µm)',s=>s.errors[k]]);
+  return o;
+}
+let XO=[], YO=[], CO=[];
+function init(){
+  XO=xOptions();
+  YO=Object.keys(S[0].errors).map(k=>[k,k,s=>s.errors[k]]);
+  CO=[['cls','dark line at the junction',s=>s['first cut seam price']==null?'unknown':s['first cut seam price']>0.4?'no dark line':'dark line'],
+      ['batch','batch',s=>s.batch==='first 31'?'first 30':'new'],['set','tuning / held out',s=>s.set],['Shape','pre-screen shape',s=>s.Shape||'–'],
+      ['status','finder status',s=>s.status],['fb','second search used',s=>s.fallback?'yes':'no'],
+      ['Ripped','ripped',s=>s.Ripped||'–'],['Folded','folded',s=>s.Folded||'–'],['Quality','quality',s=>s.Quality||'–']];
+  fill('#ysel',YO,'today'); fill('#xsel',XO,'p:AF488: toward the far pole (Spearman with distance from the line)'); fill('#csel',CO,'cls');
+  for(const id of ['#ysel','#xsel','#csel']) $(id).addEventListener('change',()=>{ draw(); sheet(); });
+  $('#pic-n').onclick=()=>setPic('n'); $('#pic-l').onclick=()=>setPic('l');
+  for(const k of ['hand','today','class','seeds']) $('#l-'+k).addEventListener('change',e=>{show[k]=e.target.checked; overlay(); sheet();});
+  $('#prev').onclick=()=>step(-1); $('#next').onclick=()=>step(1);
+  document.addEventListener('keydown',e=>{ if(e.target.tagName==='SELECT') return; if(e.key==='ArrowRight'||e.key==='ArrowDown'){step(1);e.preventDefault();} if(e.key==='ArrowLeft'||e.key==='ArrowUp'){step(-1);e.preventDefault();} });
+  draw(); sheet();
+  const worst=order[0]; pinned=worst; select(worst);
+}
+function fill(id,opts,val){ const s=$(id); s.innerHTML=''; for(const [k,l] of opts){ const o=document.createElement('option'); o.value=k; o.textContent=l; s.append(o);} s.value=val; if(s.selectedIndex<0) s.selectedIndex=0; }
+const pick=(opts,id)=>opts.find(o=>o[0]===$(id).value);
+function yOf(s){ return pick(YO,'#ysel')[2](s); }
+function setPic(p){ pic=p; $('#pic-n').setAttribute('aria-pressed',p==='n'); $('#pic-l').setAttribute('aria-pressed',p==='l'); if(cur) select(cur,true); sheet(); }
+
+/* ---------- scatter ---------- */
+let pts=[];
+function draw(){
+  const svg=$('#plot'); svg.innerHTML='';
+  const W=640,H=470,m={l:52,r:14,t:14,b:46};
+  const [,xl,xf]=pick(XO,'#xsel'), [,,cf]=pick(CO,'#csel');
+  const data=S.map(s=>({s,x:xf(s),y:yOf(s),c:cf(s)})).filter(d=>d.x!=null&&isFinite(d.x)&&d.y!=null);
+  const xs=data.map(d=>d.x).sort((a,b)=>a-b);
+  let x0=xs[0],x1=xs[xs.length-1]; if(x0===x1){x0-=1;x1+=1;} const pad=(x1-x0)*0.04; x0-=pad; x1+=pad;
+  const X=v=>m.l+(v-x0)/(x1-x0)*(W-m.l-m.r), Y=v=>H-m.b-v/310*(H-m.t-m.b);
+  for(let v=0;v<=300;v+=50){ sv('line',{x1:m.l,x2:W-m.r,y1:Y(v),y2:Y(v),class:'grid'},svg); sv('text',{x:m.l-6,y:Y(v)+4,'text-anchor':'end'},svg).textContent=v; }
+  sv('line',{x1:m.l,x2:W-m.r,y1:Y(100),y2:Y(100),stroke:css('--muted'),'stroke-dasharray':'4 4','stroke-width':1},svg);
+  const ticks=niceTicks(x0,x1,6);
+  for(const t of ticks){ sv('line',{x1:X(t),x2:X(t),y1:m.t,y2:H-m.b,class:'grid'},svg); sv('text',{x:X(t),y:H-m.b+15,'text-anchor':'middle'},svg).textContent=+t.toFixed(3); }
+  sv('line',{x1:m.l,x2:W-m.r,y1:H-m.b,y2:H-m.b,class:'axis'},svg);
+  sv('text',{x:(m.l+W-m.r)/2,y:H-10,'text-anchor':'middle',class:'title'},svg).textContent=xl;
+  sv('text',{x:14,y:(m.t+H-m.b)/2,'text-anchor':'middle',class:'title',transform:`rotate(-90 14 ${(m.t+H-m.b)/2})`},svg).textContent='error (µm), '+$('#ysel').value;
+  const cats=[...new Set(data.map(d=>d.c))].sort(); const col=c=>PAL[cats.indexOf(c)%PAL.length];
+  pts=data.map(d=>({...d,px:X(d.x),py:Y(d.y),col:col(d.c)}));
+  const g=sv('g',{},svg);
+  for(const p of pts){ p.el=sv('circle',{cx:p.px,cy:p.py,r:5,fill:p.col,'fill-opacity':.78,stroke:css('--bg'),'stroke-width':1},g); }
+  hl=sv('circle',{r:9,fill:'none',stroke:css('--accent'),'stroke-width':2.2,visibility:'hidden'},svg);
+  // correlation for the reader
+  const r=spearman(data.map(d=>d.x),data.map(d=>d.y));
+  sv('text',{x:W-m.r,y:m.t+10,'text-anchor':'end'},svg).textContent=`n ${data.length} · Spearman ${fmt(r,2)}`;
+  const lg=$('#legend'); lg.innerHTML=''; for(const c of cats){ const n=data.filter(d=>d.c===c).length; const sp=document.createElement('span'); sp.innerHTML=`<i style="background:${col(c)}"></i>${c} (${n})`; lg.append(sp);}
+  svg.onmousemove=e=>{ const p=nearest(e); if(p && !pinned) select(p.s); };
+  svg.onmouseleave=()=>{ if(pinned) select(pinned); };
+  svg.onclick=e=>{ const p=nearest(e); if(p){ pinned=pinned===p.s?null:p.s; select(p.s); } };
+  order=[...S].sort((a,b)=>yOf(b)-yOf(a));
+  if(cur) mark(cur);
+}
+let hl=null;
+function nearest(e){
+  const svg=$('#plot'), b=svg.getBoundingClientRect(); const x=(e.clientX-b.left)*640/b.width, y=(e.clientY-b.top)*470/b.height;
+  let best=null,bd=18*18; for(const p of pts){ const d=(p.px-x)**2+(p.py-y)**2; if(d<bd){bd=d;best=p;} } return best;
+}
+function mark(s){ const p=pts.find(q=>q.s===s); if(!hl) return; if(p){ hl.setAttribute('cx',p.px); hl.setAttribute('cy',p.py); hl.setAttribute('visibility','visible'); } else hl.setAttribute('visibility','hidden'); }
+function niceTicks(a,b,n){ const span=b-a, step0=span/n, mag=10**Math.floor(Math.log10(step0)), st=[1,2,5,10].map(k=>k*mag).find(k=>span/k<=n)||mag*10; const out=[]; for(let v=Math.ceil(a/st)*st;v<=b;v+=st) out.push(v); return out; }
+function rank(a){ const i=a.map((v,k)=>[v,k]).sort((p,q)=>p[0]-q[0]); const r=new Array(a.length); i.forEach(([,k],j)=>r[k]=j); return r; }
+function spearman(a,b){ if(a.length<3) return NaN; const ra=rank(a), rb=rank(b), n=a.length, ma=(n-1)/2; let num=0,da=0,db=0; for(let i=0;i<n;i++){ num+=(ra[i]-ma)*(rb[i]-ma); da+=(ra[i]-ma)**2; db+=(rb[i]-ma)**2; } return num/Math.sqrt(da*db); }
+
+/* ---------- viewer ---------- */
+function select(s,force){
+  if(!s) return; if(s===cur && !force){ mark(s); return; } cur=s; mark(s);
+  $('#vname').textContent=s.short;
+  const chips=$('#chips'); chips.innerHTML='';
+  const ch=(t,w)=>{ const c=document.createElement('span'); c.className='chip'+(w?' warn':''); c.textContent=t; chips.append(c); };
+  ch(s.set); ch(s.batch==='first 31'?'first 30':'new'); if(s.Shape) ch(s.Shape, s.Shape==='Damaged'); ch('status '+s.status, s.status!=='ok');
+  if(s['first cut seam price']!=null) ch(s['first cut seam price']>0.4?'no dark line':'dark line', s['first cut seam price']>0.4);
+  if(s.fallback) ch('second search used'); if(pinned===s) ch('kept · click again to release');
+  const img=$('#vimg'); img.src=`img/${s.id}_${pic}.jpg`; img.alt=`${s.short}, ${pic==='n'?'nuclear stain':'labels'}`;
+  overlay();
+  const i=order.indexOf(s); $('#rank').textContent=`${i+1} of ${order.length} by error`;
+  facts(s);
+  document.querySelectorAll('.thumb').forEach(t=>t.classList.toggle('on',t.dataset.id===s.id));
+}
+function lineEls(svg,s,w,scale=1){
+  const [,,h,wd]=s.crop; svg.setAttribute('viewBox',`0 0 ${wd} ${h}`);
+  const path=(pts,col,width,dash)=>{ if(!pts||pts.length<2) return; sv('path',{d:'M'+pts.map(p=>p[1]+','+p[0]).join('L'),fill:'none',stroke:col,'stroke-width':width*scale,'stroke-dasharray':dash?dash.map(v=>v*scale).join(' '):'','stroke-linejoin':'round','stroke-linecap':'round','vector-effect':'non-scaling-stroke'},svg); };
+  if(show.seeds) s.seeds.forEach((cs,k)=>cs.forEach(c=>path(c,k?css('--seed2'):css('--seed1'),1.6,[3,3])));
+  if(show.class) path(s.lines['per class'],css('--class'),2.4);
+  if(show.today) path(s.lines.today,css('--today'),2.4);
+  if(show.hand) path(s.lines.hand,css('--hand'),2,[6,5]);
+}
+function overlay(){ const svg=$('#vsvg'); svg.innerHTML=''; if(cur) lineEls(svg,cur); }
+function facts(s){
+  const f=$('#facts'); f.innerHTML='';
+  const box=(title,rows)=>{ const d=document.createElement('div'); d.innerHTML=`<h3>${title}</h3>`; const t=document.createElement('table'); for(const r of rows) t.append(r); d.append(t); f.append(d); };
+  const row=(k,v,extra='')=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td>${k}</td><td class="n">${v}</td>${extra}`; return tr; };
+  box('Error (µm)',Object.entries(s.errors).map(([k,v])=>{ const tr=row(k,fmt(v,0)); const td=document.createElement('td'); td.style.width='38%'; td.style.paddingLeft='8px'; td.innerHTML=`<div class="bar"><b style="width:${Math.min(v,300)/3}%;background:${v>100?css('--bad'):css('--good')}"></b></div>`; tr.append(td); return tr; }));
+  box('Polarity',Object.entries(s.polarity||{}).map(([k,v])=>row(k,fmt(v))));
+  box('Finder',[...Object.entries(s.metrics||{}).map(([k,v])=>row(k,fmt(v))), ...(s.flags?[row('flags',`<span style="font-family:var(--sans)">${s.flags}</span>`)]:[])]);
+  box('Pre-screen',['Ripped','Folded','Quality','Shape'].map(k=>row(k,s[k]||'–')));
+}
+function step(d){ if(!order.length) return; let i=order.indexOf(cur); i=Math.max(0,Math.min(order.length-1,i+d)); pinned=order[i]; select(order[i]); const t=document.querySelector(`.thumb[data-id="${order[i].id}"]`); if(t) t.scrollIntoView({block:'nearest',behavior:'smooth'}); }
+
+/* ---------- contact sheet ---------- */
+function sheet(){
+  const g=$('#grid'); g.innerHTML='';
+  for(const s of order){
+    const b=document.createElement('button'); b.type='button'; b.className='thumb'+(s===cur?' on':''); b.dataset.id=s.id;
+    const tp=document.createElement('div'); tp.className='tp';
+    const im=document.createElement('img'); im.loading='lazy'; im.src=`img/${s.id}_${pic}.jpg`; im.alt=s.short; tp.append(im);
+    const o=document.createElementNS(NS,'svg'); o.setAttribute('preserveAspectRatio','xMidYMid meet'); lineEls(o,s); tp.append(o);
+    const y=yOf(s);
+    const tl=document.createElement('div'); tl.className='tl'; tl.innerHTML=`<span>${s.short}</span><b style="color:${y>100?css('--bad'):css('--good')}">${fmt(y,0)}</b>`;
+    b.append(tp,tl); b.onclick=()=>{ pinned=s; select(s); window.scrollTo({top:0,behavior:'smooth'}); };
+    g.append(b);
+  }
+}
+</script>
