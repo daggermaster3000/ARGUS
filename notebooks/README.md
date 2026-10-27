@@ -27,6 +27,7 @@ Each ends with a dated **What it showed**. Data and caches live in
 | `counts_in_band.ipynb` | Positive cells in the junction band, per sample and per genotype. |
 | `counts_crossed.ipynb` | Positive cells that passed the line into the other organoid: how many, how far, along the surface or not. |
 | `positivity_metrics.ipynb` | Which rule should call a cell positive: thresholds from the band, a negative control, local contrast, two-population models; judged without and with the hand clicks. |
+| `classical_vs_cellpose.ipynb` | AF488 segmented directly (background taken away, k × SD / triangle / Otsu) against Cellpose nuclei + median + 3 SD or ring contrast: same cells? more of their shape? Script `classical_vs_cellpose.py`, cache `junction_eval/classical/`. |
 | `band_choice.ipynb` | How much the counts depend on which band is used: first annotator, second, or the finder's. |
 | `manual_vs_auto.ipynb` | Quillan's hand counts against the automatic counts, on the samples he counted. |
 
