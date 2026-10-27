@@ -52,7 +52,7 @@ POSITIVE_SUFFIX = "+ cells"
 #: Columns of the panel's table; the workbook has these and the rest.
 TABLE_COLUMNS = (
     "Sample", "Channel", "Cells in region", "Positive", "Positive (%)",
-    "Positive per mm²", "Positive per mm of junction", "Threshold",
+    "Positive per mm²", "Positive per mm of junction", "Positive in the whole section", "Threshold",
     "Region drawn by", "Finder status", "Finder second search", "Review decision",
 )
 
@@ -294,6 +294,27 @@ class JunctionAnalysisWidget(QWidget):
         self._find.setToolTip("With the settings on the Fusion region panel. Off skips samples that have no region yet.")
         form.addRow("", self._find)
 
+        self._whole = QCheckBox("Segment the whole section: every positive cell, with its distances")
+        self._whole.setToolTip(
+            "Besides the count in the region, segment every cell of the section (in tiles, "
+            "bare slide skipped) and score it against the region's thresholds. The workbook "
+            "gets a “Section cells” sheet: every cell positive for a channel, anywhere in the "
+            "section, and the region's cells, each with its distance to the junction line "
+            "(positive on the band's side), to the tissue edge, and whether it is in the "
+            "region. The count in the region is unchanged. Minutes per slide scan instead of "
+            "seconds; with “Threshold from: All cells of the sample” the same pass serves both."
+        )
+        form.addRow("", self._whole)
+        self._keep_section = QCheckBox("Keep every cell of the section, not only the positive ones")
+        self._keep_section.setToolTip(
+            "For a profile of all cells against the distance to the line. Large: about "
+            "100,000 rows a section; past a sheet's 1,048,575 rows the table is written to a "
+            "CSV beside the workbook."
+        )
+        self._keep_section.setEnabled(False)
+        self._whole.toggled.connect(self._keep_section.setEnabled)
+        form.addRow("", self._keep_section)
+
         self._save_cells = QCheckBox("Store the counted cells with the sample")
         self._save_cells.setToolTip(
             "As the label map “junction cells”, with each channel's threshold and its "
@@ -422,6 +443,8 @@ class JunctionAnalysisWidget(QWidget):
             fixed={name: float(self._fixed.value()) for name in (channels or [])},
             expand_um=float(self._expand.value()),
             find_junction=self._find.isChecked(),
+            whole_section=self._whole.isChecked(),
+            keep_section=self._whole.isChecked() and self._keep_section.isChecked(),
             save_cells=self._save_cells.isChecked(),
             settings=settings,
             junction=junction,

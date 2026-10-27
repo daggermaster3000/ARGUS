@@ -1426,8 +1426,23 @@ channels (`AF555 + AF488`, `none`, …).
   holes filled, as the junction finder sees it), positive inside, negative for a
   cell on the rim past the edge. Good to about 5 µm, the outline's pixel size.
 
-Only the region is segmented, so these describe the cells near the line; for a
-profile across the whole section use the whole-dataset run.
+Only the region is segmented, so these describe the cells near the line —
+unless **Segment the whole section** is ticked:
+
+- every cell of the section is segmented (in tiles of 2048 px, each with 96 px of
+  its neighbours so a cell cut by a tile's edge is counted once, whole; bare
+  slide skipped) and scored against the **region's** thresholds, exactly as the
+  region's cells are;
+- the workbook gets a **Section cells** sheet: every cell positive for a channel,
+  anywhere in the section, plus the region's cells, each with *In region*, its
+  *Positive for*, its distance to the junction line (positive on the band's side,
+  negative across it) and to the tissue edge. Tick *Keep every cell of the
+  section* to have all cells (about 100,000 rows a section; past a sheet's
+  limit it goes to a CSV beside the workbook);
+- the *Counts* sheet gets *Positive in the whole section* per channel;
+- the count in the region is unchanged. It takes minutes per slide scan instead
+  of seconds; with *Threshold from: All cells of the sample* the same pass serves
+  both.
 
 Results appear three ways:
 

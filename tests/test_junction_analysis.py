@@ -338,9 +338,54 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
             loaders.release(paths[0])
         finally:
             ja.TILE_PX = tile
-        check(len(pieces) > 1 and max(max(piece) for piece in pieces) <= 64, f"in tiles ({len(pieces)})")
+        check(len(pieces) > 1 and max(max(piece) for piece in pieces) <= 64 + 2 * ja.TILE_OVERLAP_PX,
+              f"in tiles, each with its overlap ({len(pieces)})")
         check(set(values) == set(names) and len({len(v) for v in values.values()}) == 1 and len(values["AF488"]) > 0,
               "giving every channel a value for each cell found")
+
+        # A cell across a tile's edge is counted once, whole.
+        from scipy import ndimage
+        from types import SimpleNamespace
+
+        rr, cc = np.mgrid[:200, :200]
+        stain = np.full((200, 200), 100, np.uint16)
+        centres = [(6 + 15 * i, 6 + 15 * j) for i in range(13) for j in range(13)]
+        for y, x in centres:
+            stain[(rr - y) ** 2 + (cc - x) ** 2 <= 16] = 1000
+        spec = SimpleNamespace(data=stain[None], multiscale=False)
+        tile, ja.TILE_PX = ja.TILE_PX, 64
+        try:
+            cut = ja.section_cells([spec], ["AF405"], 0, (1.0, 1.0), ja.CountOptions(expand_um=0.0),
+                                   segment=lambda plane, voxel, settings, progress=None: ndimage.label(plane > 300)[0])
+        finally:
+            ja.TILE_PX = tile
+        check(len(cut) == len(centres) and np.allclose(sorted(cut["Nucleus area (µm²)"]),
+                                                       [float(((rr - 6) ** 2 + (cc - 6) ** 2 <= 16).sum())] * len(centres)),
+              f"cells across a tile's edge are counted once and whole ({len(cut)} of {len(centres)})")
+
+        # The whole section: every cell scored against the region's thresholds, and placed.
+        whole = ja.analyse_sample(paths[0], ja.CountOptions(expand_um=0.0, find_junction=False, whole_section=True),
+                                  segment=segment_all)
+        section = whole.section_cells
+        green_count = next(count for count in whole.channels if count.channel == "AF488")
+        check(whole.ok and section is not None and int(section[ja.IN_REGION_COLUMN].sum()) == whole.n_cells,
+              f"the section's cells include the region's ({whole.n_cells})")
+        check(green_count.n_positive_section >= green_count.n_positive
+              and int(section["AF488 positive"].sum()) == green_count.n_positive_section,
+              f"positive cells are found outside the region too ({green_count.n_positive_section} against {green_count.n_positive})")
+        check({ja.LINE_COLUMN, ja.EDGE_COLUMN} <= set(section.columns)
+              and (section.loc[~section[ja.IN_REGION_COLUMN], ja.LINE_COLUMN] < 0).any(),
+              "each with its distances: cells across the line are negative")
+        kept = (section["Positive for"] != "none").to_numpy() | section[ja.IN_REGION_COLUMN].to_numpy()
+        check(len(section) > 0 and bool(kept.all()), "only positive and in-region cells are kept")
+        every = ja.analyse_sample(paths[0], ja.CountOptions(expand_um=0.0, find_junction=False, whole_section=True,
+                                                            keep_section=True), segment=segment_all)
+        check(len(every.section_cells) == int(labels.max()), f"or every cell, when asked ({len(every.section_cells)})")
+        written = ja.export([whole], root / "section.xlsx", ja.CountOptions(whole_section=True))
+        import openpyxl
+
+        check("Section cells" in openpyxl.load_workbook(written, read_only=True).sheetnames,
+              "and the workbook gets a sheet of the section's cells")
 
         # A GPU fault ends the run: the card will not answer for the next sample either.
         from microscopy_viewer import segmentation as sg
