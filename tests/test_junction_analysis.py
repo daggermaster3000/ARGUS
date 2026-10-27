@@ -409,8 +409,10 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         written = ja.export([whole], root / "section.xlsx", ja.CountOptions(whole_section=True))
         import openpyxl
 
-        check("Section cells" in openpyxl.load_workbook(written, read_only=True).sheetnames,
-              "and the workbook gets a sheet of the section's cells")
+        book = openpyxl.load_workbook(written, read_only=True)
+        sheet_names = book.sheetnames
+        book.close()
+        check("Section cells" in sheet_names, "and the workbook gets a sheet of the section's cells")
 
         # A GPU fault ends the run: the card will not answer for the next sample either.
         from microscopy_viewer import segmentation as sg

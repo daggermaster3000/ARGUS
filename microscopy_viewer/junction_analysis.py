@@ -81,6 +81,11 @@ TILE_OVERLAP_PX = 96
 #: nuclear stain, than the split between slide and tissue.
 TILE_MIN_TISSUE = 0.02
 
+#: Threads that measure the tiles already segmented while the GPU segments the
+#: next one. Measuring a 2240 px tile in three channels is about four seconds
+#: of CPU; Cellpose on it about three of GPU.
+MEASURE_THREADS = 3
+
 #: Pixels kept round the band when it is cropped, in µm: room for a cell lying
 #: on the band's edge to be segmented whole.
 CROP_MARGIN_UM = 30.0
@@ -123,7 +128,7 @@ class CountOptions:
     #: against the region's thresholds, with its distances
     #: (``JunctionCounts.section_cells``); the region's cells are taken from
     #: the same pass. Off: only the region's bounding box is segmented — seconds
-    #: instead of minutes a slide scan, and nothing known outside the region.
+    #: instead of ~40 s a slide scan, and nothing known outside the region.
     whole_section: bool = True
     #: With *whole_section*: keep every cell of the section, not only those
     #: positive for a channel or in the region. ~100,000 rows a section.
@@ -687,37 +692,66 @@ def segment_section(
     def add(key, values):
         parts.setdefault(key, []).append(np.asarray(values, dtype=np.float64))
 
-    found = 0
-    for index, tile in enumerate(tiles, start=1):
-        say(f"the section's cells: tile {index} of {len(tiles)} ({found} so far)")
-        window = (slice(max(tile[0].start - TILE_OVERLAP_PX, 0), min(tile[0].stop + TILE_OVERLAP_PX, height)),
-                  slice(max(tile[1].start - TILE_OVERLAP_PX, 0), min(tile[1].stop + TILE_OVERLAP_PX, width)))
-        nuclei = np.asarray((segment or _segment)(stain[window], voxel, options.settings, None))
+    def measure(tile, window, nuclei, images):
+        """One tile's own cells, measured: runs on a worker thread, no file access."""
         ids = np.unique(nuclei[nuclei > 0]).astype(np.int64)
         if not ids.size:
-            continue
+            return None
         centres = np.asarray(ndimage.center_of_mass(nuclei > 0, nuclei, ids)).reshape(-1, 2)
         cy, cx = centres[:, 0] + window[0].start, centres[:, 1] + window[1].start
         own = (cy >= tile[0].start) & (cy < tile[0].stop) & (cx >= tile[1].start) & (cx < tile[1].stop)
         if not own.any():
-            continue
+            return None
         ids, cy, cx = ids[own], cy[own], cx[own]
         regions = sg.expand_labels(nuclei, voxel, options.expand_um) if options.expand_um > 0 else nuclei
-        labels = np.arange(found + 1, found + 1 + ids.size, dtype=np.int64)
         area = np.asarray(ndimage.sum(nuclei > 0, nuclei, ids)) * voxel[0] * voxel[1]
-        add("Label", labels)
-        add("Centroid Y (µm)", cy * voxel[0])
-        add("Centroid X (µm)", cx * voxel[1])
-        add("Nucleus area (µm²)", area)
-        add("Equivalent diameter (µm)", 2.0 * np.sqrt(area / np.pi))
-        for position, name in enumerate(names):
-            image = stain[window] if position == nuclear else _plane(specs[position], window)
+        figures = {"Centroid Y (µm)": cy * voxel[0], "Centroid X (µm)": cx * voxel[1],
+                   "Nucleus area (µm²)": area, "Equivalent diameter (µm)": 2.0 * np.sqrt(area / np.pi)}
+        for name, image in images.items():
             stats = label_stats(regions, image, ids)
             for figure in CELL_METRICS:
-                add(f"{name} {figure}", stats[figure])
-        if crop is not None:
-            _paste(pasted, pasted_regions, crop, window, nuclei, regions, ids, labels)
+                figures[f"{name} {figure}"] = stats[figure]
+        return ids, figures, (nuclei, regions) if crop is not None else None
+
+    found = 0
+
+    def collect(window, measured) -> None:
+        """Number a measured tile's cells after those before it, in tile order, and keep them."""
+        nonlocal found
+        if measured is None:
+            return
+        ids, figures, maps = measured
+        labels = np.arange(found + 1, found + 1 + ids.size, dtype=np.int64)
+        add("Label", labels)
+        for key, values in figures.items():
+            add(key, values)
+        if maps is not None:
+            _paste(pasted, pasted_regions, crop, window, maps[0], maps[1], ids, labels)
         found += int(ids.size)
+
+    # The GPU segments on this thread and the files are read here (their
+    # handles belong to this thread); the measuring of the tiles already
+    # segmented goes on meanwhile on worker threads. Collected in tile order,
+    # so the labels are the same as one tile at a time.
+    from concurrent.futures import ThreadPoolExecutor
+
+    pending: list[tuple[tuple[slice, slice], Any]] = []
+    with ThreadPoolExecutor(max_workers=MEASURE_THREADS) as pool:
+        for index, tile in enumerate(tiles, start=1):
+            while pending and (pending[0][1].done() or len(pending) > MEASURE_THREADS):
+                window_done, future = pending.pop(0)
+                collect(window_done, future.result())
+            say(f"the section's cells: tile {index} of {len(tiles)} ({found} so far)")
+            window = (slice(max(tile[0].start - TILE_OVERLAP_PX, 0), min(tile[0].stop + TILE_OVERLAP_PX, height)),
+                      slice(max(tile[1].start - TILE_OVERLAP_PX, 0), min(tile[1].stop + TILE_OVERLAP_PX, width)))
+            nuclei = np.asarray((segment or _segment)(stain[window], voxel, options.settings, None))
+            if not np.any(nuclei):
+                continue
+            images = {name: stain[window] if position == nuclear else _plane(specs[position], window)
+                      for position, name in enumerate(names)}
+            pending.append((window, pool.submit(measure, tile, window, nuclei, images)))
+        for window_done, future in pending:
+            collect(window_done, future.result())
     columns = ["Label", "Centroid Y (µm)", "Centroid X (µm)", "Nucleus area (µm²)", "Equivalent diameter (µm)",
                *(f"{name} {figure}" for name in names for figure in CELL_METRICS)]
     table = pd.DataFrame({key: np.concatenate(parts[key]) if key in parts else np.zeros(0) for key in columns})
@@ -1000,6 +1034,11 @@ def analyse_sample(
         images = {name: _plane(spec, window) for name, spec in zip(names, specs)}
 
         # -- the cells --------------------------------------------------------
+        if segment is None:
+            crowded = sg.crowded_gpu_note()
+            if crowded:
+                say("slow: " + crowded)
+                result.warnings.append(crowded)
         # A threshold from all the sample's cells needs all of them segmented;
         # a rule that takes nothing from the cells does not, whatever was asked.
         sample_values = None
@@ -1084,6 +1123,10 @@ def analyse_sample(
         logger.exception("junction analysis failed on %s", target.name)
         result.error = str(exc)
         result.gpu_fault = sg.is_gpu_fault(exc)
+        if result.gpu_fault:
+            forget = getattr(sg.get_backend(), "forget_model", None)
+            if forget is not None:
+                forget()
     finally:
         if segment is None:
             sg.release_gpu_memory()

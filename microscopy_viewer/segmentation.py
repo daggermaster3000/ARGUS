@@ -30,6 +30,7 @@ cellpose model folder — minus the ones the installed version cannot load.
 from __future__ import annotations
 
 import re
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -411,6 +412,24 @@ def compute_device(prefer_gpu: bool = True) -> DeviceInfo:
     return DeviceInfo()
 
 
+#: Below this share of the card free, other programs are using it: Windows then
+#: lends Cellpose system memory instead, and a tile that takes three seconds
+#: takes fifty.
+CROWDED_GPU_SHARE = 0.4
+
+
+def crowded_gpu_note(device: DeviceInfo | None = None) -> str:
+    """A warning when most of the GPU's memory is held by other programs; empty otherwise."""
+    device = device if device is not None else compute_device()
+    if not device.is_gpu or not device.total_memory_bytes or not device.free_memory_bytes:
+        return ""
+    if device.free_memory_bytes >= CROWDED_GPU_SHARE * device.total_memory_bytes:
+        return ""
+    return (f"the GPU has only {device.free_memory_bytes / 1e9:.1f} of {device.total_memory_bytes / 1e9:.1f} GB "
+            "free — other programs (another viewer, OASIS, a notebook) are holding it, and segmentation "
+            "can be ten times slower. Close them for a long run.")
+
+
 def estimate_batch_size(device: DeviceInfo | None = None) -> int:
     """Patches per forward pass, from free video memory.
 
@@ -499,6 +518,14 @@ class CellposeBackend(Backend):
     """
 
     name = "cellpose"
+
+    def __init__(self) -> None:
+        #: The last model loaded, and what it was loaded for: loading cpsam
+        #: takes two seconds and a whole section asks for it once per tile.
+        self._loaded: tuple[tuple, Any] | None = None
+        #: One evaluation at a time on the shared model.
+        self._lock = threading.Lock()
+
     install_hint = (
         "Segmentation needs the cellpose package:\n\n"
         "    python -m pip install cellpose\n\n"
@@ -658,6 +685,26 @@ class CellposeBackend(Backend):
             return None
 
     def _model(self, settings: SegmentationSettings, device: DeviceInfo):
+        """The model for *settings*, loaded once and kept until something else is asked for."""
+        wanted = settings.resolved_model()
+        use_gpu = bool(settings.use_gpu and device.is_gpu)
+        stamp = 0.0
+        if wanted and Path(wanted).exists():
+            # A retrained model saved over the same file is a different model.
+            stamp = Path(wanted).stat().st_mtime
+        key = (wanted, use_gpu, device.kind, device.index, stamp)
+        if self._loaded is not None and self._loaded[0] == key:
+            return self._loaded[1]
+        self._loaded = None
+        model = self._load_model(settings, device)
+        self._loaded = (key, model)
+        return model
+
+    def forget_model(self) -> None:
+        """Drop the kept model (after a GPU fault, or to hand its memory back)."""
+        self._loaded = None
+
+    def _load_model(self, settings: SegmentationSettings, device: DeviceInfo):
         from cellpose import models as cp_models
 
         wanted = settings.resolved_model()
@@ -800,7 +847,8 @@ class CellposeBackend(Backend):
 
         if progress is not None:
             progress(f"cellpose {settings.mode}, batch {batch_size}")
-        outcome = model.eval(image, **kwargs)
+        with self._lock:
+            outcome = model.eval(image, **kwargs)
         masks = np.asarray(outcome[0])
 
         info: dict[str, Any] = {"batch_size": batch_size}

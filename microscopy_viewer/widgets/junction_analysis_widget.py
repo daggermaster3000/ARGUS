@@ -315,7 +315,7 @@ class JunctionAnalysisWidget(QWidget):
             "Off (the usual): the whole section is segmented, both organoids, in tiles with "
             "bare slide skipped; the region's cells are taken from that same pass, and every "
             "other cell is measured and scored against the region's thresholds, with its "
-            "distance to the junction line and to the tissue edge. Minutes per slide scan.\n"
+            "distance to the junction line and to the tissue edge. About 40 s per slide scan on a free GPU.\n"
             "On: only the region's bounding box is segmented — seconds — and the table has "
             "nothing about the rest of the section."
         )

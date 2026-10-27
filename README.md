@@ -1426,7 +1426,8 @@ What happens:
 - **Nuclei are segmented over the whole section** (Cellpose on the nuclear
   stain, with the Cells panel's model and diameter), in tiles of 2048 px, each
   with 96 px of its neighbours so a cell cut by a tile's edge is counted once,
-  whole; bare slide is skipped. Minutes per slide scan. A cell is in the region
+  whole; bare slide is skipped. About 40 s per slide scan on the RTX 4090 when
+  nothing else holds the GPU (see *Speed* below). A cell is in the region
   when its centroid is; the region's cells come from this same pass. *Segment
   only the junction region* (Settings) segments the region's bounding box alone
   — seconds — and then nothing is known about the rest of the section.
@@ -1492,6 +1493,15 @@ are, and placed:
   positive in the region ÷ % positive in the section: above 1, positive cells
   gather at the junction), and *Positives: median distance to the line* and *to
   the edge* (µm) — where the positive cells sit; *Cells file* names the CSV.
+
+**Speed.** A 7,600 × 7,600 px slide scan (six tiles, ~31,000 cells) takes about
+37 s on the RTX 4090: Cellpose ~20 s, reading ~5 s, the rest measuring and
+placing. Cellpose stays loaded between tiles and samples, and the tiles already
+segmented are measured on three worker threads while the GPU segments the next.
+**Keep the GPU to itself during a long run**: when other programs (another
+viewer, OASIS, a notebook) hold most of its memory, Windows lends Cellpose system
+memory instead and a tile takes ~50 s instead of ~3 s. The log says *slow: the GPU
+has only … free* when that is the case.
 
 Results appear three ways:
 
