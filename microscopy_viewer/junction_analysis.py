@@ -91,6 +91,11 @@ WORKBOOK_NAME = "counts.xlsx"
 CELLS_FOLDER = "cells"
 REGION_FOLDER = "region"
 POSITIVE_FOLDER = "positive cells"
+#: The whole section's label maps, two per sample: ``<sample> nuclei.tif``
+#: (every cell segmented) and ``<sample> grown.tif`` (the same grown, as measured).
+LABELS_FOLDER = "labels"
+NUCLEI_SUFFIX = " nuclei.tif"
+GROWN_SUFFIX = " grown.tif"
 README_NAME = "README.txt"
 
 #: Longest side of the pictures, in pixels: the counted region, and the whole
@@ -158,6 +163,10 @@ class CountOptions:
     #: (``<sample>.png``: the stains, the region, a ring round every positive
     #: cell); ``None`` writes none.
     pictures_dir: Path | None = None
+    #: Folder each sample's whole-section label maps are written to (see
+    #: :data:`LABELS_FOLDER`); ``None`` writes none. Implies keeping them while
+    #: the sample is analysed.
+    labels_dir: Path | None = None
     #: Keep the label maps of the whole section — every nucleus, and grown —
     #: for drawing (``JunctionCounts.section_labels`` / ``section_regions``).
     #: ~250 MB each on a slide scan: for a single sample, not a batch.
@@ -276,6 +285,9 @@ class JunctionCounts:
     section_regions: np.ndarray | None = None
     #: The whole-section picture, when one was written.
     section_picture: Path | None = None
+    #: The whole section's label maps on disk, nuclei and grown, when written.
+    nuclei_file: Path | None = None
+    grown_file: Path | None = None
 
     @property
     def ok(self) -> bool:
@@ -1011,6 +1023,41 @@ def place_positives(table, counts: Sequence[ChannelCount]) -> None:
                 setattr(count, attribute, float(np.median(values)) if values.size else float("nan"))
 
 
+def write_labels(result: JunctionCounts, folder: Path) -> tuple[Path, Path]:
+    """Write the sample's whole-section label maps: ``<sample> nuclei.tif`` and ``<sample> grown.tif``.
+
+    Compressed, 16-bit when the labels fit, with the pixel size in µm; the
+    labels are those of the sample's cells table.
+    """
+    import tifffile
+
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    written = []
+    for suffix, data in ((NUCLEI_SUFFIX, result.section_labels), (GROWN_SUFFIX, result.section_regions)):
+        data = np.asarray(data)
+        dtype = np.uint16 if data.size and int(data.max()) < 65536 else np.uint32
+        target = folder / f"{result.name}{suffix}"
+        tifffile.imwrite(target, data.astype(dtype, copy=False), compression="zlib",
+                         resolution=(1e4 / result.voxel_yx[1], 1e4 / result.voxel_yx[0]),
+                         resolutionunit="CENTIMETER", metadata={"unit": "um", "spacing_yx_um": list(result.voxel_yx)})
+        written.append(target)
+    return written[0], written[1]
+
+
+def read_labels(path: str | Path) -> np.ndarray:
+    """A label map written by :func:`write_labels`."""
+    import tifffile
+
+    return np.asarray(tifffile.imread(path)).astype(np.int32, copy=False)
+
+
+def labels_files(result: JunctionCounts) -> tuple[Path, Path] | None:
+    """The sample's label maps on disk, when both are there."""
+    files = (result.nuclei_file, result.grown_file)
+    return files if all(f is not None and Path(f).is_file() for f in files) else None
+
+
 def write_section(result: JunctionCounts, folder: Path) -> Path:
     """Write the sample's section cells to ``<folder>/<sample>.csv``."""
     folder = Path(folder)
@@ -1163,10 +1210,11 @@ def analyse_sample(
         if options.whole_section:
             # One pass over the section: its cells, and the region's among them.
             everything = (slice(0, shape_yx[0]), slice(0, shape_yx[1]))
+            keep_maps = options.full_labels or options.labels_dir is not None
             whole = segment_section(specs, names, nuclear, voxel, options, segment, say,
-                                    crop=everything if options.full_labels else window)
+                                    crop=everything if keep_maps else window)
             section, nuclei, regions = whole.table, whole.labels, whole.regions
-            if options.full_labels:
+            if keep_maps:
                 result.section_labels, result.section_regions = nuclei, regions
                 nuclei, regions = nuclei[window], regions[window]
         else:
@@ -1212,6 +1260,16 @@ def analyse_sample(
             if options.cells_dir is not None and len(result.section_cells):
                 say("writing the section's cells")
                 result.cells_file = write_section(result, Path(options.cells_dir))
+            if options.labels_dir is not None and result.section_labels is not None:
+                say("writing the section's label maps")
+                try:
+                    result.nuclei_file, result.grown_file = write_labels(result, Path(options.labels_dir))
+                except Exception as exc:
+                    logger.exception("could not write the label maps of %s", target.name)
+                    result.warnings.append(f"no label maps written: {exc}")
+                if not options.full_labels:
+                    # Written; a batch does not keep half a gigabyte a sample in memory.
+                    result.section_labels = result.section_regions = None
         kept = np.isin(nuclei, table["Label"].to_numpy())
         result.labels = np.where(kept, nuclei, 0)
         result.regions = np.where(np.isin(regions, table["Label"].to_numpy()), regions, 0)
@@ -1611,6 +1669,7 @@ def results_options(options: CountOptions, folder: str | Path) -> CountOptions:
     """*options* writing into the run folder *folder*: cells, region pictures, section pictures."""
     folder = Path(folder)
     return replace(options, cells_dir=folder / CELLS_FOLDER, qc_dir=folder / REGION_FOLDER,
+                   labels_dir=folder / LABELS_FOLDER,
                    pictures_dir=folder / POSITIVE_FOLDER)
 
 
@@ -1634,6 +1693,9 @@ def write_readme(folder: str | Path, results: Sequence[JunctionCounts], options:
         f"{REGION_FOLDER}/ok, check, fail/<sample>.png",
         "    The counted region, a ring round each positive cell, sorted by QC status.",
         "    Look through them in the Junction review panel.",
+        f"{LABELS_FOLDER}/<sample>{NUCLEI_SUFFIX}, <sample>{GROWN_SUFFIX}",
+        "    The whole section's label maps: every cell segmented, and the same grown by the",
+        "    expansion it was measured over. Labels match the 'Label' column of the cells CSV.",
         f"{POSITIVE_FOLDER}/<sample>.png",
         "    The whole section: the region outlined in white, the junction line in yellow,",
         "    a ring round every positive cell (one colour per channel, as in the caption).",

@@ -422,6 +422,19 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         check((run_dir / ja.REGION_FOLDER / "ok" / "assembloid_s0.png").is_file()
               and (run_dir / ja.CELLS_FOLDER / "assembloid_s0.csv").is_file(),
               "the region picture and every cell land in the same run folder")
+        files = ja.labels_files(drawn)
+        check(files == (run_dir / ja.LABELS_FOLDER / "assembloid_s0 nuclei.tif",
+                        run_dir / ja.LABELS_FOLDER / "assembloid_s0 grown.tif"),
+              "the whole section's label maps are written, nuclei and grown")
+        check(files is not None and np.array_equal(ja.read_labels(files[0]), drawn.section_labels)
+              and np.array_equal(ja.read_labels(files[1]), drawn.section_regions),
+              "and read back exactly")
+        lean = ja.analyse_sample(paths[0], ja.results_options(
+            ja.CountOptions(expand_um=0.0, find_junction=False), ja.run_folder(root / "elsewhere", "lean", when=60.0)),
+            segment=segment_all)
+        check(lean.ok and lean.section_labels is None and ja.labels_files(lean) is not None
+              and int(ja.read_labels(lean.nuclei_file).max()) == lean.n_cells_section,
+              "a batch writes them too without keeping them in memory")
         readme = ja.write_readme(run_dir, [drawn], ja.CountOptions())
         check(readme.is_file() and ja.POSITIVE_FOLDER in readme.read_text(encoding="utf-8"),
               "and a README says what is where")

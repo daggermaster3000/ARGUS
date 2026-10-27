@@ -57,6 +57,7 @@ RESULTS_TIP = (
     "• cells/<sample>.csv — every cell of the whole section;\n"
     "• region/ok, check, fail/ — a picture of each counted region, positive cells ringed;\n"
     "• positive cells/ — each whole section, its positive cells ringed;\n"
+    "• labels/ — each whole section's label maps: every cell, and the same grown;\n"
     "• README.txt — what is where, and how the run was made."
 )
 #: Marks the layers this panel drew, whatever channel they are named after.
@@ -837,7 +838,20 @@ class JunctionAnalysisWidget(QWidget):
 
     def show_result(self, result: ja.JunctionCounts, image) -> None:
         """Draw *result* over *image*: its label maps when they are kept, else rings from its table."""
-        if result.labels is not None:
+        from dataclasses import replace
+
+        if result.section_labels is None and ja.labels_files(result) is not None:
+            # Read back for this drawing only: the result in the table stays small.
+            nuclei_file, grown_file = ja.labels_files(result)
+            self._log(f"{result.name}: reading its label maps…")
+            table = result.section_cells
+            if table is None and result.cells_file is not None and Path(result.cells_file).is_file():
+                import pandas as pd
+
+                table = pd.read_csv(result.cells_file)
+            result = replace(result, section_labels=ja.read_labels(nuclei_file),
+                             section_regions=ja.read_labels(grown_file), section_cells=table)
+        if result.section_labels is not None or result.labels is not None:
             self._draw(result, str(image.name))
             self._log(f"{result.name}: its cells drawn.")
             return
@@ -915,7 +929,7 @@ class JunctionAnalysisWidget(QWidget):
         """All the cells as outlines, and a filled layer per channel of its positives."""
         from ..loaders.layer_spec import units_like
 
-        if result.labels is None or image_name not in self._viewer.layers:
+        if (result.labels is None and result.section_labels is None) or image_name not in self._viewer.layers:
             return
         image = self._viewer.layers[image_name]
         voxel = result.voxel_yx
@@ -956,8 +970,9 @@ class JunctionAnalysisWidget(QWidget):
                     layer = put(f"{count.channel}{POSITIVE_SUFFIX}", mask, opacity=1.0, **whole)
                     layer.contour = POSITIVE_CONTOUR
                     self._tint(layer, POSITIVE_COLOR)
-                region = put(CELLS_LAYER, result.labels, opacity=0.9, visible=False, **common)
-                region.contour = 1
+                if result.labels is not None:
+                    region = put(CELLS_LAYER, result.labels, opacity=0.9, visible=False, **common)
+                    region.contour = 1
                 return
             cells = put(CELLS_LAYER, result.labels, opacity=0.9, **common)
             cells.contour = 1  # outlines: the signal underneath stays visible

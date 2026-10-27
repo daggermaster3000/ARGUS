@@ -1514,6 +1514,7 @@ cells_analysis/2026-10-27_165517/            (a single sample: "… <sample name
   cells/<sample>.csv
   region/ok/, check/, fail/<sample>.png
   positive cells/<sample>.png
+  labels/<sample> nuclei.tif, <sample> grown.tif
   README.txt
 ```
 
@@ -1538,6 +1539,11 @@ cells_analysis/2026-10-27_165517/            (a single sample: "… <sample name
   the region outlined in white, the junction line in yellow, a ring round every
   positive cell anywhere in the section, and per channel the positives in the
   section and in the region.
+- **`labels/`** — each whole section's label maps (compressed TIFF, ~2 MB each on
+  a slide scan): *nuclei*, every cell segmented, and *grown*, the same grown by
+  *Measure around nuclei*, as measured. Labels match the *Label* column of
+  `cells/<sample>.csv`, so any cell's figures can be looked up from the map.
+  Open them in napari, Fiji or Python (`tifffile.imread`).
 - **`README.txt`** — what is where, the QC tally, the settings, and any sample
   that failed and why.
 
@@ -1548,9 +1554,9 @@ In the panel:
   region, positive per mm of junction, threshold, who drew the region, the
   finder's status and second search, the review decision. **Click a sample's
   name** (blue, underlined) or double-click its row to open it with its results
-  over it: after *Analyse this sample*, the layers below; after a batch, a layer
-  per channel ringing its positive cells anywhere in the section (read from
-  `cells/<sample>.csv`), and the region's cells (hidden). A sample already on
+  over it: the layers below, for a batch sample too (its label maps are read back
+  from `labels/`, its positives from `cells/<sample>.csv`). A sample from a run
+  without label maps gets a layer per channel ringing its positive cells instead. A sample already on
   screen is not reopened. Right-click a row for its region picture, its
   whole-section picture, its cells CSV or the results folder.
 - **Layers** (*Analyse this sample*) — over the whole section: *Nuclei (whole
