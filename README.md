@@ -1546,7 +1546,13 @@ In the panel:
 - **Table** — per sample and channel: cells in region, positive, %, cells in the
   whole section, % positive there, enrichment in the region, positive per mm² of
   region, positive per mm of junction, threshold, who drew the region, the
-  finder's status and second search, the review decision.
+  finder's status and second search, the review decision. **Click a sample's
+  name** (blue, underlined) or double-click its row to open it with its results
+  over it: after *Analyse this sample*, the layers below; after a batch, a layer
+  per channel ringing its positive cells anywhere in the section (read from
+  `cells/<sample>.csv`), and the region's cells (hidden). A sample already on
+  screen is not reopened. Right-click a row for its region picture, its
+  whole-section picture, its cells CSV or the results folder.
 - **Layers** (*Analyse this sample*) — over the whole section: *Nuclei (whole
   section)*, every cell found, as outlines; *Nuclei grown by 3 µm*, the regions
   each cell was measured over (hidden at first); *`<channel>`+ cells*, the

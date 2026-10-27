@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 from qtpy.QtCore import QObject, Qt, QTimer, Signal
-from qtpy.QtGui import QFontDatabase
+from qtpy.QtGui import QColor, QFontDatabase
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -77,6 +77,21 @@ FROM_REVIEW = "Sent on by a junction review"
 #: The word that marks a region as drawn by hand (see ``CountOptions.region_keyword``).
 REGION_KEYWORD = "manual"
 
+#: The points layer's outline argument and attribute: "border" from napari
+#: 0.5, "edge" before.
+try:
+    from napari.layers import Points as _Points
+
+    BORDER, BORDER_ATTR = ("border_color", "border_color") if hasattr(_Points, "border_color") \
+        else ("edge_color", "edge_color")
+except Exception:  # pragma: no cover - napari missing
+    BORDER, BORDER_ATTR = "border_color", "border_color"
+
+#: Colour of a sample's name in the table: it opens the sample when clicked.
+LINK_COLOR = "#5aa9ff"
+#: Size of the ring drawn round a positive cell from its table, in µm.
+RING_UM = 14.0
+
 #: How the positive cells are drawn: a red outline this many pixels thick.
 POSITIVE_COLOR = "red"
 POSITIVE_CONTOUR = 2
@@ -124,6 +139,15 @@ class JunctionAnalysisWidget(QWidget):
         # napari's stylesheet renders alternating rows as blank stripes.
         self._table.setAlternatingRowColors(False)
         self._table.setSortingEnabled(True)
+        self._table.setToolTip(
+            "Click a sample's name (or double-click its row) to open it with its results drawn "
+            "over it: every positive cell, per channel. Right-click for its pictures and its cells."
+        )
+        self._table.cellClicked.connect(lambda row, column: column == 0 and self.open_row(row))
+        self._table.cellDoubleClicked.connect(lambda row, _column: self.open_row(row))
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._row_menu)
+        self._pending_show: ja.JunctionCounts | None = None
         layout.addWidget(self._table, stretch=2)
 
         self._log_view = QPlainTextEdit()
@@ -436,6 +460,12 @@ class JunctionAnalysisWidget(QWidget):
 
     def _on_layers_changed(self, event=None) -> None:
         self.refresh_layers()
+        pending = self._pending_show
+        if pending is not None and self._worker is None:
+            image = self._image_of(pending.path)
+            if image is not None:
+                self._pending_show = None
+                self.show_result(pending, image)
 
     def refresh_layers(self) -> None:
         from napari.layers import Image
@@ -747,9 +777,139 @@ class JunctionAnalysisWidget(QWidget):
                     text = format_number(value)
                 item = QTableWidgetItem(str(text))
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                # Which sample the row is, whatever order the table is sorted in.
+                item.setData(Qt.UserRole, str(frame.iloc[row]["File"]))
+                if column == 0:
+                    font = item.font()
+                    font.setUnderline(True)
+                    item.setFont(font)
+                    item.setForeground(QColor(LINK_COLOR))
                 table.setItem(row, column, item)
         table.setSortingEnabled(True)
         table.resizeColumnsToContents()
+
+    # -- opening a processed sample --------------------------------------------
+
+    def result_of_row(self, row: int) -> ja.JunctionCounts | None:
+        item = self._table.item(row, 0)
+        if item is None:
+            return None
+        wanted = item.data(Qt.UserRole)
+        return next((result for result in self._results if str(result.path) == wanted), None)
+
+    def open_row(self, row: int) -> None:
+        result = self.result_of_row(row)
+        if result is not None:
+            self.open_result(result)
+
+    def _image_of(self, path) -> object | None:
+        """An image layer on screen read from *path*: the nuclear stain's when there is one."""
+        from napari.layers import Image
+
+        wanted = str(Path(path)).lower()
+        layers = [layer for layer in self._viewer.layers
+                  if isinstance(layer, Image) and str(Path(source_of(layer) or ".")).lower() == wanted]
+        nuclear = [layer for layer in layers if any(h in layer.name.lower() for h in jn.NUCLEAR_HINTS)]
+        return (nuclear or layers or [None])[0]
+
+    def open_result(self, result: ja.JunctionCounts) -> None:
+        """Open *result*'s sample, unless it is on screen already, and draw its results over it."""
+        image = self._image_of(result.path)
+        if image is None:
+            self._log(f"Opening {result.name}…")
+            self._pending_show = result
+            experiment = getattr(self._app, "experiment_widget", None)
+            try:
+                if experiment is not None and hasattr(experiment, "open_path"):
+                    experiment.open_path(result.path)
+                else:
+                    self._app.open_paths([result.path])
+            except Exception as exc:
+                logger.exception("could not open %s", result.path)
+                self._log(f"Could not open {result.name}: {exc}")
+                self._pending_show = None
+                return
+            image = self._image_of(result.path)
+            if image is None:
+                return  # it is still loading: drawn when its layers arrive (_on_layers_changed)
+        self._pending_show = None
+        self.show_result(result, image)
+
+    def show_result(self, result: ja.JunctionCounts, image) -> None:
+        """Draw *result* over *image*: its label maps when they are kept, else rings from its table."""
+        if result.labels is not None:
+            self._draw(result, str(image.name))
+            self._log(f"{result.name}: its cells drawn.")
+            return
+        table, source = result.section_cells, "the section"
+        if table is None and result.cells_file is not None and Path(result.cells_file).is_file():
+            import pandas as pd
+
+            table, source = pd.read_csv(result.cells_file), Path(result.cells_file).name
+        if table is None:
+            table, source = result.cells, "the region"
+        if table is None or not len(table):
+            self._log(f"{result.name}: no cells to draw ({result.error or 'none kept'}).")
+            return
+        self._draw_rings(result, image, table)
+        self._log(f"{result.name}: positive cells from {source}, ringed in red.")
+
+    def _draw_rings(self, result: ja.JunctionCounts, image, table) -> None:
+        """A points layer per channel of its positive cells, and one of the region's cells (hidden)."""
+        from ..loaders.layer_spec import units_like
+
+        self.remove_layers()
+        voxel = result.voxel_yx
+        offset = tuple(float(v) for v in image.translate)[-2:]
+        common = {"scale": voxel, "translate": offset, **units_like(image, 2)}
+        coords = np.column_stack([table["Centroid Y (µm)"].to_numpy() / voxel[0],
+                                  table["Centroid X (µm)"].to_numpy() / voxel[1]])
+        size = RING_UM / float(voxel[0])
+
+        def put(name: str, chosen: np.ndarray, **kwargs):
+            if name in self._viewer.layers:
+                self._viewer.layers.remove(name)
+            layer = self._viewer.add_points(coords[chosen], name=name, size=size, face_color="transparent",
+                                            **{BORDER: POSITIVE_COLOR}, **common, **kwargs)
+            tie_to_sample(layer, str(result.path))
+            layer.metadata[DRAWN_KEY] = True
+            return layer
+
+        for count in result.channels:
+            column = f"{count.channel} positive"
+            if count.reference or column not in table:
+                continue
+            put(f"{count.channel}{POSITIVE_SUFFIX}", table[column].to_numpy(dtype=bool))
+        if ja.IN_REGION_COLUMN in table:
+            region = put(CELLS_LAYER, table[ja.IN_REGION_COLUMN].to_numpy(dtype=bool), visible=False)
+            self._set_border(region, "white")
+
+    @staticmethod
+    def _set_border(layer, color: str) -> None:
+        try:
+            setattr(layer, BORDER_ATTR, color)
+        except Exception:
+            logger.debug("could not colour the rings", exc_info=True)
+
+    def _row_menu(self, position) -> None:
+        from qtpy.QtCore import QUrl
+        from qtpy.QtGui import QDesktopServices
+        from qtpy.QtWidgets import QMenu
+
+        row = self._table.rowAt(position.y())
+        result = self.result_of_row(row) if row >= 0 else None
+        if result is None:
+            return
+        menu = QMenu(self)
+        menu.addAction(f"Open {result.name} with its results", lambda: self.open_result(result))
+        for label, target in (("Show the region picture", result.picture),
+                              ("Show the whole-section picture", result.section_picture),
+                              ("Open its cells (CSV)", result.cells_file)):
+            action = menu.addAction(label, lambda target=target: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(target))))
+            action.setEnabled(target is not None and Path(target).is_file())
+        menu.addAction("Show the results folder", self.open_results_folder)
+        menu.exec_(self._table.viewport().mapToGlobal(position))
 
     def _draw(self, result: ja.JunctionCounts, image_name: str) -> None:
         """All the cells as outlines, and a filled layer per channel of its positives."""
