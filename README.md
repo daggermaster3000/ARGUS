@@ -1508,6 +1508,31 @@ are, and placed:
   gather at the junction), and *Positives: median distance to the line* and *to
   the edge* (µm) — where the positive cells sit; *Cells file* names the CSV.
 
+**Segment once, score as often as you like.** Each run saves, beside every
+sample's cells, what it was segmented with and the region it was counted in
+(`cells/<sample>.json`, `labels/<sample> region.tif`). Two things use that:
+
+- **Re-score positivity** (button beside Run): the samples chosen (on screen,
+  Experiment selection or a review) are scored again with the positivity
+  settings as they are now — *Positive when*, *k*, *Ring contrast at least*,
+  *Threshold from*, *Compare the cell's* — from the newest saved cells of each,
+  with nothing segmented: ~3 s a slide scan instead of ~40. A region redrawn
+  since (stored, or on screen) is counted in, and the cells' distances to the
+  line follow it. Counts, metrics, pictures, tables and label maps go to a new
+  results folder (`… re-scored`). Samples never segmented are left out, and
+  named in the log. With the same settings the answer is the same as the run
+  that segmented them.
+- **Skip samples already segmented** (Settings, on by default): *Analyse the
+  samples* segments only the samples with no saved cells made with the same
+  model, diameter, Cellpose thresholds, *Measure around nuclei* and nuclear
+  channel; the others are re-scored. Every sample is in the table and the new
+  results folder either way; the log says how many of each.
+
+What cannot change without segmenting again: anything that changes the cells or
+their figures (the Cellpose settings, *Measure around nuclei*). A run made with
+*Of the rest of the section, keep only the positive cells* or *Segment only the
+junction region* saves no full cell table and is segmented again.
+
 **Speed.** A 7,600 × 7,600 px slide scan (six tiles, ~31,000 cells) takes about
 37 s on the RTX 4090: Cellpose ~20 s, reading ~5 s, the rest measuring and
 placing. Cellpose stays loaded between tiles and samples, and the tiles already

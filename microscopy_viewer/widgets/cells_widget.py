@@ -172,6 +172,10 @@ class CellsWidget(QWidget):
         self._run_button = QPushButton("Run")
         self._run_button.clicked.connect(self.run)
         row.addWidget(self._run_button)
+        self._rescore_button = QPushButton("Re-score positivity")
+        self._rescore_button.setToolTip(jaw.RESCORE_TIP)
+        self._rescore_button.clicked.connect(self.rescore)
+        row.addWidget(self._rescore_button)
         self._stop_button = QPushButton("Stop")
         self._stop_button.setToolTip("Stop after the sample being analysed.")
         self._stop_button.clicked.connect(self.stop)
@@ -222,6 +226,7 @@ class CellsWidget(QWidget):
             ("Compare the cell's", ja._statistic),
             ("Measure around nuclei", ja._expand),
             ("", ja._find),
+            ("", ja._reuse),
             ("", ja._region_only),
             ("", ja._positives_only),
             ("", ja._save_cells),
@@ -328,6 +333,7 @@ class CellsWidget(QWidget):
         busy = self.running()
         blocked = self.segmentation._backend_notice.isVisible()
         self._run_button.setEnabled(not busy and not blocked)
+        self._rescore_button.setEnabled(not busy)
         self._segment_button.setEnabled(not busy and not blocked)
         # A single image's segmentation cannot be stopped half way; a batch or the analysis can.
         self._stop_button.setEnabled(self.junction._worker is not None
@@ -348,6 +354,15 @@ class CellsWidget(QWidget):
             self.junction.count_current()
         else:
             self.junction.run_batch()
+        self._poll()
+
+    def rescore(self) -> None:
+        """Score the open sample, or the samples chosen, again from their saved cells: no segmentation."""
+        self._update()
+        if self.samples() == SAMPLES_OPEN:
+            self.junction.count_current(rescore_only=True)
+        else:
+            self.junction.run_batch(rescore_only=True)
         self._poll()
 
     def segment_only(self) -> None:

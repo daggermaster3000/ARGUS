@@ -26,6 +26,7 @@ any function of the same shape — which is how the checks run without it.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -114,6 +115,12 @@ POSITIVE_FOLDER = "positive cells"
 LABELS_FOLDER = "labels"
 NUCLEI_SUFFIX = " nuclei.tif"
 GROWN_SUFFIX = " grown.tif"
+#: The region the sample was counted in, beside its label maps, and what the
+#: sample's segmentation was made with, beside its cells: together with the
+#: cells table, all a later run needs to score the sample again without
+#: segmenting it (:func:`segmented_samples`, :func:`rescore`).
+REGION_SUFFIX = " region.tif"
+INFO_SUFFIX = ".json"
 README_NAME = "README.txt"
 
 #: Longest side of the pictures, in pixels: the counted region, and the whole
@@ -1379,6 +1386,12 @@ def analyse_sample(
                 if not options.full_labels:
                     # Written; a batch does not keep half a gigabyte a sample in memory.
                     result.section_labels = result.section_regions = None
+            if options.cells_dir is not None and result.cells_file is not None:
+                try:
+                    write_sample_info(result, counts, options, band, details.get("line"))
+                except Exception as exc:
+                    logger.exception("could not write what %s was segmented with", target.name)
+                    result.warnings.append(f"cannot be re-scored later: {exc}")
         kept = np.isin(nuclei, table["Label"].to_numpy())
         result.labels = np.where(kept, nuclei, 0)
         result.regions = np.where(np.isin(regions, table["Label"].to_numpy()), regions, 0)
@@ -1446,8 +1459,15 @@ def run(
     should_cancel: Callable[[], bool] | None = None,
     segment: Callable[..., np.ndarray] | None = None,
     keep_labels: bool | None = None,
+    segmented: dict[str, "SegmentedSample"] | None = None,
+    reuse_any: bool = False,
 ) -> list[JunctionCounts]:
     """Every sample in turn. One that fails is reported and the run goes on.
+
+    A sample in *segmented* (see :func:`segmented_samples`) whose saved cells
+    were segmented with the settings of *options* is not segmented again: it is
+    scored afresh from them (:func:`rescore`) — seconds instead of a minute.
+    With *reuse_any*, whatever they were segmented with.
 
     With ``options.qc_dir`` each leaves a picture in that folder's ``ok/``,
     ``check/`` or ``fail/`` — a sample that failed too, saying why.
@@ -1469,10 +1489,12 @@ def run(
         if should_cancel is not None and should_cancel():
             break
         prefix = f"{jn.fu_name(Path(path))} ({index} of {len(paths)})"
-        result = analyse_sample(
-            path, options, segment=segment,
-            progress=(lambda text, _prefix=prefix: progress(f"{_prefix}: {text}")) if progress else None,
-        )
+        tell = (lambda text, _prefix=prefix: progress(f"{_prefix}: {text}")) if progress else None
+        saved = (segmented or {}).get(jn.fu_name(Path(path)))
+        if saved is not None and (reuse_any or saved.matches(options or CountOptions())):
+            result = rescore(saved, options, progress=tell)
+        else:
+            result = analyse_sample(path, options, segment=segment, progress=tell)
         if not keep:
             result.labels = result.regions = None
             result.section_labels = result.section_regions = None
@@ -1494,6 +1516,277 @@ def run(
                 )
             break
     return results
+
+
+# ---------------------------------------------------------------------------
+# Scoring again, from the cells a run saved
+# ---------------------------------------------------------------------------
+
+
+def segmentation_key(options: CountOptions) -> dict[str, Any]:
+    """What a sample's cells and their figures depend on: same key, same cells, same figures."""
+    from . import segmentation as sg
+
+    settings = options.settings or sg.SegmentationSettings()
+    key = {
+        "model": settings.resolved_model(), "custom_model": str(settings.custom_model_path or ""),
+        "mode": settings.mode, "diameter_um": float(settings.diameter_um),
+        "min_diameter_um": float(settings.min_diameter_um), "max_diameter_um": float(settings.max_diameter_um),
+        "flow_threshold": float(settings.flow_threshold), "cellprob_threshold": float(settings.cellprob_threshold),
+        "min_size": int(settings.min_size), "normalize": bool(settings.normalize),
+        "expand_um": float(options.expand_um), "nuclear_channel": str(options.nuclear_channel),
+        "ring_um": [float(v) for v in RING_UM],
+    }
+    return json.loads(json.dumps(key))
+
+
+def write_sample_info(result: JunctionCounts, counts: Sequence[ChannelCount], options: CountOptions,
+                      band: np.ndarray, line=None) -> Path:
+    """Save beside the sample's cells what a later run needs to score it again, and its region."""
+    import tifffile
+
+    cells_dir = Path(options.cells_dir)
+    region_file = None
+    if options.labels_dir is not None:
+        labels_dir = Path(options.labels_dir)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        region_file = labels_dir / f"{result.name}{REGION_SUFFIX}"
+        tifffile.imwrite(region_file, np.asarray(band, dtype=np.uint8), compression="zlib")
+    run_folder = cells_dir.parent
+
+    def relative(path):
+        return str(Path(path).relative_to(run_folder)) if path is not None else None
+
+    info = {
+        "version": 1, "sample": result.name, "file": str(result.path), "written": time.strftime("%Y-%m-%d %H:%M"),
+        "shape_yx": [int(v) for v in result.shape_yx], "voxel_yx": [float(v) for v in result.voxel_yx],
+        "channels": [count.channel for count in counts],
+        "nuclear": next((count.channel for count in counts if count.reference), ""),
+        "background": {count.channel: [float(count.background), float(count.background_sd)] for count in counts},
+        "band_source": result.band_source, "region_by": result.region_by, "status": result.status,
+        "flags": result.flags, "finder_status": result.finder_status, "finder_flags": result.finder_flags,
+        "second_search": result.second_search, "junction_length_um": float(result.junction_length_um),
+        "line": np.asarray(line, dtype=float).reshape(-1, 2).tolist() if line is not None else None,
+        "complete": bool(options.keep_section), "n_cells_section": int(result.n_cells_section),
+        "segmentation": segmentation_key(options),
+        "cells_file": relative(result.cells_file), "nuclei_file": relative(result.nuclei_file),
+        "grown_file": relative(result.grown_file), "region_file": relative(region_file),
+    }
+    target = cells_dir / f"{result.name}{INFO_SUFFIX}"
+    target.write_text(json.dumps(info, indent=1), encoding="utf-8")
+    return target
+
+
+@dataclass
+class SegmentedSample:
+    """A sample a run segmented: where its cells, label maps and region are, and what they were made with."""
+
+    name: str
+    run: Path
+    info: dict[str, Any]
+
+    def file(self, key: str) -> Path | None:
+        value = self.info.get(key)
+        return self.run / value if value else None
+
+    @property
+    def path(self) -> Path:
+        return Path(self.info.get("file", ""))
+
+    def matches(self, options: CountOptions) -> bool:
+        """Whether its cells are what segmenting with *options* would give."""
+        return bool(self.info.get("complete")) and self.info.get("segmentation") == segmentation_key(options)
+
+
+def segmented_samples(base: str | Path) -> dict[str, SegmentedSample]:
+    """Every sample segmented under ``<base>/cells_analysis``, by name: the newest run's of each.
+
+    Only samples whose every cell was kept (``CountOptions.keep_section``)
+    and whose cells file is still there.
+    """
+    folder = Path(base) / RESULTS_FOLDER
+    found: dict[str, SegmentedSample] = {}
+    runs = sorted(path for path in folder.iterdir() if path.is_dir()) if folder.is_dir() else []
+    for run in runs:
+        for info_file in sorted((run / CELLS_FOLDER).glob(f"*{INFO_SUFFIX}")):
+            try:
+                info = json.loads(info_file.read_text(encoding="utf-8"))
+            except Exception:
+                logger.warning("could not read %s", info_file, exc_info=True)
+                continue
+            sample = SegmentedSample(name=str(info.get("sample", info_file.stem)), run=run, info=info)
+            cells = sample.file("cells_file")
+            if info.get("complete") and cells is not None and cells.is_file():
+                found[sample.name] = sample
+    return found
+
+
+def rescore(
+    sample: SegmentedSample,
+    options: CountOptions | None = None,
+    band: np.ndarray | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> JunctionCounts:
+    """Score a segmented sample again with *options*, from its saved cells: no segmentation. Never raises.
+
+    The region is the one on screen (*band*), else the sample's stored region
+    as it is now — redrawn since, the cells are placed against the new one —
+    else the one it was counted in. Thresholds, positives, counts, metrics and
+    distances to the line are worked out afresh; each cell's figures and its
+    distance to the tissue edge are the saved ones. The pictures are drawn
+    again from the image (read, not segmented), and the label maps copied, so
+    the new run folder holds everything a segmenting run's does.
+    """
+    import shutil
+
+    import pandas as pd
+
+    from . import loaders
+
+    options = options or CountOptions()
+    info = sample.info
+    result = JunctionCounts(path=sample.path, name=sample.name)
+    reviewed = options.review.get(result.name, {})
+    result.review_status = reviewed.get("Status", "")
+    result.review_decision = reviewed.get("Decision", "")
+    result.review_note = reviewed.get("Note", "")
+    say = progress or (lambda _text: None)
+    started = time.perf_counter()
+    images = inside = None
+    try:
+        say(f"re-scoring from the cells saved on {info.get('written', '?')} (no segmentation)")
+        table = pd.read_csv(sample.file("cells_file"))
+        scored = [c for c in table.columns if c.endswith(" positive") or c in ("Positive for", "Sample")]
+        table = table.drop(columns=scored)
+        voxel = tuple(float(v) for v in info["voxel_yx"])
+        shape = tuple(int(v) for v in info["shape_yx"])
+        result.voxel_yx, result.shape_yx = voxel, shape
+        line = np.asarray(info["line"], dtype=float) if info.get("line") else None
+        for key in ("band_source", "region_by", "status", "flags", "finder_status", "finder_flags", "second_search"):
+            setattr(result, key, str(info.get(key, "")))
+        result.junction_length_um = float(info.get("junction_length_um", float("nan")))
+
+        # -- the region: on screen, stored now, or the one counted in ----------------
+        if band is not None:
+            band = np.asarray(band).reshape(shape) > 0
+            result.band_source, result.region_by = "on screen", "on screen"
+        elif result.path.is_file():
+            stored, details = _stored_band(result.path, region_candidates(result.path, options), shape)
+            if stored is not None:
+                band = stored
+                result.band_source = f"stored ({details['region']})"
+                result.region_by = str(details.get("by", ""))
+                result.status, result.flags = str(details.get("status", "")), str(details.get("flags", ""))
+                if details.get("line") is not None:
+                    line = np.asarray(details["line"], dtype=float)
+                    result.junction_length_um = float(details.get("length", result.junction_length_um))
+        if band is None:
+            region_file = sample.file("region_file")
+            if region_file is None or not region_file.is_file():
+                raise ValueError("no region to count in: none stored, none saved with the cells")
+            band = read_labels(region_file) > 0
+        result.band_area_mm2 = float(band.sum()) * voxel[0] * voxel[1] / 1e6
+
+        rows = np.clip(np.round(table["Centroid Y (µm)"].to_numpy() / voxel[0]).astype(int), 0, shape[0] - 1)
+        cols = np.clip(np.round(table["Centroid X (µm)"].to_numpy() / voxel[1]).astype(int), 0, shape[1] - 1)
+        table[IN_REGION_COLUMN] = band[rows, cols]
+        if options.distances and line is not None:
+            place_cells(table, band, line, voxel, None)  # the edge distance is the saved one
+        region = table[table[IN_REGION_COLUMN].to_numpy(dtype=bool)]
+
+        # -- thresholds, as a segmenting run sets them -------------------------------
+        from_sample = options.threshold_from == FROM_SAMPLE and options.method in CELL_RULES
+        counts: list[ChannelCount] = []
+        for channel in info["channels"]:
+            centre, spread = (info.get("background", {}).get(channel) or [float("nan"), float("nan")])
+            count = ChannelCount(channel=channel, n_cells=int(len(region)), statistic=options.statistic,
+                                 background=float(centre), background_sd=float(spread),
+                                 reference=channel == info.get("nuclear"))
+            population = (table if from_sample else region)[f"{channel} {options.statistic}"].to_numpy(dtype=float)
+            count.cells_median, count.cells_sd = robust_centre_and_spread(population)
+            count.threshold_from = FROM_SAMPLE if from_sample else FROM_REGION
+            count.n_threshold_cells = int(len(population))
+            if count.reference:
+                count.method = "reference stain — not scored"
+            else:
+                count.threshold, count.method = threshold_for(channel, population, (count.background, count.background_sd),
+                                                              options)
+            counts.append(count)
+        say(f"scoring the section's {len(table)} cells")
+        section = score_section(table, counts, band, voxel, replace(options, keep_section=True),
+                                region_labels=region["Label"].to_numpy())
+        cells = section[section[IN_REGION_COLUMN].to_numpy(dtype=bool)].reset_index(drop=True)
+        for count in counts:
+            if count.reference:
+                continue
+            count.n_positive = int(cells[f"{count.channel} positive"].sum())
+            if np.isfinite(count.background) and count.background:
+                cells[f"{count.channel} fold over background"] = cells[f"{count.channel} mean"] / count.background
+                if np.isfinite(count.background_sd) and count.background_sd > 0:
+                    cells[f"{count.channel} SDs over background"] = (
+                        (cells[f"{count.channel} mean"] - count.background) / count.background_sd)
+            if result.band_area_mm2 > 0:
+                count.per_mm2 = count.n_positive / result.band_area_mm2
+            if np.isfinite(result.junction_length_um) and result.junction_length_um > 0:
+                count.per_mm_junction = count.n_positive / (result.junction_length_um / 1000.0)
+        place_positives(section, counts)
+        if not options.keep_section:
+            anywhere = (section["Positive for"] != "none").to_numpy() | section[IN_REGION_COLUMN].to_numpy(dtype=bool)
+            section = section[anywhere].reset_index(drop=True)
+        result.cells, result.channels, result.n_cells = cells, counts, int(len(cells))
+        result.section_cells, result.n_cells_section = section, int(len(table))
+        if not result.n_cells:
+            result.warnings.append("no cells in the region")
+
+        # -- the run folder: tables, label maps, info, pictures -------------------------
+        if options.cells_dir is not None:
+            result.cells_file = write_section(result, Path(options.cells_dir))
+        if options.labels_dir is not None:
+            Path(options.labels_dir).mkdir(parents=True, exist_ok=True)
+            for key, attribute in (("nuclei_file", "nuclei_file"), ("grown_file", "grown_file")):
+                source = sample.file(key)
+                if source is not None and source.is_file():
+                    target = Path(options.labels_dir) / source.name
+                    if source.resolve() != target.resolve():
+                        shutil.copyfile(source, target)
+                    setattr(result, attribute, target)
+        if options.cells_dir is not None:
+            # Saved again with this run, so the next one finds the newest; same segmentation.
+            write_sample_info(result, counts, replace(options, keep_section=bool(info.get("complete"))), band, line)
+            saved = json.loads((Path(options.cells_dir) / f"{result.name}{INFO_SUFFIX}").read_text(encoding="utf-8"))
+            saved["segmentation"] = info.get("segmentation")
+            (Path(options.cells_dir) / f"{result.name}{INFO_SUFFIX}").write_text(json.dumps(saved, indent=1),
+                                                                                encoding="utf-8")
+        if (options.qc_dir is not None or options.pictures_dir is not None) and result.path.is_file():
+            say("drawing the pictures")
+            was_open = loaders.is_open(result.path)
+            specs = loaders.load_path(result.path)
+            try:
+                names = [str(spec.channel_name or spec.name) for spec in specs]
+                ys, xs = np.flatnonzero(band.any(axis=1)), np.flatnonzero(band.any(axis=0))
+                margin = int(round(CROP_MARGIN_UM / max(voxel)))
+                y0, y1 = max(int(ys[0]) - margin, 0), min(int(ys[-1]) + 1 + margin, shape[0])
+                x0, x1 = max(int(xs[0]) - margin, 0), min(int(xs[-1]) + 1 + margin, shape[1])
+                window = (slice(y0, y1), slice(x0, x1))
+                result.origin = (y0, x0)
+                inside = band[window]
+                images = {name: _plane(spec, window) for name, spec in zip(names, specs)}
+                if options.pictures_dir is not None:
+                    folder = Path(options.pictures_dir)
+                    folder.mkdir(parents=True, exist_ok=True)
+                    result.section_picture = folder / f"{result.name}.png"
+                    section_picture(result, specs, band, line).save(result.section_picture)
+            finally:
+                if not was_open:
+                    loaders.release(result.path)
+    except Exception as exc:
+        logger.exception("re-scoring %s failed", sample.name)
+        result.error = str(exc)
+    finally:
+        if options.qc_dir is not None:
+            _write_picture(result, Path(options.qc_dir), images, inside)
+        result.elapsed_s = time.perf_counter() - started
+    return result
 
 
 def summary_line(result: JunctionCounts) -> str:

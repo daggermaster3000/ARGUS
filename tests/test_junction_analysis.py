@@ -435,6 +435,40 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         check(lean.ok and lean.section_labels is None and ja.labels_files(lean) is not None
               and int(ja.read_labels(lean.nuclei_file).max()) == lean.n_cells_section,
               "a batch writes them too without keeping them in memory")
+        # Scoring again without segmenting: from the cells the run saved.
+        same = ja.CountOptions(expand_um=0.0, find_junction=False)
+        saved = ja.segmented_samples(root)
+        check(set(saved) == {"assembloid_s0"} and saved["assembloid_s0"].matches(same),
+              f"the run's samples are found segmented, with the settings they were made with ({sorted(saved)})")
+        check(not saved["assembloid_s0"].matches(ja.CountOptions(expand_um=2.0)),
+              "a change in how cells are grown means segmenting again")
+
+        def refuse(*_args, **_kwargs):
+            raise AssertionError("segmented again")
+
+        again_dir = ja.run_folder(root / "again", "rescore", when=120.0)
+        again = ja.run([paths[0]], ja.results_options(same, again_dir), segment=refuse, segmented=saved)[0]
+        green_before = next(c for c in drawn.channels if c.channel == "AF488")
+        green_again = next(c for c in again.channels if c.channel == "AF488")
+        check(again.ok and again.n_cells == drawn.n_cells and again.n_cells_section == drawn.n_cells_section,
+              f"a saved sample is scored again, not segmented ({again.error or again.n_cells})")
+        check(green_again.n_positive == green_before.n_positive
+              and green_again.n_positive_section == green_before.n_positive_section
+              and abs(green_again.threshold - green_before.threshold) < 1e-6,
+              f"with the same settings, the same answer ({green_again.n_positive} / {green_before.n_positive})")
+        check((again_dir / ja.CELLS_FOLDER / "assembloid_s0.csv").is_file()
+              and (again_dir / ja.REGION_FOLDER / "ok" / "assembloid_s0.png").is_file()
+              and (again_dir / ja.POSITIVE_FOLDER / "assembloid_s0.png").is_file()
+              and ja.labels_files(again) is not None, "and its run folder holds everything a segmenting run's does")
+        ring = ja.rescore(saved["assembloid_s0"], ja.CountOptions(expand_um=0.0, method=ja.METHOD_RING))
+        green_ring = next(c for c in ring.channels if c.channel == "AF488")
+        check(ring.ok and green_ring.method == ja.METHOD_RING and green_ring.threshold == ja.RING_RATIO,
+              "another rule is applied to the saved cells")
+        moved = np.zeros(labels.shape, dtype=np.uint8)
+        moved[60:110, 40:150] = 1
+        redrawn = ja.rescore(saved["assembloid_s0"], same, band=moved)
+        check(redrawn.ok and abs(redrawn.band_area_mm2 - 50 * 110 / 1e6) < 1e-9 and redrawn.region_by == "on screen"
+              and redrawn.n_cells != drawn.n_cells, "a region redrawn since is counted in, cells placed against it")
         readme = ja.write_readme(run_dir, [drawn], ja.CountOptions())
         check(readme.is_file() and ja.POSITIVE_FOLDER in readme.read_text(encoding="utf-8"),
               "and a README says what is where")

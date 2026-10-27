@@ -50,6 +50,15 @@ CELLS_LAYER = "Junction cells"
 NUCLEI_LAYER = "Nuclei (whole section)"
 GROWN_LAYER = "Nuclei grown by {um} µm"
 
+#: What re-scoring does, for its button.
+RESCORE_TIP = (
+    "Score the samples again with the positivity settings as they are now — rule, k, ring "
+    "contrast, threshold from — without segmenting anything: from the cells the newest run "
+    "saved for each (cells_analysis/<run>/cells), whatever it was segmented with. A region "
+    "redrawn since is counted in. Seconds a sample; a new results folder with everything. "
+    "Samples never segmented are left out and named."
+)
+
 #: What the results folder holds, for the button that opens it.
 RESULTS_TIP = (
     "Open this run's folder, “cells_analysis/<date>_<time>” in the experiment folder:\n"
@@ -388,6 +397,17 @@ class JunctionAnalysisWidget(QWidget):
         self._region_only.toggled.connect(lambda on: self._positives_only.setEnabled(not on))
         form.addRow("", self._positives_only)
 
+        self._reuse = QCheckBox("Skip samples already segmented: re-score them from their saved cells")
+        self._reuse.setChecked(True)
+        self._reuse.setToolTip(
+            "A sample segmented by an earlier run — with the same model, diameter, Cellpose "
+            "thresholds and growth, every cell kept — is not segmented again: its saved cells "
+            "(cells_analysis/<run>/cells) are scored with the rule set now, in seconds. Only "
+            "samples not segmented yet, or segmented with other settings, go through Cellpose. "
+            "Every sample is in the table and the new run folder either way."
+        )
+        form.addRow("", self._reuse)
+
         self._save_cells = QCheckBox("Store the counted cells with the sample")
         self._save_cells.setToolTip(
             "As the label map “junction cells”, with each channel's threshold and its "
@@ -407,7 +427,7 @@ class JunctionAnalysisWidget(QWidget):
             "diameter, score them, and draw them: all cells as outlines, and one layer "
             "per channel with the cells positive in it outlined in red."
         )
-        self._count_button.clicked.connect(self.count_current)
+        self._count_button.clicked.connect(lambda: self.count_current())
         row.addWidget(self._count_button)
 
         self._run_button = QPushButton("Run on the samples")
@@ -418,8 +438,13 @@ class JunctionAnalysisWidget(QWidget):
             "“cells_analysis/<date>_<time>” in the experiment folder: counts.xlsx, cells/, "
             "region/ (sorted into ok, check and fail), positive cells/ and a README."
         )
-        self._run_button.clicked.connect(self.run_batch)
+        self._run_button.clicked.connect(lambda: self.run_batch())
         row.addWidget(self._run_button)
+
+        self._rescore_button = QPushButton("Re-score positivity")
+        self._rescore_button.setToolTip(RESCORE_TIP)
+        self._rescore_button.clicked.connect(lambda: self.run_batch(rescore_only=True))
+        row.addWidget(self._rescore_button)
 
         self._stop_button = QPushButton("Stop")
         self._stop_button.setEnabled(False)
@@ -566,6 +591,7 @@ class JunctionAnalysisWidget(QWidget):
     def _busy(self, running: bool) -> None:
         self._count_button.setEnabled(not running)
         self._run_button.setEnabled(not running)
+        self._rescore_button.setEnabled(not running)
         self._stop_button.setEnabled(running)
 
     def stop(self) -> None:
@@ -574,7 +600,35 @@ class JunctionAnalysisWidget(QWidget):
 
     # -- running --------------------------------------------------------------
 
-    def count_current(self) -> None:
+    def _saved(self, base: Path | None, options: ja.CountOptions, rescore_only: bool) -> dict:
+        """The samples segmented already under *base*, when they are to be reused."""
+        if base is None or not options.whole_section or not (rescore_only or self._reuse.isChecked()):
+            return {}
+        try:
+            return ja.segmented_samples(base)
+        except Exception:
+            logger.exception("could not list the samples segmented under %s", base)
+            return {}
+
+    def _plan(self, paths, saved: dict, options: ja.CountOptions, rescore_only: bool):
+        """*paths* to run, and a line saying which are segmented and which re-scored; ``None`` when none is left."""
+        reused = [p for p in paths if jn.fu_name(Path(p)) in saved
+                  and (rescore_only or saved[jn.fu_name(Path(p))].matches(options))]
+        if rescore_only:
+            missing = [jn.fu_name(Path(p)) for p in paths if p not in reused]
+            if not reused:
+                self._status.setText("None of these samples has been segmented yet — Analyse them first.")
+                return None, ""
+            line = f"Re-scoring {len(reused)} sample(s) from their saved cells, no segmentation."
+            if missing:
+                line += f" Not segmented yet, left out: {', '.join(missing[:5])}" + ("…" if len(missing) > 5 else "")
+            return reused, line
+        if not reused:
+            return list(paths), ""
+        return list(paths), (f"{len(paths) - len(reused)} sample(s) to segment; {len(reused)} segmented "
+                             "already, re-scored from their saved cells.")
+
+    def count_current(self, rescore_only: bool = False) -> None:
         """Count in the open sample, and draw the cells over it."""
         if self._worker is not None:
             self._status.setText("A count is already running.")
@@ -590,9 +644,14 @@ class JunctionAnalysisWidget(QWidget):
         options = self.options(self._channel_names(image))
         # Every nucleus of the section and its grown region, to draw.
         options.full_labels = options.whole_section
+        saved = self._saved(self.results_base(path.parent), options, rescore_only)
+        paths, line = self._plan([path], saved, options, rescore_only)
+        if paths is None:
+            return
         options, folder = self.new_run(options, path.parent, label=jn.fu_name(path))
-        self._start([path], options, band=band, draw_on=str(image.name),
-                    workbook=folder / ja.WORKBOOK_NAME if folder else None)
+        self._start(paths, options, band=band, draw_on=str(image.name),
+                    workbook=folder / ja.WORKBOOK_NAME if folder else None,
+                    segmented=saved, reuse_any=rescore_only, plan=line)
 
     def _region_layer(self, image):
         """The Fusion region layer on screen, when it fits this image."""
@@ -657,7 +716,7 @@ class JunctionAnalysisWidget(QWidget):
         if picked is not None:
             self._review_summary.setText(_review_line(picked))
 
-    def run_review(self, review_file: str | Path, include=None) -> bool:
+    def run_review(self, review_file: str | Path, include=None, rescore_only: bool = False) -> bool:
         """Count in the samples *review_file* sends on. Returns whether it started."""
         if self._worker is not None:
             self._status.setText("A count is already running.")
@@ -671,15 +730,23 @@ class JunctionAnalysisWidget(QWidget):
         folder = (experiment.folder() if experiment is not None else None) or paths[0].parent
         options = self.options()
         options.review = picked.rows
-        options, run = self.new_run(options, Path(folder), label="reviewed")
-        self._start(paths, options, workbook=run / ja.WORKBOOK_NAME)
+        saved = self._saved(Path(folder), options, rescore_only)
+        paths, line = self._plan(paths, saved, options, rescore_only)
+        if paths is None:
+            return False
+        options, run = self.new_run(options, Path(folder), label="re-scored" if rescore_only else "reviewed")
+        self._start(paths, options, workbook=run / ja.WORKBOOK_NAME, segmented=saved,
+                    reuse_any=rescore_only, plan=line)
         self._log(_review_line(picked))
         return True
 
-    def run_batch(self) -> None:
-        """Count in the samples chosen under “Samples”: the Experiment selection, or a review's."""
+    def run_batch(self, rescore_only: bool = False) -> None:
+        """Count in the samples chosen under “Samples”: the Experiment selection, or a review's.
+
+        With *rescore_only*, only the samples segmented already, from their saved cells.
+        """
         if self._source.currentText() == FROM_REVIEW:
-            self.run_review(self._review_edit.text().strip())
+            self.run_review(self._review_edit.text().strip(), rescore_only=rescore_only)
             return
         experiment = getattr(self._app, "experiment_widget", None)
         if experiment is None:
@@ -694,10 +761,17 @@ class JunctionAnalysisWidget(QWidget):
             return
         names = list(dict.fromkeys(name for entry in entries for name in entry.channel_names))
         folder = experiment.folder() or entries[0].path.parent
-        options, run = self.new_run(self.options(names), Path(folder))
-        self._start([entry.path for entry in entries], options, workbook=run / ja.WORKBOOK_NAME)
+        options = self.options(names)
+        saved = self._saved(Path(folder), options, rescore_only)
+        paths, line = self._plan([entry.path for entry in entries], saved, options, rescore_only)
+        if paths is None:
+            return
+        options, run = self.new_run(options, Path(folder), label="re-scored" if rescore_only else "")
+        self._start(paths, options, workbook=run / ja.WORKBOOK_NAME, segmented=saved,
+                    reuse_any=rescore_only, plan=line)
 
-    def _start(self, paths, options, band=None, draw_on: str = "", workbook: Path | None = None) -> None:
+    def _start(self, paths, options, band=None, draw_on: str = "", workbook: Path | None = None,
+               segmented: dict | None = None, reuse_any: bool = False, plan: str = "") -> None:
         from napari.qt.threading import thread_worker
 
         self._options = options
@@ -710,19 +784,26 @@ class JunctionAnalysisWidget(QWidget):
         self._progress.setVisible(True)
         self._animate()
         self._ticker.start()
-        self._log(f"Analysing {len(paths)} sample(s)"
+        self._log(f"{'Re-scoring' if reuse_any else 'Analysing'} {len(paths)} sample(s)"
                   + (", the whole section" if options.whole_section else ", the region only")
                   + f": {options.method.lower()}, comparing each cell's {options.statistic}.")
+        if plan:
+            self._log(plan)
         relay = self._relay
+        segmented = segmented or {}
 
         @thread_worker
         def _run():
             if band is not None:
-                result = ja.analyse_sample(paths[0], options, band=band, progress=relay.message.emit)
+                saved = segmented.get(jn.fu_name(Path(paths[0])))
+                if saved is not None and (reuse_any or saved.matches(options)):
+                    result = ja.rescore(saved, options, band=band, progress=relay.message.emit)
+                else:
+                    result = ja.analyse_sample(paths[0], options, band=band, progress=relay.message.emit)
                 relay.message.emit(result.error or ja.summary_line(result))
                 return [result]
             return ja.run(paths, options, progress=relay.message.emit,
-                          should_cancel=lambda: self._cancelled)
+                          should_cancel=lambda: self._cancelled, segmented=segmented, reuse_any=reuse_any)
 
         returned: list[int] = []
 
@@ -740,8 +821,8 @@ class JunctionAnalysisWidget(QWidget):
             if failed:
                 message += f" {len(failed)} failed: " + "; ".join(
                     f"{r.name} ({r.error})" for r in failed[:2])
-            if draw_on and self._results and self._results[0].ok:
-                self._draw(self._results[0], draw_on)
+            if draw_on and self._results and self._results[0].ok and draw_on in self._viewer.layers:
+                self.show_result(self._results[0], self._viewer.layers[draw_on])
             if workbook is not None and self._results:
                 try:
                     workbook.parent.mkdir(parents=True, exist_ok=True)
