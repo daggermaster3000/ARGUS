@@ -26,6 +26,7 @@ any function of the same shape — which is how the checks run without it.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -1162,6 +1163,104 @@ def summary_line(result: JunctionCounts) -> str:
                  if not count.reference and np.isfinite(count.n_positive_section)]
         line += f" — {result.n_cells_section} in the section; " + ", ".join(whole)
     return line
+
+
+# ---------------------------------------------------------------------------
+# Progress: how far a run is, and how long it has left
+# ---------------------------------------------------------------------------
+
+_SAMPLE_OF = re.compile(r"\((\d+) of (\d+)\):")
+_TILE_OF = re.compile(r"tile (\d+) of (\d+)")
+#: Share of a sample's time spent segmenting, the rest reading and measuring.
+#: Rough; the estimate corrects itself as samples finish.
+SEGMENT_SHARE = 0.85
+#: Spinner frames for the progress line.
+SPINNER = "◐◓◑◒"
+
+
+class RunProgress:
+    """Follows a run's progress lines; says how far it is, and how long it has left.
+
+    Reads the lines :func:`run` and :func:`analyse_sample` send: ``"<sample>
+    (i of n): …"`` says which sample, ``"tile k of m"`` how far its
+    segmentation is, and the sample's summary line that it is done. A single
+    sample's lines carry no ``(i of n)`` and count as one of one. The fraction
+    never goes back; the time left is the time so far scaled by what is left.
+    """
+
+    def __init__(self, samples: int = 1, now: float | None = None):
+        self.samples = max(int(samples), 1)
+        self.started = time.perf_counter() if now is None else now
+        self.sample = 1
+        self.within = 0.0
+        self.fraction = 0.0
+        self.tile = ""
+
+    def update(self, text: str) -> float:
+        """Take one progress line; returns the fraction of the run done."""
+        found = _SAMPLE_OF.search(text)
+        if found:
+            sample, total = int(found.group(1)), int(found.group(2))
+            if sample < self.sample:
+                return self.fraction  # a late line about a sample already passed
+            if sample != self.sample:
+                self.within, self.tile = 0.0, ""
+            self.sample, self.samples = sample, max(total, 1)
+        tile = _TILE_OF.search(text)
+        if tile:
+            k, m = int(tile.group(1)), max(int(tile.group(2)), 1)
+            self.within = max(self.within, SEGMENT_SHARE * (k - 1) / m)
+            self.tile = f"tile {k}/{m}"
+        elif "cell(s) in the region" in text or "STOPPED" in text:
+            self.within, self.tile = 1.0, ""
+        elif self.tile and ("measuring" in text or "scoring" in text or "placing" in text or "writing" in text):
+            self.within = max(self.within, SEGMENT_SHARE)
+        done = (self.sample - 1 + min(self.within, 1.0)) / self.samples
+        self.fraction = max(self.fraction, min(done, 1.0))
+        return self.fraction
+
+    def elapsed(self, now: float | None = None) -> float:
+        return (time.perf_counter() if now is None else now) - self.started
+
+    def remaining(self, now: float | None = None) -> float:
+        """Seconds left, or NaN until there is enough to go on."""
+        if self.fraction < 0.01:
+            return float("nan")
+        spent = self.elapsed(now)
+        return spent * (1.0 - self.fraction) / self.fraction
+
+    def line(self, tick: int = 0, now: float | None = None, width: int = 24) -> str:
+        """One line of text: spinner, bar, percent, where it is, time so far and left."""
+        left = self.remaining(now)
+        parts = [f"{SPINNER[tick % len(SPINNER)]} {progress_bar(self.fraction, width, tick)} {100 * self.fraction:3.0f}%",
+                 f"sample {self.sample}/{self.samples}"]
+        if self.tile:
+            parts.append(self.tile)
+        parts.append(f"{duration(self.elapsed(now))} so far")
+        parts.append("about " + duration(left) + " left" if np.isfinite(left) else "estimating…")
+        return " · ".join(parts)
+
+
+def progress_bar(fraction: float, width: int = 24, tick: int = 0) -> str:
+    """``[█████▓▒░░░░]``: filled to *fraction*, with a shimmer at the front that moves with *tick*."""
+    fraction = min(max(float(fraction), 0.0), 1.0)
+    full = int(fraction * width)
+    if full >= width:
+        return "[" + "█" * width + "]"
+    head = "▓▒"[tick % 2]
+    return "[" + "█" * full + head + "░" * (width - full - 1) + "]"
+
+
+def duration(seconds: float) -> str:
+    """``42 s``, ``3 min 05 s``, ``1 h 12 min``."""
+    if not np.isfinite(seconds):
+        return "?"
+    seconds = int(round(max(seconds, 0.0)))
+    if seconds < 60:
+        return f"{seconds} s"
+    if seconds < 3600:
+        return f"{seconds // 60} min {seconds % 60:02d} s"
+    return f"{seconds // 3600} h {(seconds % 3600) // 60:02d} min"
 
 
 # ---------------------------------------------------------------------------

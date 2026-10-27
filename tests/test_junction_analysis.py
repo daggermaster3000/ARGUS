@@ -477,8 +477,34 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         check(len(sheets["Counts"]) == 3 + 1, "the other sheets are written as before")
 
 
+def test_progress_and_the_time_left() -> None:
+    print("progress and the time left")
+    tracker = ja.RunProgress(4, now=0.0)
+    check(tracker.update("Analysing 4 sample(s), the whole section") == 0.0
+          and not np.isfinite(tracker.remaining(now=5.0)), "nothing done yet: no estimate")
+    tracker.update("s0 (1 of 4): the section's cells: tile 1 of 10 (0 so far)")
+    half = tracker.update("s0 (1 of 4): the section's cells: tile 6 of 10 (900 so far)")
+    check(abs(half - ja.SEGMENT_SHARE * 0.5 / 4) < 1e-9, f"tiles move it along within a sample ({half:.3f})")
+    first = tracker.update("s0 (1 of 4): 120 cell(s) in the region; AF488+ 9")
+    check(first == 0.25, "a sample's summary closes it")
+    check(abs(tracker.remaining(now=60.0) - 180.0) < 1e-9, "a quarter in a minute: three minutes left")
+    check(tracker.update("s1 (2 of 4): reading") == 0.25 and tracker.tile == "",
+          "the next sample starts where the last ended")
+    check(tracker.update("s0 (1 of 4): tile 9 of 10") == 0.25, "and the fraction never goes back")
+    line = tracker.line(tick=1, now=60.0)
+    check("25%" in line and "sample 2/4" in line and "1 min 00 s so far" in line and "about 3 min 00 s left" in line
+          and "[██████▒░" in line, f"one line says it all: {line}")
+    single = ja.RunProgress(1, now=0.0)
+    check(single.update("the section's cells: tile 3 of 4 (10 so far)") == ja.SEGMENT_SHARE * 0.5,
+          "a single sample's lines count as one of one")
+    check(ja.progress_bar(1.0, 4) == "[████]" and ja.progress_bar(0.0, 4, tick=0) == "[▓░░░]", "the bar")
+    check(ja.duration(42) == "42 s" and ja.duration(185) == "3 min 05 s" and ja.duration(4320) == "1 h 12 min"
+          and ja.duration(float("nan")) == "?", "durations read as a person would say them")
+
+
 def main() -> int:
     for test in (
+        test_progress_and_the_time_left,
         test_statistics_per_label,
         test_thresholds,
         test_cells_are_scored_per_channel,

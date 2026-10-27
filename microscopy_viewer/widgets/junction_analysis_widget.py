@@ -13,7 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from qtpy.QtCore import QObject, Qt, Signal
+from qtpy.QtCore import QObject, Qt, QTimer, Signal
+from qtpy.QtGui import QFontDatabase
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -117,6 +118,22 @@ class JunctionAnalysisWidget(QWidget):
         self._log_view.setMaximumHeight(110)
         self._log_view.setPlaceholderText("Progress appears here.")
         layout.addWidget(self._log_view, stretch=1)
+
+        # One animated line while a run goes: bar, where it is, time so far and left.
+        self._progress = QLabel("")
+        self._progress.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        self._progress.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._progress.setToolTip(
+            "How far the run is and about how long it has left. The estimate is the time so far "
+            "scaled by what is left, so it settles once the first sample's tiles are under way."
+        )
+        self._progress.setVisible(False)
+        layout.addWidget(self._progress)
+        self._tracker: ja.RunProgress | None = None
+        self._tick = 0
+        self._ticker = QTimer(self)
+        self._ticker.setInterval(250)
+        self._ticker.timeout.connect(self._animate)
 
         self._status = QLabel("Open a sample and Count, or select samples in Experiment setup and Run.")
         self._status.setWordWrap(True)
@@ -418,6 +435,8 @@ class JunctionAnalysisWidget(QWidget):
 
     def _log(self, text: str) -> None:
         self._log_view.appendPlainText(text)
+        if self._tracker is not None and self._worker is not None:
+            self._tracker.update(text)
         self._status.setText(text)
 
     def options(self, channels: list[str] | None = None) -> ja.CountOptions:
@@ -464,6 +483,11 @@ class JunctionAnalysisWidget(QWidget):
             for layer in self._viewer.layers
             if isinstance(layer, Image) and source_of(layer) == source
         ]
+
+    def _animate(self) -> None:
+        if self._tracker is not None:
+            self._tick += 1
+            self._progress.setText(self._tracker.line(self._tick))
 
     def _busy(self, running: bool) -> None:
         self._count_button.setEnabled(not running)
@@ -610,6 +634,11 @@ class JunctionAnalysisWidget(QWidget):
         self._cancelled = False
         self._log_view.clear()
         self._busy(True)
+        self._tracker = ja.RunProgress(len(paths))
+        self._tick = 0
+        self._progress.setVisible(True)
+        self._animate()
+        self._ticker.start()
         self._log(f"Analysing {len(paths)} sample(s)"
                   + (", the whole section" if options.whole_section else ", the region only")
                   + f": {options.method.lower()}, comparing each cell's {options.statistic}.")
@@ -624,8 +653,11 @@ class JunctionAnalysisWidget(QWidget):
             return ja.run(paths, options, progress=relay.message.emit,
                           should_cancel=lambda: self._cancelled)
 
+        returned: list[int] = []
+
         def _done(results) -> None:
             self._results = list(results)
+            returned.append(len(self._results))
             self._fill_table()
             failed = [r for r in self._results if not r.ok]
             fault = any(r.gpu_fault for r in self._results)
@@ -660,6 +692,16 @@ class JunctionAnalysisWidget(QWidget):
         def _finished() -> None:
             self._worker = None
             self._busy(False)
+            self._ticker.stop()
+            tracker, self._tracker = self._tracker, None
+            if tracker is not None:
+                done = returned[0] if returned else 0
+                spent = ja.duration(tracker.elapsed())
+                if self._cancelled or done < len(paths):
+                    self._progress.setText(f"■ {ja.progress_bar(done / len(paths))} stopped · "
+                                           f"{done}/{len(paths)} sample(s) in {spent}")
+                else:
+                    self._progress.setText(f"✓ {ja.progress_bar(1.0)} 100% · {len(paths)} sample(s) in {spent}")
 
         worker = _run()
         worker.returned.connect(_done)

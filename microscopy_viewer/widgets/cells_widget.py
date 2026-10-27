@@ -236,6 +236,7 @@ class CellsWidget(QWidget):
         ja._table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(ja._table, stretch=2)
         layout.addWidget(ja._log_view, stretch=1)
+        layout.addWidget(ja._progress)
         self._status = QLabel("")
         self._status.setWordWrap(True)
         layout.addWidget(self._status)

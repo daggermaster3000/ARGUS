@@ -726,6 +726,16 @@ always in view:
 
 **Run** (*Analyse this sample* / *Analyse the samples*), **Stop**, **Export…** and
 **QC…** sit beside each other; the counts table and the progress log are under them.
+While a run goes, one line under the log shows how far it is and about how long
+is left:
+
+```
+◑ [█████████▓░░░░░░░░░░░░░░]  40% · sample 2/3 · tile 12/30 · 6 min 10 s so far · about 9 min 15 s left
+```
+
+The estimate is the time so far scaled by what is left (samples done, and the
+tiles of the sample being segmented), so it settles once the first sample's tiles
+are under way.
 
 Everything else is under **Settings**, closed until opened: Cellpose's mode,
 thresholds, stitching, size limits and normalisation; the device and batch size;
