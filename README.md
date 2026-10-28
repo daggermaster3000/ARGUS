@@ -1449,8 +1449,21 @@ What happens:
 | Ring contrast | the cell's mean ÷ the mean of a ring 3–6 µm round its nucleus, at least *Ring contrast at least* (1.5×) | the cell against its own surroundings: a haze, or a thick part of the section, does not make a cell positive |
 
 SDs are robust (1.4826 × MAD), so the bright cells being looked for do not raise
-the bar on themselves. *k* defaults to 3. *Compare the cell's* picks which
-figure is tested: mean (default), median, P95 or max.
+the bar on themselves. *Compare the cell's* picks which figure is tested:
+
+- **mean (median filter)** (default): the cell's mean less the median of the
+  tissue 45 µm round it, so a cell in a bright haze or a dim corner of the
+  section is set against its own surroundings;
+- mean, median, P95 or max: the cell's own pixels as they are.
+
+**The default is median + 7 SD on *mean (median filter)***: *k* defaults to 7. It
+is the rule closest to the hand counts in every comparison so far
+(`positivity_metrics`, 21 Oct: F1 0.38, Spearman 0.79 per mm of junction;
+`classical_vs_cellpose`, 27 Oct: still best of eight rules, the classical AF488
+masks included). Median + 3 SD on the plain mean, the earlier default, calls
+about four times as many cells, most of them in haze (F1 0.11). Cells saved by a
+run before 28 Oct lack the figure; *Re-score positivity* measures it from their
+label map and the image (a few seconds a sample, nothing segmented).
 
 **Threshold from** says which cells the median and SD (or the Otsu split) are
 taken from. The same threshold then scores the region's cells and every other
@@ -1467,7 +1480,7 @@ both cases. *Threshold from* and *Cells behind the threshold* in the *Counts*
 sheet say what each threshold rests on.
 
 Per cell and per channel the workbook has: mean, median, SD, CV, P95, max,
-integrated intensity, SDs over background and fold over background, *ring mean*
+integrated intensity, *mean (median filter)*, SDs over background and fold over background, *ring mean*
 and *ring contrast*, plus the nucleus area, diameter and position, *No ring*, and
 a *Positive for* column naming the channels (`AF555 + AF488`, `none`, …).
 
@@ -1482,6 +1495,18 @@ validation (`positivity_metrics`, 21 Oct) found second best without clicks:
 median + 3 SD. On one slide scan it called 1.1 % of the section's cells
 AF488-positive (0.6 % of those with their own ring, 1.7 % of the packed ones),
 against 8 % for median + 3 SD.
+
+**Positive cells in their own shape.** A nucleus says where a cell is, not
+what it looks like. With *Outline the positive cells in their own stain*
+(Settings, on), each channel's positive cells are also drawn as the stain draws
+them: the pixels standing 5 robust SDs over a 20 µm Gaussian of the tissue
+round them (after a 0.5 µm smoothing; pieces under 20 µm² dropped), joined to the
+positive cell they touch — a piece touching two is shared out to the nearer,
+pixel by pixel. That shows cell bodies off the nucleus and processes 50–130 µm
+long (`classical_vs_cellpose`). It is drawing only: which cells are positive does
+not change. The layer *<channel> positive shape* (one colour per cell), an outline
+in the section picture, and `labels/<sample> <channel> shape.tif`. A few seconds
+a channel per sample.
 
 **Where each cell is**, in the *Cells* sheet:
 
@@ -1556,7 +1581,7 @@ cells_analysis/2026-10-27_165517/            (a single sample: "… <sample name
   cells/<sample>.csv
   region/ok/, check/, fail/<sample>.png
   positive cells/<sample>.png
-  labels/<sample> nuclei.tif, <sample> grown.tif
+  labels/<sample> nuclei.tif, <sample> grown.tif, <sample> <channel> shape.tif
   README.txt
 ```
 
@@ -1579,13 +1604,14 @@ cells_analysis/2026-10-27_165517/            (a single sample: "… <sample name
 - **`positive cells/`** — each whole section (up to 2,500 px across, ~1.3 µm a
   pixel on a slide scan: a nucleus is a few pixels, its ring clear): the stains,
   the region outlined in white, the junction line in yellow, a ring round every
-  positive cell anywhere in the section, and per channel the positives in the
-  section and in the region.
+  positive cell anywhere in the section and its own shape outlined in the same
+  colour, and per channel the positives in the section and in the region.
 - **`labels/`** — each whole section's label maps (compressed TIFF, ~2 MB each on
   a slide scan): *nuclei*, every cell segmented, and *grown*, the same grown by
   *Measure around nuclei*, as measured. Labels match the *Label* column of
   `cells/<sample>.csv`, so any cell's figures can be looked up from the map.
-  Open them in napari, Fiji or Python (`tifffile.imread`).
+  *`<channel>` shape*: that channel's positive cells in their own shape, under
+  the same labels. Open them in napari, Fiji or Python (`tifffile.imread`).
 - **`README.txt`** — what is where, the QC tally, the settings, and any sample
   that failed and why.
 
@@ -1605,7 +1631,8 @@ In the panel:
   section)*, every cell found, as outlines; *Nuclei grown by 3 µm*, the regions
   each cell was measured over (hidden at first); *`<channel>`+ cells*, the
   positive cells of each channel anywhere in the section, their nucleus outlined
-  in red; and
+  in red; *`<channel>` positive shape*, the same cells in their own shape, one
+  colour per cell, outlined; and
   *Junction cells*, the region's cells (hidden at first). Each whole-section
   layer is a label map the size of the scan, ~250 MB. With *Segment only the
   junction region* the layers cover the region only.

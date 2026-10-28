@@ -66,6 +66,34 @@ NO_RING_COLUMN = "No ring"
 RING_NEIGHBOURS = 8
 RING_NEIGHBOUR_UM = 50.0
 
+#: Per-cell figure: the cell's mean over the channel less its local median
+#: (the median over :data:`MEDIAN_UM` round each pixel), so each cell is set
+#: against the tissue it sits in, not against the section's brightest or
+#: dimmest corner. With median + 7 SD of the region's cells it is the rule that
+#: came closest to the hand counts (``positivity_metrics``, 21 Oct: F1 0.38,
+#: Spearman 0.79 per mm of junction; ``classical_vs_cellpose``, 27 Oct: still
+#: the best of eight rules) — the default.
+FILTERED = "mean (median filter)"
+#: Side of that local median, in µm, and the step it is worked out at (as in
+#: the validation's ``count_cells``).
+MEDIAN_UM = jn.MEDIAN_UM
+MEDIAN_STEP = 8
+#: Standard deviations above the centre, by default, for the "median + k × SD" rules.
+K_SD = 7.0
+
+#: Each positive cell's own shape, for drawing it: the pixels of its channel
+#: :data:`SHAPE_K` robust SDs over a :data:`SHAPE_BACKGROUND_UM` Gaussian
+#: background, after a :data:`SHAPE_SMOOTH_UM` smoothing, in pieces of at least
+#: :data:`SHAPE_MIN_UM2` with holes up to :data:`SHAPE_HOLE_UM2` filled, joined to
+#: the positive cell they touch. Shows cell bodies off the nucleus and
+#: processes 50–130 µm long (``classical_vs_cellpose``, 27 Oct). Drawing only:
+#: it does not decide which cells are positive.
+SHAPE_SMOOTH_UM = 0.5
+SHAPE_BACKGROUND_UM = 20.0
+SHAPE_K = 5.0
+SHAPE_MIN_UM2 = 20.0
+SHAPE_HOLE_UM2 = 10.0
+
 #: Which cells a threshold is derived from, for the rules that derive it from
 #: cells (:data:`CELL_RULES`). The cells *counted* are those in the region
 #: either way.
@@ -76,8 +104,9 @@ THRESHOLD_FROM = (FROM_REGION, FROM_SAMPLE)
 #: The rules whose threshold comes from a population of cells.
 CELL_RULES = (METHOD_CELLS, METHOD_OTSU)
 
-#: Which per-cell figure is compared with the threshold.
-STATISTICS = ("mean", "median", "P95", "max")
+#: Which per-cell figure is compared with the threshold (:data:`FILTERED`, the
+#: default, and the figures of :data:`CELL_METRICS` it makes sense to cut).
+STATISTICS = (FILTERED, "mean", "median", "P95", "max")
 
 #: Per-cell figures reported for every channel, in column order.
 CELL_METRICS = ("mean", "median", "SD", "CV", "P95", "max", "integrated")
@@ -115,6 +144,9 @@ POSITIVE_FOLDER = "positive cells"
 LABELS_FOLDER = "labels"
 NUCLEI_SUFFIX = " nuclei.tif"
 GROWN_SUFFIX = " grown.tif"
+#: Each scored channel's positive cells in their own shape (:func:`positive_shapes`):
+#: ``<sample> <channel> shape.tif``, under the cells' labels.
+SHAPE_SUFFIX = " shape.tif"
 #: The region the sample was counted in, beside its label maps, and what the
 #: sample's segmentation was made with, beside its cells: together with the
 #: cells table, all a later run needs to score the sample again without
@@ -156,10 +188,11 @@ class CountOptions:
     nuclear_channel: int | str = ""
     method: str = METHOD_CELLS
     #: Standard deviations above the centre, for the two "median + k × SD" rules.
-    k: float = 3.0
+    k: float = K_SD
     #: With :data:`METHOD_RING`: the contrast a cell needs, cell ÷ its ring.
     ring_ratio: float = RING_RATIO
-    statistic: str = "mean"
+    #: The per-cell figure compared with the threshold (:data:`STATISTICS`).
+    statistic: str = FILTERED
     #: The cells the threshold is derived from: those in the region, or every
     #: cell of the sample — which means segmenting the whole section.
     threshold_from: str = FROM_REGION
@@ -198,6 +231,9 @@ class CountOptions:
     #: for drawing (``JunctionCounts.section_labels`` / ``section_regions``).
     #: ~250 MB each on a slide scan: for a single sample, not a batch.
     full_labels: bool = False
+    #: Outline each positive cell in its own stain (:func:`positive_shapes`),
+    #: kept and written with the label maps. A few seconds a channel on a slide scan.
+    shapes: bool = True
     #: Store the counted cells with the sample as a label map.
     save_cells: bool = False
     cells_key: str = CELLS_KEY
@@ -223,6 +259,10 @@ class ChannelCount:
     #: Median and spread of the tissue between the cells, in this channel.
     background: float = float("nan")
     background_sd: float = float("nan")
+    #: The same of the figure compared, when it is not the plain mean: of the
+    #: tissue less its local median for :data:`FILTERED`. What "Above the
+    #: background" cuts.
+    compared_background: tuple[float, float] = (float("nan"), float("nan"))
     #: Centre and spread of the cells the threshold was derived from — what
     #: the default rule uses — which cells those were, and how many.
     cells_median: float = float("nan")
@@ -315,6 +355,11 @@ class JunctionCounts:
     #: The whole section's label maps on disk, nuclei and grown, when written.
     nuclei_file: Path | None = None
     grown_file: Path | None = None
+    #: With ``CountOptions.shapes``: each scored channel's positive cells in
+    #: their own shape (:func:`positive_shapes`), on the image's grid, under the
+    #: labels of *section_cells*; and the same on disk, when written.
+    section_shapes: dict[str, np.ndarray] = field(default_factory=dict)
+    shape_files: dict[str, Path] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -481,6 +526,158 @@ def robust_centre_and_spread(values: np.ndarray) -> tuple[float, float]:
     return centre, float(np.median(np.abs(data - centre)) * 1.4826)
 
 
+def coarse_median(thumbnail: np.ndarray, voxel_um: float, step: int = MEDIAN_STEP) -> np.ndarray:
+    """A channel's local median over :data:`MEDIAN_UM`, from its plane at 1/*step*; still at 1/*step*."""
+    from scipy import ndimage
+
+    size = max(3, int(round(MEDIAN_UM / (float(voxel_um) * step))) | 1)
+    return ndimage.median_filter(np.asarray(thumbnail, dtype=np.float32), size)
+
+
+def median_at(coarse: np.ndarray, window: tuple[slice, slice], shape: Sequence[int]) -> np.ndarray:
+    """:func:`coarse_median` at full resolution over *window* of an image of *shape*.
+
+    Linear between the coarse pixels, as ``ndimage.zoom`` scales the whole
+    image back up, so a tile gets the same values as the whole section would.
+    """
+    coarse = np.asarray(coarse, dtype=np.float32)
+
+    def weights(start: int, stop: int, size: int, n: int):
+        positions = np.arange(start, stop, dtype=np.float64) * ((n - 1) / max(int(size) - 1, 1))
+        low = np.clip(np.floor(positions).astype(np.int64), 0, n - 1)
+        return low, np.minimum(low + 1, n - 1), (positions - low).astype(np.float32)
+
+    low, high, w = weights(window[0].start, window[0].stop, shape[0], coarse.shape[0])
+    rows = coarse[low] * (1 - w)[:, None] + coarse[high] * w[:, None]
+    low, high, w = weights(window[1].start, window[1].stop, shape[1], coarse.shape[1])
+    return rows[:, low] * (1 - w)[None, :] + rows[:, high] * w[None, :]
+
+
+def less_local_median(plane: np.ndarray, voxel_um: float) -> np.ndarray:
+    """*plane* less its local median, the median worked out over *plane* itself."""
+    plane = np.asarray(plane, dtype=np.float32)
+    whole = (slice(0, plane.shape[0]), slice(0, plane.shape[1]))
+    return plane - median_at(coarse_median(plane[::MEDIAN_STEP, ::MEDIAN_STEP], voxel_um), whole, plane.shape)
+
+
+def local_medians(specs: Sequence[Any], names: Sequence[str], voxel_um: float,
+                  planes: dict[str, np.ndarray] | None = None) -> dict[str, np.ndarray]:
+    """Each channel's :func:`coarse_median` over the whole section; *planes* holds any already read."""
+    planes = planes or {}
+    return {name: coarse_median(planes[name][::MEDIAN_STEP, ::MEDIAN_STEP] if name in planes
+                                else _thumbnail(spec, MEDIAN_STEP), voxel_um)
+            for name, spec in zip(names, specs)}
+
+
+def add_filtered(table, path: str | Path, grown: np.ndarray, channels: Sequence[str],
+                 voxel_yx: Sequence[float]) -> None:
+    """Add :data:`FILTERED` for *channels* to saved cells, from their grown label map and the image.
+
+    For cells saved before the figure was measured: the image is read in strips,
+    nothing is segmented.
+    """
+    from . import loaders
+
+    path = Path(path)
+    grown = np.asarray(grown)
+    shape = grown.shape
+    labels = table["Label"].to_numpy(dtype=np.int64)
+    top = int(grown.max()) if grown.size else 0
+    was_open = loaders.is_open(path)
+    specs = loaders.load_path(path)
+    try:
+        names = [str(spec.channel_name or spec.name) for spec in specs]
+        for channel in channels:
+            spec = specs[names.index(channel)]
+            coarse = coarse_median(_thumbnail(spec, MEDIAN_STEP), float(voxel_yx[-1]))
+            sums, sizes = np.zeros(top + 1), np.zeros(top + 1)
+            for y in range(0, shape[0], TILE_PX):
+                window = (slice(y, min(y + TILE_PX, shape[0])), slice(0, shape[1]))
+                less = _plane(spec, window).astype(np.float32) - median_at(coarse, window, shape)
+                owner = grown[window].reshape(-1).astype(np.int64)
+                sums += np.bincount(owner, weights=less.reshape(-1), minlength=top + 1)
+                sizes += np.bincount(owner, minlength=top + 1)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                means = np.where(sizes > 0, sums / np.maximum(sizes, 1), np.nan)
+            known = (labels >= 0) & (labels <= top)
+            table[f"{channel} {FILTERED}"] = np.where(known, means[np.clip(labels, 0, top)], np.nan)
+    finally:
+        if not was_open:
+            loaders.release(path)
+
+
+def tissue_of(nuclear_small: np.ndarray) -> np.ndarray:
+    """The section, on the grid of *nuclear_small*: Otsu of the nuclear stain, closed, holes filled."""
+    from scipy import ndimage
+    from skimage.filters import threshold_otsu
+
+    small = np.asarray(nuclear_small, dtype=np.float32)
+    if not small.size or float(small.max()) <= float(small.min()):
+        return np.ones(small.shape, dtype=bool)
+    mask = ndimage.binary_closing(small > threshold_otsu(small), iterations=3)
+    return ndimage.binary_dilation(ndimage.binary_fill_holes(mask), iterations=2)
+
+
+def signal_mask(plane: np.ndarray, voxel_um: float, tissue: np.ndarray | None = None) -> np.ndarray:
+    """The pixels of *plane* clearly above their surroundings (see :data:`SHAPE_K`)."""
+    import warnings
+
+    from scipy import ndimage
+    from skimage.morphology import remove_small_holes, remove_small_objects
+
+    voxel_um = float(voxel_um)
+    signal = ndimage.gaussian_filter(np.asarray(plane, dtype=np.float32), SHAPE_SMOOTH_UM / voxel_um)
+    step = 4
+    height, width = signal.shape
+    small = signal[: height // step * step, : width // step * step]
+    if small.size:
+        small = small.reshape(height // step, step, width // step, step).mean(axis=(1, 3))
+        small = ndimage.gaussian_filter(small, SHAPE_BACKGROUND_UM / voxel_um / step)
+        signal -= median_at(small, (slice(0, height), slice(0, width)),
+                            ((small.shape[0] - 1) * step + 1, (small.shape[1] - 1) * step + 1))
+    tissue = np.ones(signal.shape, dtype=bool) if tissue is None else np.asarray(tissue, dtype=bool)
+    centre, spread = robust_centre_and_spread(signal[tissue][::20])
+    if not (np.isfinite(centre) and np.isfinite(spread) and spread > 0):
+        return np.zeros(signal.shape, dtype=bool)
+    mask = (signal > centre + SHAPE_K * spread) & tissue
+    del signal
+    with warnings.catch_warnings():
+        # scikit-image 0.26 renames these arguments; older releases do not know the new names.
+        warnings.simplefilter("ignore", FutureWarning)
+        mask = remove_small_objects(mask, max(1, int(round(SHAPE_MIN_UM2 / voxel_um ** 2))))
+        return remove_small_holes(mask, max(1, int(round(SHAPE_HOLE_UM2 / voxel_um ** 2))))
+
+
+def positive_shapes(mask: np.ndarray, regions: np.ndarray, positive: Sequence[int]) -> np.ndarray:
+    """Each positive cell in its own shape, under its label.
+
+    A cell's shape is its grown region (*regions*) and every piece of *mask*
+    touching it; a piece touching several positive cells is shared out, each
+    pixel to the nearest. Pieces touching no positive cell are left out.
+    """
+    from scipy import ndimage
+
+    regions = np.asarray(regions)
+    seeds = np.where(np.isin(regions, np.asarray(positive, dtype=np.int64)), regions, 0).astype(np.int32)
+    if not seeds.any():
+        return seeds
+    pieces, _n = ndimage.label(np.asarray(mask, dtype=bool) | (seeds > 0))
+    boxes = ndimage.find_objects(pieces)
+    shapes = seeds.copy()
+    for piece in np.unique(pieces[seeds > 0]):
+        box = boxes[int(piece) - 1]
+        here = pieces[box] == piece
+        local = seeds[box]
+        owners = np.unique(local[here & (local > 0)])
+        view = shapes[box]
+        if owners.size == 1:
+            view[here] = owners[0]
+        else:
+            _distance, (iy, ix) = ndimage.distance_transform_edt(local == 0, return_indices=True)
+            view[here] = local[iy, ix][here]
+    return shapes
+
+
 def threshold_for(
     channel: str,
     cell_values: np.ndarray,
@@ -545,6 +742,7 @@ def measure_cells(
     nuclear: str = "",
     origin: Sequence[int] = (0, 0),
     sample_values: dict[str, np.ndarray] | None = None,
+    filtered: dict[str, np.ndarray] | None = None,
 ):
     """Measure the cells whose centroid is in *band*. Returns ``(table, counts)``.
 
@@ -560,6 +758,10 @@ def measure_cells(
     the whole sample for that to mean what it says — or *sample_values* gives
     the sample's cells instead: per channel, the compared figure of every cell,
     gathered elsewhere (:func:`sample_cell_values`).
+
+    *filtered* maps a channel to its plane less its local median, on the same
+    grid, for :data:`FILTERED`; a channel not in it is filtered over *images*'
+    plane itself.
     """
     import pandas as pd
     from scipy import ndimage
@@ -600,19 +802,29 @@ def measure_cells(
     counts: list[ChannelCount] = []
     positive_names: list[list[str]] = [[] for _ in range(len(ids))]
     for channel, image in images.items():
+        less = (filtered or {}).get(channel)
+        less = less_local_median(image, voxel[1]) if less is None else np.asarray(less, dtype=np.float32)
+
+        def stats_of(chosen):
+            figures = label_stats(regions, image, chosen)
+            figures[FILTERED] = (np.asarray(ndimage.mean(less, regions, chosen), dtype=np.float64)
+                                 if len(chosen) else np.zeros(0))
+            return figures
+
         if whole and sample_values is not None and channel in sample_values:
-            stats = label_stats(regions, image, ids)
+            stats = stats_of(ids)
             population = np.asarray(sample_values[channel], dtype=np.float64)
         elif whole:
-            everyone = label_stats(regions, image, present)
+            everyone = stats_of(present)
             stats = {metric: figures[inside] for metric, figures in everyone.items()}
             population = everyone[options.statistic]
         else:
-            stats = label_stats(regions, image, ids)
+            stats = stats_of(ids)
             population = stats[options.statistic]
-        for metric in CELL_METRICS:
+        for metric in (*CELL_METRICS, FILTERED):
             table[f"{channel} {metric}"] = stats[metric]
         centre, spread = robust_centre_and_spread(np.asarray(image, dtype=np.float64)[between])
+        compared = robust_centre_and_spread(less[between]) if options.statistic == FILTERED else (centre, spread)
         scale = spread if spread and np.isfinite(spread) and spread > 0 else np.nan
         table[f"{channel} SDs over background"] = (stats["mean"] - centre) / scale
         table[f"{channel} fold over background"] = stats["mean"] / centre if centre else np.nan
@@ -620,7 +832,8 @@ def measure_cells(
         add_ring_contrast(table, [channel])
 
         count = ChannelCount(channel=channel, n_cells=int(len(ids)), statistic=options.statistic,
-                             background=centre, background_sd=spread, reference=channel == nuclear)
+                             background=centre, background_sd=spread, compared_background=compared,
+                             reference=channel == nuclear)
         count.cells_median, count.cells_sd = robust_centre_and_spread(population)
         count.threshold_from = options.threshold_from if whole else FROM_REGION
         count.n_threshold_cells = int(len(population))
@@ -629,7 +842,7 @@ def measure_cells(
             # the threshold rule cutting a single population in two.
             count.method = "reference stain — not scored"
         else:
-            count.threshold, count.method = threshold_for(channel, population, (centre, spread), options)
+            count.threshold, count.method = threshold_for(channel, population, compared, options)
             positive = positive_of(table, channel, count, options.statistic)
             table[f"{channel} positive"] = positive
             count.n_positive = int(positive.sum())
@@ -755,6 +968,14 @@ def section_picture(result: JunctionCounts, specs: Sequence[Any], band: np.ndarr
         rgb += jn._stretch(plane, tissue)[..., None] * np.asarray(colour, dtype=np.float32)
     pixels = (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
     pixels[ndimage.binary_dilation(small, iterations=2) & ~small] = (255, 255, 255)
+    scored = [count for count in result.channels if not count.reference]
+    for index, count in enumerate(scored):
+        shapes = result.section_shapes.get(count.channel)
+        if shapes is None:
+            continue
+        # Kept at any size: a process one pixel wide survives the shrinking.
+        on = ndimage.maximum_filter(np.asarray(shapes) > 0, size=step)[::step, ::step][:small.shape[0], :small.shape[1]]
+        pixels[:on.shape[0], :on.shape[1]][on & ~ndimage.binary_erosion(on)] = MARKER_COLOURS[index % len(MARKER_COLOURS)]
     image = Image.fromarray(pixels)
     draw = ImageDraw.Draw(image)
     voxel = result.voxel_yx
@@ -762,7 +983,6 @@ def section_picture(result: JunctionCounts, specs: Sequence[Any], band: np.ndarr
         points = [(float(x) / voxel[1] / step, float(y) / voxel[0] / step) for y, x in np.asarray(line).reshape(-1, 2)]
         draw.line(points, fill=(255, 230, 0), width=2)
 
-    scored = [count for count in result.channels if not count.reference]
     table = result.section_cells
     if table is not None and len(table):
         ys = table["Centroid Y (µm)"].to_numpy() / voxel[0] / step
@@ -782,7 +1002,8 @@ def section_picture(result: JunctionCounts, specs: Sequence[Any], band: np.ndarr
     canvas.paste(image, (0, strip))
     jn.caption(canvas, result.name, result.qc,
                f"whole section: {result.n_cells_section} cells, {result.n_cells} in the region (white outline); "
-               "junction line yellow")
+               "junction line yellow" + ("; positive cells ringed and outlined in their own stain"
+                                         if result.section_shapes else ""))
     draw = ImageDraw.Draw(canvas)
     x = 4
     for index, count in enumerate(scored):
@@ -858,6 +1079,8 @@ class SectionCells:
     #: section's labels; ``None`` when no crop was asked for.
     labels: np.ndarray | None = None
     regions: np.ndarray | None = None
+    #: Each channel's local median (:func:`local_medians`), as used for :data:`FILTERED`.
+    medians: dict[str, np.ndarray] | None = None
 
 
 def section_cells(
@@ -882,6 +1105,7 @@ def segment_section(
     segment: Callable[..., np.ndarray] | None = None,
     progress: Callable[[str], None] | None = None,
     crop: tuple[slice, slice] | None = None,
+    medians: dict[str, np.ndarray] | None = None,
 ) -> SectionCells:
     """Every cell of the section: where it is, its size, and its figures in each channel.
 
@@ -897,6 +1121,10 @@ def segment_section(
     With *crop*, the cells are also pasted, nuclei and grown regions, onto a
     label map of that window, under the same labels as the table's: the
     region's cells, measured from the same segmentation.
+
+    :data:`FILTERED` takes each channel's local median over the whole section
+    (*medians*, from :func:`local_medians`; worked out here when not given), so
+    a tile's edge is not an edge of it.
     """
     import pandas as pd
     from scipy import ndimage
@@ -919,6 +1147,9 @@ def segment_section(
     tiles = [tile for tile in tiles if float((stain[tile][::8, ::8] > split).mean()) >= TILE_MIN_TISSUE]
 
     voxel = tuple(float(v) for v in tuple(voxel_yx)[-2:])
+    if medians is None:
+        say("the local median of each channel")
+        medians = local_medians(specs, names, voxel[1], planes={names[nuclear]: stain})
     parts: dict[str, list[np.ndarray]] = {}
     pasted = pasted_regions = None
     if crop is not None:
@@ -950,6 +1181,8 @@ def segment_section(
             stats = label_stats(regions, image, ids)
             for figure in CELL_METRICS:
                 figures[f"{name} {figure}"] = stats[figure]
+            less = np.asarray(image, dtype=np.float32) - median_at(medians[name], window, (height, width))
+            figures[f"{name} {FILTERED}"] = np.asarray(ndimage.mean(less, regions, ids), dtype=np.float64)
             figures[f"{name} ring mean"] = label_stats(rings, image, ids)["mean"]
         return ids, figures, (nuclei, regions) if crop is not None else None
 
@@ -994,13 +1227,13 @@ def segment_section(
             collect(window_done, future.result())
     columns = ["Label", "Centroid Y (µm)", "Centroid X (µm)", "Nucleus area (µm²)", "Equivalent diameter (µm)",
                NO_RING_COLUMN,
-               *(f"{name} {figure}" for name in names for figure in (*CELL_METRICS, "ring mean"))]
+               *(f"{name} {figure}" for name in names for figure in (*CELL_METRICS, FILTERED, "ring mean"))]
     table = pd.DataFrame({key: np.concatenate(parts[key]) if key in parts else np.zeros(0) for key in columns})
     table["Label"] = table["Label"].astype(np.int64)
     table[NO_RING_COLUMN] = table[NO_RING_COLUMN].astype(bool)
     # Over the whole section, so a packed cell's neighbours may lie in the next tile.
     add_ring_contrast(table, names)
-    return SectionCells(table=table, labels=pasted, regions=pasted_regions)
+    return SectionCells(table=table, labels=pasted, regions=pasted_regions, medians=medians)
 
 
 def _paste(pasted: np.ndarray, pasted_regions: np.ndarray, crop: tuple[slice, slice], window: tuple[slice, slice],
@@ -1123,6 +1356,26 @@ def score_section(section, counts: Sequence[ChannelCount], band: np.ndarray,
     return table
 
 
+def section_shapes(specs: Sequence[Any], names: Sequence[str], nuclear: int, voxel_yx: Sequence[float],
+                   regions: np.ndarray, table, counts: Sequence[ChannelCount]) -> dict[str, np.ndarray]:
+    """Each scored channel's positive cells in their own shape over the whole section (:func:`positive_shapes`)."""
+    regions = np.asarray(regions)
+    height, width = regions.shape
+    step = 8
+    tissue = tissue_of(_thumbnail(specs[nuclear], step))
+    tissue = np.repeat(np.repeat(tissue, step, axis=0), step, axis=1)[:height, :width]
+    whole = (slice(0, height), slice(0, width))
+    shapes: dict[str, np.ndarray] = {}
+    for count in counts:
+        column = f"{count.channel} positive"
+        if count.reference or table is None or column not in table or count.channel not in names:
+            continue
+        positive = table.loc[table[column].to_numpy(dtype=bool), "Label"].to_numpy(dtype=np.int64)
+        plane = _plane(specs[list(names).index(count.channel)], whole)
+        shapes[count.channel] = positive_shapes(signal_mask(plane, float(voxel_yx[-1]), tissue), regions, positive)
+    return shapes
+
+
 def place_positives(table, counts: Sequence[ChannelCount]) -> None:
     """Where each channel's positive cells of the section lie: their median distances."""
     if table is None or not len(table):
@@ -1145,20 +1398,32 @@ def write_labels(result: JunctionCounts, folder: Path) -> tuple[Path, Path]:
     Compressed, 16-bit when the labels fit, with the pixel size in µm; the
     labels are those of the sample's cells table.
     """
-    import tifffile
-
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     written = []
     for suffix, data in ((NUCLEI_SUFFIX, result.section_labels), (GROWN_SUFFIX, result.section_regions)):
-        data = np.asarray(data)
-        dtype = np.uint16 if data.size and int(data.max()) < 65536 else np.uint32
-        target = folder / f"{result.name}{suffix}"
-        tifffile.imwrite(target, data.astype(dtype, copy=False), compression="zlib",
-                         resolution=(1e4 / result.voxel_yx[1], 1e4 / result.voxel_yx[0]),
-                         resolutionunit="CENTIMETER", metadata={"unit": "um", "spacing_yx_um": list(result.voxel_yx)})
-        written.append(target)
+        written.append(_write_label_map(folder / f"{result.name}{suffix}", data, result.voxel_yx))
     return written[0], written[1]
+
+
+def write_shapes(result: JunctionCounts, folder: Path) -> dict[str, Path]:
+    """Write each channel's positive cells in their own shape: ``<sample> <channel> shape.tif``."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    return {channel: _write_label_map(folder / f"{result.name} {channel}{SHAPE_SUFFIX}", data, result.voxel_yx)
+            for channel, data in result.section_shapes.items()}
+
+
+def _write_label_map(target: Path, data: np.ndarray, voxel_yx: Sequence[float]) -> Path:
+    """A label map as a compressed TIFF, 16-bit when the labels fit, with the pixel size in µm."""
+    import tifffile
+
+    data = np.asarray(data)
+    dtype = np.uint16 if data.size and int(data.max()) < 65536 else np.uint32
+    tifffile.imwrite(target, data.astype(dtype, copy=False), compression="zlib",
+                     resolution=(1e4 / voxel_yx[1], 1e4 / voxel_yx[0]),
+                     resolutionunit="CENTIMETER", metadata={"unit": "um", "spacing_yx_um": list(voxel_yx)})
+    return target
 
 
 def read_labels(path: str | Path) -> np.ndarray:
@@ -1329,7 +1594,7 @@ def analyse_sample(
             keep_maps = options.full_labels or options.labels_dir is not None
             whole = segment_section(specs, names, nuclear, voxel, options, segment, say,
                                     crop=everything if keep_maps else window)
-            section, nuclei, regions = whole.table, whole.labels, whole.regions
+            section, nuclei, regions, medians = whole.table, whole.labels, whole.regions, whole.medians
             if keep_maps:
                 result.section_labels, result.section_regions = nuclei, regions
                 nuclei, regions = nuclei[window], regions[window]
@@ -1339,14 +1604,20 @@ def analyse_sample(
             if nuclei.shape != inside.shape:
                 raise ValueError(f"the segmentation came back {nuclei.shape}, expected {inside.shape}")
             regions = sg.expand_labels(nuclei, voxel, options.expand_um) if options.expand_um > 0 else nuclei
+            say("the local median of each channel")
+            medians = local_medians(specs, names, voxel[1])
             if options.threshold_from == FROM_SAMPLE:
-                section = section_cells(specs, names, nuclear, voxel, options, segment, say)
+                section = segment_section(specs, names, nuclear, voxel, options, segment, say, medians=medians).table
         if options.threshold_from == FROM_SAMPLE:
             sample_values = {name: section[f"{name} {options.statistic}"].to_numpy(dtype=np.float64)
                              for name in names}
         say("measuring the cells")
+        filtered = {name: images[name].astype(np.float32) - median_at(medians[name], window, shape_yx)
+                    for name in names}
         table, counts = measure_cells(nuclei, regions, images, voxel, inside, options,
-                                      nuclear=names[nuclear], origin=(y0, x0), sample_values=sample_values)
+                                      nuclear=names[nuclear], origin=(y0, x0), sample_values=sample_values,
+                                      filtered=filtered)
+        del filtered
         overviews: list[Any] = [seen_overview] if seen_overview is not None else []
 
         def overview_now():
@@ -1373,6 +1644,14 @@ def analyse_sample(
                     logger.exception("could not place the section's cells of %s", target.name)
                     result.warnings.append(f"no distances for the section's cells: {exc}")
             place_positives(result.section_cells, counts)
+            if options.shapes and result.section_regions is not None:
+                say("outlining the positive cells in their own stain")
+                try:
+                    result.section_shapes = section_shapes(specs, names, nuclear, voxel, result.section_regions,
+                                                           result.section_cells, counts)
+                except Exception as exc:
+                    logger.exception("could not outline the positive cells of %s", target.name)
+                    result.warnings.append(f"no shapes of the positive cells: {exc}")
             if options.cells_dir is not None and len(result.section_cells):
                 say("writing the section's cells")
                 result.cells_file = write_section(result, Path(options.cells_dir))
@@ -1380,6 +1659,7 @@ def analyse_sample(
                 say("writing the section's label maps")
                 try:
                     result.nuclei_file, result.grown_file = write_labels(result, Path(options.labels_dir))
+                    result.shape_files = write_shapes(result, Path(options.labels_dir))
                 except Exception as exc:
                     logger.exception("could not write the label maps of %s", target.name)
                     result.warnings.append(f"no label maps written: {exc}")
@@ -1414,6 +1694,8 @@ def analyse_sample(
             except Exception as exc:
                 logger.exception("could not draw the section of %s", target.name)
                 result.warnings.append(f"no section picture: {exc}")
+        if not options.full_labels:
+            result.section_shapes = {}  # drawn and written; not kept for a batch
 
         if options.save_cells and result.n_cells:
             say("storing the cells")
@@ -1563,6 +1845,7 @@ def write_sample_info(result: JunctionCounts, counts: Sequence[ChannelCount], op
         "channels": [count.channel for count in counts],
         "nuclear": next((count.channel for count in counts if count.reference), ""),
         "background": {count.channel: [float(count.background), float(count.background_sd)] for count in counts},
+        "compared_background": {count.channel: [float(v) for v in count.compared_background] for count in counts},
         "band_source": result.band_source, "region_by": result.region_by, "status": result.status,
         "flags": result.flags, "finder_status": result.finder_status, "finder_flags": result.finder_flags,
         "second_search": result.second_search, "junction_length_um": float(result.junction_length_um),
@@ -1788,6 +2071,11 @@ def rescore(
         table[IN_REGION_COLUMN] = band[rows, cols]
         if options.distances and line is not None:
             place_cells(table, band, line, voxel, None)  # the edge distance is the saved one
+        missing = [channel for channel in info["channels"] if f"{channel} {FILTERED}" not in table]
+        grown_file = sample.file("grown_file")
+        if missing and grown_file is not None and grown_file.is_file() and result.path.is_file():
+            say("measuring the saved cells less their local median (saved before it was measured)")
+            add_filtered(table, result.path, read_labels(grown_file), missing, voxel)
         region = table[table[IN_REGION_COLUMN].to_numpy(dtype=bool)]
 
         # -- thresholds, as a segmenting run sets them -------------------------------
@@ -1798,6 +2086,11 @@ def rescore(
             count = ChannelCount(channel=channel, n_cells=int(len(region)), statistic=options.statistic,
                                  background=float(centre), background_sd=float(spread),
                                  reference=channel == info.get("nuclear"))
+            if options.statistic == FILTERED:
+                compared = info.get("compared_background", {}).get(channel) or [float("nan"), float("nan")]
+                count.compared_background = (float(compared[0]), float(compared[1]))
+            else:
+                count.compared_background = (count.background, count.background_sd)
             column = f"{channel} {options.statistic}"
             if column not in table or (options.method == METHOD_RING and f"{channel} ring mean" not in table):
                 raise ValueError(f"the saved cells have no “{column if column not in table else channel + ' ring mean'}” "
@@ -1809,8 +2102,7 @@ def rescore(
             if count.reference:
                 count.method = "reference stain — not scored"
             else:
-                count.threshold, count.method = threshold_for(channel, population, (count.background, count.background_sd),
-                                                              options)
+                count.threshold, count.method = threshold_for(channel, population, count.compared_background, options)
             counts.append(count)
         say(f"scoring the section's {len(table)} cells")
         section = score_section(table, counts, band, voxel, replace(options, keep_section=True),
@@ -1858,12 +2150,25 @@ def rescore(
             saved["complete"] = bool(info.get("complete"))
             (Path(options.cells_dir) / f"{result.name}{INFO_SUFFIX}").write_text(json.dumps(saved, indent=1),
                                                                                 encoding="utf-8")
-        if (options.qc_dir is not None or options.pictures_dir is not None) and result.path.is_file():
+        drawn = options.qc_dir is not None or options.pictures_dir is not None
+        outline = options.shapes and options.labels_dir is not None and result.grown_file is not None
+        if (drawn or outline) and result.path.is_file():
             say("drawing the pictures")
             was_open = loaders.is_open(result.path)
             specs = loaders.load_path(result.path)
             try:
                 names = [str(spec.channel_name or spec.name) for spec in specs]
+                if outline:
+                    say("outlining the positive cells in their own stain")
+                    nuclear = (names.index(info["nuclear"]) if info.get("nuclear") in names
+                               else jn.pick_channel(names, "", jn.NUCLEAR_HINTS))
+                    try:
+                        result.section_shapes = section_shapes(specs, names, nuclear, voxel,
+                                                               read_labels(result.grown_file), section, counts)
+                        result.shape_files = write_shapes(result, Path(options.labels_dir))
+                    except Exception as exc:
+                        logger.exception("could not outline the positive cells of %s", sample.name)
+                        result.warnings.append(f"no shapes of the positive cells: {exc}")
                 ys, xs = np.flatnonzero(band.any(axis=1)), np.flatnonzero(band.any(axis=0))
                 margin = int(round(CROP_MARGIN_UM / max(voxel)))
                 y0, y1 = max(int(ys[0]) - margin, 0), min(int(ys[-1]) + 1 + margin, shape[0])
@@ -1877,6 +2182,8 @@ def rescore(
                     folder.mkdir(parents=True, exist_ok=True)
                     result.section_picture = folder / f"{result.name}.png"
                     section_picture(result, specs, band, line).save(result.section_picture)
+                if not options.full_labels:
+                    result.section_shapes = {}
             finally:
                 if not was_open:
                     loaders.release(result.path)
@@ -2138,6 +2445,8 @@ def settings_dataframe(options: CountOptions):
         ("Ring (µm out from the nucleus)", f"{RING_UM[0]:g}–{RING_UM[1]:g}"),
         ("Threshold from", options.threshold_from if options.method in CELL_RULES else "not from cells"),
         ("Compared per cell", options.statistic),
+        ("Local median taken away (µm)", MEDIAN_UM if options.statistic == FILTERED else "not used"),
+        ("Positive cells outlined in their stain", f"yes, {SHAPE_K:g} SDs over the tissue" if options.shapes else "no"),
         ("Nuclei grown by (µm)", options.expand_um),
         ("Junction found when none stored", options.find_junction),
         ("Whole section segmented", "yes, every cell kept" if options.whole_section and options.keep_section
@@ -2201,9 +2510,13 @@ def write_readme(folder: str | Path, results: Sequence[JunctionCounts], options:
         f"{LABELS_FOLDER}/<sample>{NUCLEI_SUFFIX}, <sample>{GROWN_SUFFIX}",
         "    The whole section's label maps: every cell segmented, and the same grown by the",
         "    expansion it was measured over. Labels match the 'Label' column of the cells CSV.",
+        f"{LABELS_FOLDER}/<sample> <channel>{SHAPE_SUFFIX}",
+        "    Each channel's positive cells in their own shape (the stain's pixels clearly over",
+        "    the tissue round them, joined to the cell they touch), under the cells' labels.",
         f"{POSITIVE_FOLDER}/<sample>.png",
         "    The whole section: the region outlined in white, the junction line in yellow,",
-        "    a ring round every positive cell (one colour per channel, as in the caption).",
+        "    a ring round every positive cell and its shape outlined (one colour per channel,",
+        "    as in the caption).",
         "",
         "Settings:",
         *(f"    {row.Setting}: {row.Value}" for row in settings_dataframe(options).itertuples()),

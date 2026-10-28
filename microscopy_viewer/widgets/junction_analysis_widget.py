@@ -41,6 +41,7 @@ from .. import junction_review as jr
 from ..exports import WORKBOOK_FILTER, default_stem
 from ..utils import format_number, get_logger
 from .sample_files import source_of, tie_to_sample
+from .session_state import NAME_PREFIX
 
 logger = get_logger("junction_analysis_widget")
 
@@ -65,13 +66,16 @@ RESULTS_TIP = (
     "• counts.xlsx — counts and metrics per sample and channel, combinations, the region's cells, settings;\n"
     "• cells/<sample>.csv — every cell of the whole section;\n"
     "• region/ok, check, fail/ — a picture of each counted region, positive cells ringed;\n"
-    "• positive cells/ — each whole section, its positive cells ringed;\n"
-    "• labels/ — each whole section's label maps: every cell, and the same grown;\n"
+    "• positive cells/ — each whole section, its positive cells ringed and outlined in their stain;\n"
+    "• labels/ — each whole section's label maps: every cell, the same grown, each channel's "
+    "positive cells in their own shape;\n"
     "• README.txt — what is where, and how the run was made."
 )
 #: Marks the layers this panel drew, whatever channel they are named after.
 DRAWN_KEY = "argus_junction_cells"
 POSITIVE_SUFFIX = "+ cells"
+#: Suffix of the layer of each channel's positive cells in their own shape.
+SHAPE_SUFFIX = " positive shape"
 
 #: Columns of the panel's table; the workbook has these and the rest.
 TABLE_COLUMNS = (
@@ -320,12 +324,17 @@ class JunctionAnalysisWidget(QWidget):
         self._k = QDoubleSpinBox()
         self._k.setRange(0.5, 20.0)
         self._k.setSingleStep(0.5)
-        self._k.setValue(3.0)
+        self._k.setValue(ja.K_SD)
+        # Named for the default of 28 Oct 2026 (k 7, median filter): a session saved
+        # under the old default (k 3, plain mean) does not bring it back.
+        self._k.setObjectName(NAME_PREFIX + "positivity.k (median filter default)")
         self._k.setSuffix(" SD")
         self._k.setToolTip(
             "How far above the centre a cell has to be. SDs are robust (from the MAD), so "
-            "a few bright cells do not raise the bar on themselves. 3 is the usual "
-            "starting point; raise it if dim cells are being called positive."
+            "a few bright cells do not raise the bar on themselves. 7, on the mean less the "
+            "local median, came closest to the hand counts (F1 0.38, Spearman 0.79 per mm of "
+            "junction); 3 calls about four times as many cells, most of them in haze. "
+            "Raise it if dim cells are called positive, lower it if clear ones are missed."
         )
         form.addRow("k", self._k)
 
@@ -351,10 +360,16 @@ class JunctionAnalysisWidget(QWidget):
 
         self._statistic = QComboBox()
         self._statistic.addItems(list(ja.STATISTICS))
+        self._statistic.setObjectName(NAME_PREFIX + "positivity.statistic (median filter default)")
         self._statistic.setToolTip(
-            "Which figure of each cell is compared with the threshold. The mean is the "
-            "steady choice; P95 or max pick up a label that fills only part of the cell, "
-            "at the price of being noisier."
+            "Which figure of each cell is compared with the threshold.\n"
+            f"• {ja.FILTERED} (the default): the cell's mean less the median of the "
+            f"tissue {ja.MEDIAN_UM:g} µm round it, so a cell in a bright haze or a dim corner "
+            "is set against its own surroundings. Best against the hand counts.\n"
+            "• mean: the cell's mean as it is; a haze over part of the section raises "
+            "every cell in it.\n"
+            "• P95 or max pick up a label that fills only part of the cell, at the price "
+            "of being noisier."
         )
         form.addRow("Compare the cell's", self._statistic)
 
@@ -396,6 +411,18 @@ class JunctionAnalysisWidget(QWidget):
         )
         self._region_only.toggled.connect(lambda on: self._positives_only.setEnabled(not on))
         form.addRow("", self._positives_only)
+        self._shapes = QCheckBox("Outline the positive cells in their own stain")
+        self._shapes.setChecked(True)
+        self._shapes.setToolTip(
+            "Each positive cell is also drawn in its real shape: the pixels of its channel "
+            f"standing {ja.SHAPE_K:g} SDs over the tissue round them, joined to the cell they "
+            "touch — cell bodies off the nucleus and processes, which the nucleus does not show. "
+            "A layer per channel (“<channel> positive shape”), an outline in the section "
+            "picture, and “labels/<sample> <channel> shape.tif”. Drawing only: which cells "
+            "are positive does not change. A few seconds a channel per sample."
+        )
+        self._region_only.toggled.connect(lambda on: self._shapes.setEnabled(not on))
+        form.addRow("", self._shapes)
 
         self._reuse = QCheckBox("Skip samples already segmented: re-score them from their saved cells")
         self._reuse.setChecked(True)
@@ -567,6 +594,7 @@ class JunctionAnalysisWidget(QWidget):
             find_junction=self._find.isChecked(),
             whole_section=not self._region_only.isChecked(),
             keep_section=not self._positives_only.isChecked(),
+            shapes=self._shapes.isChecked(),
             save_cells=self._save_cells.isChecked(),
             settings=settings,
             junction=junction,
@@ -952,8 +980,11 @@ class JunctionAnalysisWidget(QWidget):
                 import pandas as pd
 
                 table = pd.read_csv(result.cells_file)
+            shapes = {channel: ja.read_labels(path) for channel, path in result.shape_files.items()
+                      if Path(path).is_file()}
             result = replace(result, section_labels=ja.read_labels(nuclei_file),
-                             section_regions=ja.read_labels(grown_file), section_cells=table)
+                             section_regions=ja.read_labels(grown_file), section_cells=table,
+                             section_shapes=shapes or result.section_shapes)
         if result.section_labels is not None or result.labels is not None:
             self._draw(result, str(image.name))
             self._log(f"{result.name}: its cells drawn.")
@@ -1074,6 +1105,12 @@ class JunctionAnalysisWidget(QWidget):
                     layer = put(f"{count.channel}{POSITIVE_SUFFIX}", mask, opacity=1.0, **whole)
                     layer.contour = POSITIVE_CONTOUR
                     self._tint(layer, POSITIVE_COLOR)
+                for count in scored:
+                    shapes = result.section_shapes.get(count.channel)
+                    if shapes is not None:
+                        # The cell as its stain draws it, one colour per cell, outlined.
+                        shape = put(f"{count.channel}{SHAPE_SUFFIX}", shapes, opacity=0.9, **whole)
+                        shape.contour = 1
                 if result.labels is not None:
                     region = put(CELLS_LAYER, result.labels, opacity=0.9, visible=False, **common)
                     region.contour = 1

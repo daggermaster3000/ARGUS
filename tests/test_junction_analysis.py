@@ -23,6 +23,9 @@ from microscopy_viewer import junction_analysis as ja  # noqa: E402
 
 _failures: list[str] = []
 
+#: The rule before the median filter became the default: the plain mean, median + 3 SD.
+RAW_MEAN = ja.CountOptions(statistic="mean", k=3.0)
+
 
 def check(condition: bool, message: str) -> None:
     if condition:
@@ -103,7 +106,8 @@ def test_cells_are_scored_per_channel() -> None:
     band = np.zeros(labels.shape, dtype=bool)
     band[:, :90] = True  # the left half: columns of cells 1-6
     inside = sorted(int(n) for n in np.unique(labels[:, :84]) if n)
-    table, counts = ja.measure_cells(labels, labels, images, (1.0, 1.0), band, nuclear="AF405", origin=(100, 200))
+    table, counts = ja.measure_cells(labels, labels, images, (1.0, 1.0), band, RAW_MEAN, nuclear="AF405",
+                                     origin=(100, 200))
 
     check(sorted(table["Label"]) == inside, f"only cells whose centroid is in the region are counted ({len(table)})")
     by_channel = {count.channel: count for count in counts}
@@ -178,8 +182,8 @@ def test_growing_the_nuclei_changes_what_is_measured_not_the_size() -> None:
     images = {"AF488": gfp, "AF405": images["AF405"]}
     band = np.ones(labels.shape, dtype=bool)
 
-    nucleus_only, _ = ja.measure_cells(labels, labels, images, (1.0, 1.0), band, nuclear="AF405")
-    with_ring, _ = ja.measure_cells(labels, grown, images, (1.0, 1.0), band, nuclear="AF405")
+    nucleus_only, _ = ja.measure_cells(labels, labels, images, (1.0, 1.0), band, RAW_MEAN, nuclear="AF405")
+    with_ring, _ = ja.measure_cells(labels, grown, images, (1.0, 1.0), band, RAW_MEAN, nuclear="AF405")
     check(int(nucleus_only["AF488 positive"].sum()) == 0, "a cytoplasmic label is missed under the nucleus alone")
     check(sorted(with_ring.loc[with_ring["AF488 positive"], "Label"]) == green_cells, "and found when the nucleus is grown")
     check(with_ring["Nucleus area (µm²)"].eq(25.0).all(), "while the size reported is still the nucleus")
@@ -429,6 +433,18 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         check(files is not None and np.array_equal(ja.read_labels(files[0]), drawn.section_labels)
               and np.array_equal(ja.read_labels(files[1]), drawn.section_regions),
               "and read back exactly")
+        scored = [c.channel for c in drawn.channels if not c.reference]
+        check(sorted(drawn.shape_files) == sorted(scored)
+              and all(path == run_dir / ja.LABELS_FOLDER / f"assembloid_s0 {channel}{ja.SHAPE_SUFFIX}"
+                      and path.is_file() for channel, path in drawn.shape_files.items()),
+              f"each scored channel's positive cells are written in their own shape ({sorted(drawn.shape_files)})")
+        green_shapes = drawn.section_shapes["AF488"]
+        green_positive = set(drawn.section_cells.loc[drawn.section_cells["AF488 positive"], "Label"].astype(int))
+        check(set(np.unique(green_shapes[green_shapes > 0]).astype(int)) == green_positive
+              and np.array_equal(ja.read_labels(drawn.shape_files["AF488"]), green_shapes),
+              f"one shape per positive cell, under its label ({len(green_positive)})")
+        check(np.all(green_shapes[np.isin(drawn.section_regions, list(green_positive))] > 0),
+              "a positive cell's shape holds at least its grown region")
         lean = ja.analyse_sample(paths[0], ja.results_options(
             ja.CountOptions(expand_um=0.0, find_junction=False), ja.run_folder(root / "elsewhere", "lean", when=60.0)),
             segment=segment_all)
@@ -459,7 +475,9 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         check((again_dir / ja.CELLS_FOLDER / "assembloid_s0.csv").is_file()
               and (again_dir / ja.REGION_FOLDER / "ok" / "assembloid_s0.png").is_file()
               and (again_dir / ja.POSITIVE_FOLDER / "assembloid_s0.png").is_file()
-              and ja.labels_files(again) is not None, "and its run folder holds everything a segmenting run's does")
+              and ja.labels_files(again) is not None and sorted(again.shape_files) == sorted(drawn.shape_files)
+              and all(path.is_file() for path in again.shape_files.values()),
+              "and its run folder holds everything a segmenting run's does, the shapes too")
         ring = ja.rescore(saved["assembloid_s0"], ja.CountOptions(expand_um=0.0, method=ja.METHOD_RING))
         green_ring = next(c for c in ring.channels if c.channel == "AF488")
         check(ring.ok and green_ring.method == ja.METHOD_RING and green_ring.threshold == ja.RING_RATIO,
@@ -476,6 +494,13 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         old_run = old_base / ja.RESULTS_FOLDER / run_dir.name
         shutil.copytree(run_dir, old_run)
         (old_run / ja.CELLS_FOLDER / "assembloid_s0.json").unlink()
+        import pandas as pd
+
+        # And from before the median filter: its cells lack the figure the default compares.
+        old_cells = old_run / ja.CELLS_FOLDER / "assembloid_s0.csv"
+        frame = pd.read_csv(old_cells)
+        frame.drop(columns=[c for c in frame.columns if c.endswith(ja.FILTERED)]).to_csv(
+            old_cells, index=False, encoding="utf-8-sig")
         for companion in paths[0].parent.glob(f"{paths[0].name}*"):  # the image and its store of regions
             shutil.copyfile(companion, old_base / companion.name)
         older = ja.segmented_samples(old_base)
@@ -485,7 +510,8 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
         from_older = ja.rescore(older["assembloid_s0"], same)
         check(from_older.ok and from_older.n_cells == drawn.n_cells
               and next(c for c in from_older.channels if c.channel == "AF488").n_positive == green_before.n_positive,
-              f"and re-scored like any other ({from_older.error or from_older.n_cells})")
+              f"and re-scored like any other, the median filter measured from its label map "
+              f"({from_older.error or from_older.n_cells})")
         readme = ja.write_readme(run_dir, [drawn], ja.CountOptions())
         check(readme.is_file() and ja.POSITIVE_FOLDER in readme.read_text(encoding="utf-8"),
               "and a README says what is where")
@@ -640,8 +666,72 @@ def test_ring_contrast() -> None:
     check(abs(contrast[0] - 5.0) < 1e-9 and np.isnan(contrast[1]), "contrast over that background")
 
 
+def test_the_local_median() -> None:
+    print("each cell against the tissue it sits in: the median filter")
+    from scipy import ndimage
+
+    defaults = ja.CountOptions()
+    check(defaults.statistic == ja.FILTERED and defaults.k == ja.K_SD == 7.0,
+          "by default a cell is called on its mean less the local median, over median + 7 SD")
+    coarse = np.random.default_rng(3).normal(100.0, 30.0, (10, 12)).astype(np.float32)
+    shape = (77, 93)
+    zoomed = ndimage.zoom(coarse, (shape[0] / 10, shape[1] / 12), order=1)
+    tile = (slice(20, 61), slice(35, 93))
+    check(np.allclose(ja.median_at(coarse, (slice(0, 77), slice(0, 93)), shape), zoomed, atol=1e-3)
+          and np.allclose(ja.median_at(coarse, tile, shape), zoomed[tile], atol=1e-3),
+          "the local median is scaled up as over the whole image, a tile getting its own piece of it")
+
+    # Two grids of cells, the right one under a haze brighter than any cell on the left.
+    left, _images, green_left, _red = _field(1)
+    labels = np.zeros((120, 420), np.int32)
+    labels[:, :180] = left
+    labels[:, 240:] = np.where(left > 0, left + int(left.max()), 0)
+    green = [*green_left, *(n + int(left.max()) for n in green_left)]
+    gfp = 200.0 + np.random.default_rng(4).normal(0, 10, labels.shape)
+    gfp[np.isin(labels, green)] += 900.0
+    gfp[:, 210:] += 1500.0
+    images = {"AF488": gfp, "AF405": np.where(labels > 0, 3000.0, 300.0)}
+    band = np.ones(labels.shape, bool)
+    table, _counts = ja.measure_cells(labels, labels, images, (1.0, 1.0), band, nuclear="AF405")
+    called = sorted(int(n) for n in table.loc[table["AF488 positive"], "Label"])
+    check(called == sorted(green), f"the positive cells are found under the haze and beside it ({len(called)} of {len(green)})")
+    raw, _ = ja.measure_cells(labels, labels, images, (1.0, 1.0), band, ja.CountOptions(statistic="mean"),
+                              nuclear="AF405")
+    check(sorted(int(n) for n in raw.loc[raw["AF488 positive"], "Label"]) != sorted(green),
+          "on the plain mean the haze decides instead")
+
+
+def test_the_shape_of_positive_cells() -> None:
+    print("positive cells in their own shape")
+    regions = np.zeros((40, 60), np.int32)
+    regions[10:15, 10:15] = 1
+    regions[10:15, 40:45] = 2
+    regions[30:35, 10:15] = 3
+    mask = np.zeros(regions.shape, bool)
+    mask[12, 15:40] = True        # a process running from cell 1 to cell 2
+    mask[28:37, 8:17] = True      # round cell 3, which is not positive
+    mask[2:5, 50:55] = True       # touching no cell
+    shapes = ja.positive_shapes(mask, regions, [1, 2])
+    check(shapes[12, 20] == 1 and shapes[12, 36] == 2, "a process shared by two cells goes to the nearer, pixel by pixel")
+    check(np.all(shapes[regions == 1] == 1) and np.all(shapes[regions == 2] == 2),
+          "each positive cell's shape holds its own region")
+    check(not shapes[28:37, 8:17].any() and not shapes[2:5, 50:55].any(),
+          "what touches no positive cell is left out")
+
+    rng = np.random.default_rng(5)
+    yy, xx = np.mgrid[0:200, 0:200]
+    plane = 100.0 + 0.5 * xx + rng.normal(0, 5, (200, 200))
+    plane[100:102, 40:160] += 200.0  # a process 1 µm wide, 60 µm long, at 0.5 µm a pixel
+    found = ja.signal_mask(plane, 0.5)
+    check(found[100:102, 45:155].mean() > 0.9, f"a thin process is found on a sloping background "
+                                                f"({found[100:102, 45:155].mean():.2f})")
+    check(found[:80].mean() < 0.01 and found[130:].mean() < 0.01, "and nothing much where there is none")
+
+
 def main() -> int:
     for test in (
+        test_the_local_median,
+        test_the_shape_of_positive_cells,
         test_ring_contrast,
         test_progress_and_the_time_left,
         test_statistics_per_label,

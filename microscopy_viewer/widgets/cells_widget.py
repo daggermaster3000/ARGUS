@@ -229,6 +229,7 @@ class CellsWidget(QWidget):
             ("", ja._reuse),
             ("", ja._region_only),
             ("", ja._positives_only),
+            ("", ja._shapes),
             ("", ja._save_cells),
         ))
         self._settings = Collapsible("Settings", settings)
