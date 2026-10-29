@@ -234,6 +234,89 @@ def run_one(name: str, path: Path, nuclei: np.ndarray, table, folder: Path, extr
     return summary
 
 
+#: How deep a dip in the stain must be, in µm, to part two bodies (h of the h-maxima), tried in turn.
+BODY_H_UM = (0.5, 1.0, 2.0, 3.0)
+
+
+def stain_depth(fg: np.ndarray, voxel: float) -> np.ndarray:
+    """How deep each pixel lies in the AF488 foreground, in µm: its distance transform, nuclei not added.
+
+    The territories were grown with the nuclei in the mask; for telling one body
+    from two only the stain counts — in packed tissue the nuclei alone fill the
+    mask and every border would look thick.
+    """
+    from scipy import ndimage
+
+    return (ndimage.distance_transform_edt(fg) * voxel).astype(np.float32)
+
+
+def bodies(fg: np.ndarray, depth: np.ndarray, territory: np.ndarray, hs=BODY_H_UM):
+    """Which labelled body each cell's territory lies in, for each h of :data:`BODY_H_UM`.
+
+    The classic distance-transform watershed, on the stain alone: in each
+    connected piece of foreground, the maxima of :func:`stain_depth` at least *h*
+    µm higher than the dip between them are the bodies, and the piece is split
+    between them by a watershed. A cell belongs to the body holding most of its
+    territory. Cells that share a body are one labelled body cut in several by
+    the nuclei. Columns ``piece`` (the connected piece: the coarsest grouping)
+    and ``body h=<h>``; a cell outside the foreground, or alone in its piece,
+    gets an id of its own (negative).
+    """
+    import pandas as pd
+    from scipy import ndimage
+    from skimage.morphology import h_maxima
+    from skimage.segmentation import watershed
+
+    pieces, _n = ndimage.label(fg)
+    inside = (pieces > 0) & (territory > 0)
+    pairs = pd.DataFrame({"t": territory[inside], "p": pieces[inside]}).value_counts().reset_index(name="n")
+    shared = pairs.groupby("p")["t"].nunique()
+    shared = shared[shared >= 2].index.to_numpy()
+    boxes = ndimage.find_objects(pieces)
+    records = {h: [] for h in hs}
+    for piece in shared:
+        box = boxes[int(piece) - 1]
+        here = pieces[box] == piece
+        d = np.where(here, depth[box], 0)
+        ter = territory[box]
+        sel = here & (ter > 0)
+        for h in hs:
+            markers, _m = ndimage.label(h_maxima(d, h))
+            basins = watershed(-d, markers, mask=here)
+            ok = sel & (basins > 0)
+            records[h].append(pd.DataFrame({"t": ter[ok], "b": int(piece) * 100_000 + basins[ok].astype(np.int64)}))
+    labels = np.unique(territory[territory > 0]).astype(np.int64)
+    out = pd.DataFrame({"Label": labels})
+    best_piece = pairs.sort_values("n", ascending=False).drop_duplicates("t").set_index("t")["p"]
+    out["piece"] = out["Label"].map(best_piece).where(lambda s: s.isin(shared), -out["Label"]).astype(np.int64)
+    for h in hs:
+        if records[h]:
+            counts = pd.concat(records[h]).value_counts().reset_index(name="n")
+            best = counts.sort_values("n", ascending=False).drop_duplicates("t").set_index("t")["b"]
+        else:
+            best = pd.Series(dtype=np.int64)
+        out[f"body h={h:g}"] = out["Label"].map(best).fillna(-out["Label"]).astype(np.int64)
+    return out
+
+
+def run_bodies(name: str, path: str, folder: str) -> str:
+    """The labelled bodies of one sample's cells → ``bodies.parquet`` beside its cells."""
+    import tifffile
+
+    below_normal_priority()
+    started = time.perf_counter()
+    folder = Path(folder)
+    af488, nuclear, voxel, _channel = read_planes(Path(path))
+    fg, _info = foreground(median_filtered(af488, voxel), nuclear, voxel)
+    del af488, nuclear
+    depth = stain_depth(fg, voxel)
+    territory = tifffile.imread(folder / "territories.tif").astype(np.int32)
+    table = bodies(fg, depth, territory)
+    table.to_parquet(folder / "bodies.parquet")
+    merged = int((table["body h=1"] > 0).sum())
+    return f"{name}: {merged} of {len(table)} cells share a piece of stain with another, {time.perf_counter() - started:.0f} s"
+
+
 def done(folder: Path) -> bool:
     target = folder / "summary.json"
     try:
@@ -306,6 +389,22 @@ def main(argv: list[str]) -> int:
 
     import tifffile
 
+    if argv and argv[0] == "bodies":
+        # The labelled bodies of every sample done, for merging cells cut in several.
+        saved = ja.segmented_samples(cv.DATA)
+        jobs = [(n, str(saved[n].path), str(OUT / n))
+                for n in scans() if done(OUT / n) and not (OUT / n / "bodies.parquet").is_file()]
+        jobs += [(n, str(p), str(OUT_CLICKED / n))
+                 for n, p in cv.clicked_samples()
+                 if done(OUT_CLICKED / n) and not (OUT_CLICKED / n / "bodies.parquet").is_file()]
+        print(f"{len(jobs)} sample(s) to find the bodies of", flush=True)
+        with ProcessPoolExecutor(max_workers=WORKERS) as pool:
+            for future in as_completed([pool.submit(run_bodies, *job) for job in jobs]):
+                try:
+                    print(future.result(), flush=True)
+                except Exception as exc:
+                    print(f"FAILED {exc!r}", flush=True)
+        return 0
     todo = [name for name in scans() if not done(OUT / name)]
     if argv:
         todo = todo[: int(argv[0])]
