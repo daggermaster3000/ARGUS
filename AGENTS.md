@@ -175,6 +175,8 @@ after it move up, with every reference to their file names updated.
   `09_manual_vs_auto`). The count notebooks all load through `count_common.py` —
   put shared code there, not in a notebook. Their scripts (unnumbered) sit beside
   them; the kernel's cwd is the notebook's folder.
+- `junction_graph/` (`01_nuclei_graph_cut`): the junction from the segmented nuclei
+  instead of the overview's pixels; scored as `02_junction_seeding`.
 - `dataset/` (`01_whole_dataset`, `02_positivity_dataset`): the whole dataset's run.
 - Edit notebooks with a small script (load JSON → append/replace cells → dump with
   `ensure_ascii=False, indent=1`) or NotebookEdit; back up first, and look up cell

@@ -1,6 +1,6 @@
 # Notebooks
 
-Three kinds, in three folders. Within each, the notebooks are numbered in the
+Four kinds, in four folders. Within each, the notebooks are numbered in the
 order of the pipeline, so `01_…` comes first.
 
 ## `explainers/` — how the method works
@@ -50,6 +50,16 @@ Scripts beside them, run from the repository root:
 | `junction_browser.py` + `.html` | An interactive page of all hand-drawn sections: error against any figure (including organoid polarity), each section's picture with the hand-drawn and found lines on hover → `junction_eval/browser/`. |
 | `watershed_cells.py` | Each cell's territory from a nuclei-seeded watershed on the median-filtered AF488, its means and ring contrast, on the 39 scans (nuclei from their cells-analysis run) and the 12 clicked samples (segmented here, GPU) → `junction_eval/watershed/`, `watershed_clicked/`; with `bodies`, the labelled body each cell lies in → `bodies.parquet`. |
 | `junction_downstream.py` | Junction analysis counts in each annotator's band and the finder's. |
+
+## `junction_graph/` — the junction from the nuclei, not the pixels
+
+Ideas for the junction finder that work on the segmented nuclei rather than the
+5 µm overview. Scored as `validation/02_junction_seeding` (the 138 hand-drawn
+sections, same split), so the numbers compare directly.
+
+| Notebook | Question |
+|---|---|
+| `01_nuclei_graph_cut.ipynb` | The minimum cut made on a graph of the nuclei (Gabriel or Delaunay), each edge as dear to cut as its length, its nuclei's neighbours, the density round it or the change of the cells' own label make it, between the pixel finder's seeds: closer to the hand-drawn line than the pixel cut? Script `nuclei_graph.py`, cache `junction_eval/graph/`. |
 
 ## `dataset/` — the whole dataset
 
