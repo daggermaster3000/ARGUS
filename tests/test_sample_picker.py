@@ -97,6 +97,50 @@ def test_saved_list_has_path_groups_and_seed(tmp_path):
     assert out[sp.GROUPS_COLUMN].str.contains("Ripped: yes").all()
 
 
+def _file_list(n=60):
+    # As Image_File_List.csv: its own name for the file column, numbers as numbers.
+    return pd.DataFrame({
+        "File_Name": [f"exp_s{i}.ome.tiff" for i in range(n)],
+        "Genotype": ["WT3" if i % 2 else "GD1" for i in range(n)],
+        "Experiment": [8 + i % 3 for i in range(n)],
+        "Slide": [1 + i // 20 for i in range(n)],
+    })
+
+
+def test_file_list_adds_genotype_by_file_name():
+    table = _table(10).drop(columns=["file"])          # matched on object_id, the stem
+    files = _file_list(8).iloc[::-1]                   # other order, two files missing
+    joined, found = sp.join_file_list(table, files)
+    assert found == 8
+    assert list(joined.columns[: len(table.columns)]) == list(table.columns)
+    assert joined.at[3, "Genotype"] == "WT3" and joined.at[4, "Genotype"] == "GD1"
+    assert joined.at[3, "Experiment"] == 8 and sp._text(joined.at[4, "Experiment"]) == "9"
+    assert sp._text(joined.at[9, "Genotype"]) == sp.MISSING     # not in the list
+    assert {"Genotype", "Experiment", "Slide"} <= set(sp.category_columns(joined))
+    # Choosing by genotype works as for any column.
+    eligible = sp.keep_mask(joined, {"Genotype": ["WT3"]})
+    assert list(joined.index[eligible]) == [1, 3, 5, 7]
+    picks = sp.draw(joined, sp.keep_mask(joined, {"Genotype": ["WT3", "GD1"]}),
+                    [("Genotype", "WT3"), ("Genotype", "GD1")], 2, seed=0)
+    assert picks.filled == {"Genotype: WT3": (2, 4), "Genotype: GD1": (2, 4)}
+
+
+def test_file_list_fills_only_the_blanks_of_a_column_the_table_has():
+    table = _table(4)
+    table["genotype"] = ["KO", np.nan, "KO", np.nan]
+    joined, found = sp.join_file_list(table, _file_list(4))
+    assert found == 4
+    assert "Genotype" not in joined.columns
+    assert list(joined["genotype"]) == ["KO", "WT3", "KO", "WT3"]
+
+
+def test_file_list_matching_nothing_changes_nothing():
+    table = _table(4)
+    joined, found = sp.join_file_list(table, _file_list(4).assign(File_Name=lambda f: "other_" + f["File_Name"]))
+    assert found == 0
+    assert list(joined.columns) == list(table.columns)
+
+
 def test_reads_csv_and_excel(tmp_path):
     table = _table(4)
     table.to_csv(tmp_path / "t.csv", index=False)

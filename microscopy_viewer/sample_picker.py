@@ -22,6 +22,11 @@ file names (``file``), else by any column whose values are file names or
 stems. Rows matching no file are left out of the draw — they could not be
 opened — and counted.
 
+A second table, a **file list** with what each file is (genotype, experiment,
+slide — ``Image_File_List.csv``), can be joined on by file name
+(:func:`join_file_list`): its columns become categories like any other, so the
+picks can be kept or drawn per genotype.
+
 Pure pandas; the window is :mod:`microscopy_viewer.widgets.sample_picker_window`.
 """
 
@@ -122,6 +127,54 @@ def match_paths(table: pd.DataFrame, paths: Iterable) -> pd.Series:
     if best is None:
         return pd.Series([None] * len(table), index=table.index, dtype=object)
     return best.map(lambda k: by_key.get(k)).astype(object)
+
+
+def _file_keys(values: pd.Series) -> pd.Series:
+    """Each value as a file key (``""`` where it is not text)."""
+    return values.map(lambda v: _key(v) if isinstance(v, str) and v.strip() else "")
+
+
+def join_file_list(table: pd.DataFrame, files: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """*table* with the columns of a file list added to its rows, matched by file name.
+
+    *files* is a list of the experiment's files with what each one is — genotype,
+    experiment, slide (``Image_File_List.csv``). The pair of columns, one in each
+    table, whose file names agree on the most rows is the key. A column *table*
+    already has (compared without case) keeps its values and only has its blanks
+    filled. Returns the joined table and how many of its rows the file list has.
+    """
+    best, best_hits = None, 0
+    file_keys = {c: _file_keys(files[c]) for c in files.columns}
+    # Only a column naming each file once can be the key: not a category such as "yes".
+    file_keys = {c: k for c, k in file_keys.items()
+                 if (k != "").sum() and k[k != ""].nunique() >= 0.9 * (k != "").sum()}
+    for column in table.columns:
+        keys = _file_keys(table[column])
+        if not keys.astype(bool).any():
+            continue
+        for other, their in file_keys.items():
+            hits = int(keys[keys != ""].isin(set(their[their != ""])).sum())
+            if hits > best_hits:
+                best, best_hits = (keys, other), hits
+    out = table.copy()
+    if best is None:
+        return out, 0
+    keys, key_column = best
+    lookup = files.assign(_key=file_keys[key_column])
+    lookup = lookup[lookup["_key"] != ""].drop_duplicates("_key").set_index("_key")
+    existing = {str(c).lower(): c for c in out.columns}
+    for column in files.columns:
+        if column == key_column:
+            continue
+        # As objects, so an experiment number stays 8 and not 8.0 beside rows the list lacks.
+        values = keys.map(lookup[column].astype(object))
+        target = existing.get(str(column).lower())
+        if target is None:
+            out[column] = values
+        else:
+            blank = out[target].map(_text) == MISSING
+            out.loc[blank, target] = values[blank]
+    return out, best_hits
 
 
 def keep_mask(table: pd.DataFrame, keep: Mapping[str, Iterable[str]]) -> pd.Series:

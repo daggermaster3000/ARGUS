@@ -1716,7 +1716,17 @@ so nothing waits for a thousand thumbnails. Full paths in a `file` / `path`
 column are used as they are. Rows with no file are counted and left out. The
 picks' thumbnails are drawn by the window itself (up to 60) or taken from the
 scan, whichever comes first; opening a pick and selecting the picks work before
-the scan reaches them (selected tiles light up as it does). Every column that sorts
+the scan reaches them (selected tiles light up as it does).
+
+**Add file list…** joins a second table onto the first: a list of the files with
+what each one is — genotype, experiment, slide (`Image_File_List.csv` or an
+Excel sheet like it). Its rows are matched to the table's by file name (whichever
+pair of columns agrees on the most files, so `File_Name` against `file` works);
+its columns are added as categories, so you can keep only one genotype or draw
+*n* of each. A column the table already has keeps its values and only gets its
+blanks filled. The line under the table says how many rows the list had;
+**Remove** goes back to the table alone. Loaded without a table, the file list is
+the table. Every column that sorts
 samples into a few groups (*Pass*, *Ripped*, *Folded*, *Shape*, *Quality*,
 *cluster* …) is listed with its values, each with two ticks:
 

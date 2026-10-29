@@ -1,8 +1,10 @@
 """A window to pick samples off a table of categories, with their thumbnails.
 
 Opened from Experiment setup (*Pick from table…*). Load a prescreen or QC
-table (CSV or Excel, a row per sample); every column that sorts samples into a
-few groups is listed with its values, each with two ticks:
+table (CSV or Excel, a row per sample), and optionally a file list saying what
+each file is (genotype, experiment, slide — ``Image_File_List``), joined on by
+file name; every column that sorts samples into a few groups is listed with its
+values, each with two ticks:
 
 * **Keep** — samples with this value may be picked. Untick *Pass: no* to leave
   failing samples out.
@@ -75,6 +77,10 @@ class SamplePickerWindow(QWidget):
         self._paths, self._icon_of, self._select = paths, icon_of, select
         self._open_path, self._folder = open_path, folder
         self._table: pd.DataFrame | None = None
+        #: The table as loaded, and the file list joined onto it (either may be missing).
+        self._raw: pd.DataFrame | None = None
+        self._files: pd.DataFrame | None = None
+        self._files_note = ""
         self._matched = pd.Series(dtype=object)
         self._columns: list[str] = []
         self._texts: dict[str, pd.Series] = {}
@@ -101,6 +107,25 @@ class SamplePickerWindow(QWidget):
         load = QPushButton("Load table…")
         load.clicked.connect(self.choose_table)
         row.addWidget(load)
+        layout.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("File list"))
+        self._files_edit = QLineEdit()
+        self._files_edit.setReadOnly(True)
+        self._files_edit.setPlaceholderText(
+            "Optional: what each file is — genotype, experiment, slide (e.g. Image_File_List)")
+        row.addWidget(self._files_edit, stretch=1)
+        add = QPushButton("Add file list…")
+        add.setToolTip(
+            "A CSV or Excel list of the files with their genotype, experiment, slide …\n"
+            "Its columns are added to the table's rows by file name, so you can keep or draw "
+            "by genotype. Loaded alone, it is the table.")
+        add.clicked.connect(self.choose_file_list)
+        row.addWidget(add)
+        remove = QPushButton("Remove")
+        remove.setToolTip("Use the table without the file list.")
+        remove.clicked.connect(self.clear_file_list)
+        row.addWidget(remove)
         layout.addLayout(row)
         self._match_label = QLabel("")
         self._match_label.setWordWrap(True)
@@ -229,7 +254,54 @@ class SamplePickerWindow(QWidget):
             self._match_label.setText(f"Could not read {Path(path).name}: {exc}")
             return False
         self._path_edit.setText(str(path))
+        self._raw = table
+        self._use_tables()
+        return True
+
+    def choose_file_list(self) -> None:
+        folder = self._folder()
+        start = str(folder) if folder else str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose the file list", start, "Tables (*.csv *.tsv *.txt *.xlsx *.xls);;All files (*)")
+        if path:
+            self.load_file_list(path)
+
+    def load_file_list(self, path) -> bool:
+        """Join a list of the files with their genotype, experiment, slide … onto the table."""
+        try:
+            files = sp.read_table(path)
+        except Exception as exc:
+            logger.exception("could not read %s", path)
+            self._match_label.setText(f"Could not read {Path(path).name}: {exc}")
+            return False
+        self._files_edit.setText(str(path))
+        self._files = files
+        self._use_tables()
+        return True
+
+    def clear_file_list(self) -> None:
+        self._files = None
+        self._files_edit.clear()
+        self._use_tables()
+
+    def _use_tables(self) -> None:
+        """The table to pick from: the loaded one with the file list joined on, or either alone."""
+        self._files_note = ""
+        if self._raw is not None and self._files is not None:
+            table, found = sp.join_file_list(self._raw, self._files)
+            self._files_note = f" {found} of {len(table)} rows found in the file list."
+            if not found:
+                self._files_note += " Its file names match none of the table's — is it the same experiment?"
+        else:
+            table = self._raw if self._raw is not None else self._files
         self._table = table
+        if table is None:
+            self._columns, self._texts = [], {}
+            self._tree.clear()
+            self._grid.clear()
+            self._match_label.setText("")
+            self._summary.setText("Load a table to start.")
+            return
         self._columns = sp.category_columns(table)
         # The category values as text, once: every tick counts over them.
         self._texts = {column: table[column].map(sp._text) for column in self._columns}
@@ -237,7 +309,6 @@ class SamplePickerWindow(QWidget):
         self.rematch()
         self._fill_tree()
         self.update_picks()
-        return True
 
     def rematch(self) -> None:
         """Match the rows to the files of the experiment folder again (after a scan)."""
@@ -250,7 +321,7 @@ class SamplePickerWindow(QWidget):
         if missing:
             text += (f" {missing} matched no file and are left out — choose the folder they "
                      "are in in Experiment setup, or give full paths in a “path” column.")
-        self._match_label.setText(text)
+        self._match_label.setText(text + self._files_note)
 
     def _fill_tree(self) -> None:
         self._filling = True
