@@ -18,6 +18,8 @@ into the other are looked for. This module does the looking:
 4. **Positive or not** is decided per channel against a threshold that is
    derived from the data and written down beside the count (see
    :func:`threshold_for`).
+5. **Positive objects**: positive cells that are one labelled body — a bright
+   cell over several nuclei — are counted once (:mod:`microscopy_viewer.cell_bodies`).
 
 No Qt and no napari. Cellpose is reached through
 :func:`microscopy_viewer.segmentation.segment_volume`, and can be replaced by
@@ -35,6 +37,7 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 
+from . import cell_bodies as cb
 from . import fusion as fu
 from . import junction as jn
 from .utils import get_logger
@@ -93,6 +96,15 @@ SHAPE_BACKGROUND_UM = 20.0
 SHAPE_K = 5.0
 SHAPE_MIN_UM2 = 20.0
 SHAPE_HOLE_UM2 = 10.0
+
+#: Count the positive cells that are one labelled body once, as *positive
+#: objects* beside the cells (:mod:`microscopy_viewer.cell_bodies`;
+#: ``05_watershed_cells``, 29 Oct: F1 against the clicks 0.34 → 0.43, CCC per
+#: sample 0.33 → 0.69). Who is positive does not change.
+MERGE_BODIES = True
+#: Per-cell column: the object a positive cell belongs to, named after the
+#: smallest label in it (0 for a cell that is not positive).
+OBJECT_SUFFIX = " positive object"
 
 #: Which cells a threshold is derived from, for the rules that derive it from
 #: cells (:data:`CELL_RULES`). The cells *counted* are those in the region
@@ -234,6 +246,9 @@ class CountOptions:
     #: Outline each positive cell in its own stain (:func:`positive_shapes`),
     #: kept and written with the label maps. A few seconds a channel on a slide scan.
     shapes: bool = True
+    #: Count positive cells that are one labelled body once (:data:`MERGE_BODIES`).
+    #: Needs the section's label map: a few seconds a channel on a slide scan.
+    merge_bodies: bool = MERGE_BODIES
     #: Store the counted cells with the sample as a label map.
     save_cells: bool = False
     cells_key: str = CELLS_KEY
@@ -253,6 +268,13 @@ class ChannelCount:
     channel: str
     n_cells: int = 0
     n_positive: int = 0
+    #: The positive cells counted as objects, one per labelled body (see
+    #: :data:`MERGE_BODIES`): in the region, per mm² and mm of junction, and in
+    #: the whole section. ``nan`` when they were not merged.
+    n_objects: float = float("nan")
+    objects_per_mm2: float = float("nan")
+    objects_per_mm_junction: float = float("nan")
+    n_objects_section: float = float("nan")
     threshold: float = float("nan")
     method: str = ""
     statistic: str = "mean"
@@ -360,6 +382,9 @@ class JunctionCounts:
     #: labels of *section_cells*; and the same on disk, when written.
     section_shapes: dict[str, np.ndarray] = field(default_factory=dict)
     shape_files: dict[str, Path] = field(default_factory=dict)
+    #: With ``CountOptions.full_labels`` and merging: each scored channel less its
+    #: local median over the whole section (:func:`filtered_plane`), to show.
+    section_filtered: dict[str, np.ndarray] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -558,6 +583,97 @@ def less_local_median(plane: np.ndarray, voxel_um: float) -> np.ndarray:
     plane = np.asarray(plane, dtype=np.float32)
     whole = (slice(0, plane.shape[0]), slice(0, plane.shape[1]))
     return plane - median_at(coarse_median(plane[::MEDIAN_STEP, ::MEDIAN_STEP], voxel_um), whole, plane.shape)
+
+
+def filtered_plane(spec: Any, voxel_um: float, coarse: np.ndarray | None = None) -> np.ndarray:
+    """A channel over the whole section less its local median: what :data:`FILTERED` averages per cell.
+
+    *coarse* is the channel's :func:`coarse_median` when it is known already.
+    """
+    first = spec.data[0] if spec.multiscale else spec.data
+    shape = tuple(int(n) for n in first.shape[-2:])
+    whole = (slice(0, shape[0]), slice(0, shape[1]))
+    if coarse is None:
+        coarse = coarse_median(_thumbnail(spec, MEDIAN_STEP), float(voxel_um))
+    return _plane(spec, whole).astype(np.float32) - median_at(coarse, whole, shape)
+
+
+def full_tissue(nuclear_spec: Any, shape: Sequence[int], step: int = 8) -> np.ndarray:
+    """The section's outline (:func:`tissue_of`) at full resolution."""
+    tissue = tissue_of(_thumbnail(nuclear_spec, step))
+    return np.repeat(np.repeat(tissue, step, axis=0), step, axis=1)[: shape[0], : shape[1]]
+
+
+def add_objects(table, counts: Sequence["ChannelCount"], nuclei: np.ndarray,
+                filtered: Callable[[str], np.ndarray], tissue: np.ndarray | None, voxel_um: float) -> None:
+    """Add ``<channel> positive object`` to *table*: positive cells in one labelled body share an id.
+
+    *nuclei* is the label map the cells of *table* were measured from, every
+    cell in it; *filtered* gives a channel less its local median on the same grid.
+    """
+    labels = table["Label"].to_numpy(dtype=np.int64)
+    for count in counts:
+        column = f"{count.channel} positive"
+        if count.reference or column not in table:
+            continue
+        positive = labels[table[column].to_numpy(dtype=bool)]
+        objects = {}
+        if positive.size >= 2:
+            foreground = cb.stain_foreground(filtered(count.channel), tissue, voxel_um)
+            objects = cb.positive_objects(nuclei, foreground, positive, voxel_um)
+        ids = np.array([objects.get(int(label), int(label)) for label in positive], dtype=np.int64)
+        out = np.zeros(len(table), dtype=np.int64)
+        out[table[column].to_numpy(dtype=bool)] = ids
+        table[f"{count.channel}{OBJECT_SUFFIX}"] = out
+
+
+def copy_objects(target, source, counts: Sequence["ChannelCount"]) -> None:
+    """Carry the object ids of *source*'s cells over to the same cells (by label) in *target*."""
+    lookup = source.set_index("Label")
+    for count in counts:
+        column = f"{count.channel}{OBJECT_SUFFIX}"
+        if column in source:
+            target[column] = target["Label"].map(lookup[column]).fillna(0).astype(np.int64).to_numpy()
+
+
+def tally_objects(result: "JunctionCounts") -> None:
+    """Each channel's objects in the region (and per mm², per mm of junction) and in the whole section."""
+    for count in result.channels:
+        column = f"{count.channel}{OBJECT_SUFFIX}"
+        if count.reference:
+            continue
+        for table, attribute in ((result.cells, "n_objects"), (result.section_cells, "n_objects_section")):
+            if table is not None and column in table:
+                ids = table[column].to_numpy(dtype=np.int64)
+                setattr(count, attribute, int(np.unique(ids[ids > 0]).size))
+        if np.isfinite(count.n_objects):
+            if np.isfinite(result.band_area_mm2) and result.band_area_mm2 > 0:
+                count.objects_per_mm2 = count.n_objects / result.band_area_mm2
+            if np.isfinite(result.junction_length_um) and result.junction_length_um > 0:
+                count.objects_per_mm_junction = count.n_objects / (result.junction_length_um / 1000.0)
+
+
+def merge_section(result: "JunctionCounts", counts: Sequence["ChannelCount"], specs: Sequence[Any],
+                  names: Sequence[str], nuclear: int, nuclei: np.ndarray, voxel: Sequence[float],
+                  medians: dict[str, np.ndarray] | None = None, keep_filtered: bool = False) -> None:
+    """Merge the positive cells of the whole section that are one labelled body (:func:`add_objects`).
+
+    Adds the object ids to the section's cells and the region's, and keeps each
+    channel less its local median in ``result.section_filtered`` with *keep_filtered*.
+    """
+    shape = np.shape(nuclei)
+    tissue = full_tissue(specs[nuclear], shape)
+
+    def plane(channel: str) -> np.ndarray:
+        spec = specs[list(names).index(channel)]
+        out = filtered_plane(spec, float(voxel[-1]), (medians or {}).get(channel))
+        if keep_filtered:
+            result.section_filtered[channel] = out
+        return out
+
+    add_objects(result.section_cells, counts, nuclei, plane, tissue, float(voxel[-1]))
+    if result.cells is not None and len(result.cells):
+        copy_objects(result.cells, result.section_cells, counts)
 
 
 def local_medians(specs: Sequence[Any], names: Sequence[str], voxel_um: float,
@@ -1361,9 +1477,7 @@ def section_shapes(specs: Sequence[Any], names: Sequence[str], nuclear: int, vox
     """Each scored channel's positive cells in their own shape over the whole section (:func:`positive_shapes`)."""
     regions = np.asarray(regions)
     height, width = regions.shape
-    step = 8
-    tissue = tissue_of(_thumbnail(specs[nuclear], step))
-    tissue = np.repeat(np.repeat(tissue, step, axis=0), step, axis=1)[:height, :width]
+    tissue = full_tissue(specs[nuclear], (height, width))
     whole = (slice(0, height), slice(0, width))
     shapes: dict[str, np.ndarray] = {}
     for count in counts:
@@ -1617,6 +1731,14 @@ def analyse_sample(
         table, counts = measure_cells(nuclei, regions, images, voxel, inside, options,
                                       nuclear=names[nuclear], origin=(y0, x0), sample_values=sample_values,
                                       filtered=filtered)
+        if options.merge_bodies and not options.whole_section and len(table):
+            say("merging positive cells that are one labelled body")
+            try:
+                tissue = full_tissue(specs[nuclear], shape_yx)[window]
+                add_objects(table, counts, nuclei, filtered.__getitem__, tissue, voxel[1])
+            except Exception as exc:
+                logger.exception("could not merge the positive cells of %s", target.name)
+                result.warnings.append(f"positive cells not merged: {exc}")
         del filtered
         overviews: list[Any] = [seen_overview] if seen_overview is not None else []
 
@@ -1644,6 +1766,18 @@ def analyse_sample(
                     logger.exception("could not place the section's cells of %s", target.name)
                     result.warnings.append(f"no distances for the section's cells: {exc}")
             place_positives(result.section_cells, counts)
+            if options.merge_bodies and len(result.section_cells):
+                if result.section_labels is None:
+                    result.warnings.append("positive cells not merged: the section's label map was not kept")
+                else:
+                    say("merging positive cells that are one labelled body")
+                    result.cells = table
+                    try:
+                        merge_section(result, counts, specs, names, nuclear, result.section_labels, voxel,
+                                      medians=medians, keep_filtered=options.full_labels)
+                    except Exception as exc:
+                        logger.exception("could not merge the positive cells of %s", target.name)
+                        result.warnings.append(f"positive cells not merged: {exc}")
             if options.shapes and result.section_regions is not None:
                 say("outlining the positive cells in their own stain")
                 try:
@@ -1681,6 +1815,7 @@ def analyse_sample(
                 count.per_mm2 = count.n_positive / result.band_area_mm2
             if np.isfinite(result.junction_length_um) and result.junction_length_um > 0:
                 count.per_mm_junction = count.n_positive / (result.junction_length_um / 1000.0)
+        tally_objects(result)
         if not result.n_cells:
             result.warnings.append("no cells in the region")
         if options.pictures_dir is not None and result.section_cells is not None:
@@ -2122,11 +2257,34 @@ def rescore(
             if np.isfinite(result.junction_length_um) and result.junction_length_um > 0:
                 count.per_mm_junction = count.n_positive / (result.junction_length_um / 1000.0)
         place_positives(section, counts)
+        result.channels = counts
+        nuclei_file = sample.file("nuclei_file")
+        if options.merge_bodies:
+            if nuclei_file is None or not nuclei_file.is_file() or not result.path.is_file():
+                result.warnings.append("positive cells not merged: no label map or image of the section")
+            else:
+                say("merging positive cells that are one labelled body")
+                was_open = loaders.is_open(result.path)
+                specs = loaders.load_path(result.path)
+                try:
+                    names = [str(spec.channel_name or spec.name) for spec in specs]
+                    nuclear = (names.index(info["nuclear"]) if info.get("nuclear") in names
+                               else jn.pick_channel(names, "", jn.NUCLEAR_HINTS))
+                    result.section_cells, result.cells = section, cells
+                    merge_section(result, counts, specs, names, nuclear, read_labels(nuclei_file), voxel,
+                                  keep_filtered=options.full_labels)
+                except Exception as exc:
+                    logger.exception("could not merge the positive cells of %s", sample.name)
+                    result.warnings.append(f"positive cells not merged: {exc}")
+                finally:
+                    if not was_open:
+                        loaders.release(result.path)
         if not options.keep_section:
             anywhere = (section["Positive for"] != "none").to_numpy() | section[IN_REGION_COLUMN].to_numpy(dtype=bool)
             section = section[anywhere].reset_index(drop=True)
         result.cells, result.channels, result.n_cells = cells, counts, int(len(cells))
         result.section_cells, result.n_cells_section = section, int(len(table))
+        tally_objects(result)
         if not result.n_cells:
             result.warnings.append("no cells in the region")
 
@@ -2314,7 +2472,9 @@ def duration(seconds: float) -> str:
 COUNT_COLUMNS = (
     "Sample", "Channel", "Cells in region", "Positive", "Positive (%)",
     "Positive per mm²", "Positive per mm of junction",
-    "Cells in the whole section", "Positive in the whole section", "Positive in the whole section (%)",
+    "Positive objects", "Positive objects per mm²", "Positive objects per mm of junction",
+    "Cells in the whole section", "Positive in the whole section", "Positive objects in the whole section",
+    "Positive in the whole section (%)",
     "Enrichment in the region", "Positives: median distance to the line (µm)",
     "Positives: median distance to the edge (µm)",
     "Threshold", "Rule", "Compared",
@@ -2364,6 +2524,10 @@ def counts_dataframe(results: Sequence[JunctionCounts]):
                 "Positive (%)": float("nan") if count.reference else count.percent,
                 "Positive per mm²": float("nan") if count.reference else count.per_mm2,
                 "Positive per mm of junction": float("nan") if count.reference else count.per_mm_junction,
+                "Positive objects": count.n_objects,
+                "Positive objects per mm²": count.objects_per_mm2,
+                "Positive objects per mm of junction": count.objects_per_mm_junction,
+                "Positive objects in the whole section": count.n_objects_section,
                 "Positive in the whole section": float("nan") if count.reference else count.n_positive_section,
                 "Positive in the whole section (%)": float("nan") if count.reference else count.percent_section,
                 "Enrichment in the region": float("nan") if count.reference else count.enrichment,
@@ -2446,6 +2610,9 @@ def settings_dataframe(options: CountOptions):
         ("Threshold from", options.threshold_from if options.method in CELL_RULES else "not from cells"),
         ("Compared per cell", options.statistic),
         ("Local median taken away (µm)", MEDIAN_UM if options.statistic == FILTERED else "not used"),
+        ("Positive cells that are one labelled body",
+         f"counted once as objects (stain {cb.FG_K:g} SDs over the tissue, bodies parted by dips of "
+         f"{cb.H_UM:g} µm)" if options.merge_bodies else "not merged"),
         ("Positive cells outlined in their stain", f"yes, {SHAPE_K:g} SDs over the tissue" if options.shapes else "no"),
         ("Nuclei grown by (µm)", options.expand_um),
         ("Junction found when none stored", options.find_junction),
@@ -2498,12 +2665,14 @@ def write_readme(folder: str | Path, results: Sequence[JunctionCounts], options:
         f"{WORKBOOK_NAME}",
         "    Counts: per sample and channel — cells and positive cells in the junction region",
         "    and in the whole section, %, enrichment in the region, where the positives lie,",
+        "    positive objects (positive cells that are one labelled body counted once),",
         "    thresholds, who drew the region, the finder's and the review's verdicts.",
         "    Combinations: how many cells are positive for which set of channels.",
         "    Cells: every cell of the region, every figure. Settings: how the run was made.",
         f"{CELLS_FOLDER}/<sample>.csv",
         "    Every cell of the whole section: position, size, every figure per channel,",
-        "    positive or not, in the region or not, distance to the junction line and edge.",
+        "    positive or not, in the region or not, distance to the junction line and edge;",
+        "    '<channel> positive object': cells sharing a number are one labelled body.",
         f"{REGION_FOLDER}/ok, check, fail/<sample>.png",
         "    The counted region, a ring round each positive cell, sorted by QC status.",
         "    Look through them in the Junction review panel.",

@@ -79,6 +79,9 @@ jobs:
       - name: Junction cell counts
         run: python tests/test_junction_analysis.py
 
+      - name: Positive cells in one labelled body
+        run: python tests/test_cell_bodies.py
+
       - name: Junction review decisions
         run: python tests/test_junction_review.py
 

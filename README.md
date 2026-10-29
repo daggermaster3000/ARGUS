@@ -1508,6 +1508,29 @@ not change. The layer *<channel> positive shape* (one colour per cell), an outli
 in the section picture, and `labels/<sample> <channel> shape.tif`. A few seconds
 a channel per sample.
 
+**Positive objects: a labelled body counted once.** The rule calls nuclei. A
+bright labelled cell lying over two or three nuclei — or one cell whose nucleus
+Cellpose cut in two — lights up the few µm round each, and every one of them is
+called positive. With *Count positive cells that are one labelled body once*
+(Settings, on) those are merged:
+
+1. the channel less its local median, smoothed 0.5 µm, at least 3 robust SDs
+   over the tissue is the *stain*;
+2. each cell grows over the stain from its nucleus — every nucleus seeds, so
+   touching cells part at the narrowing between them — at most 20 µm;
+3. the stain is split into *bodies* where it narrows: two thick parts joined by
+   a neck at least 1 µm thinner than both stay two, a thick body with no neck is
+   one (distance-transform watershed, h-maxima);
+4. positive cells whose grown cells lie mostly in one body are **one object**.
+
+Who is positive does not change; the counts gain *Positive objects*, *Positive
+objects per mm²*, *per mm of junction* and *in the whole section*, and each cell
+a column *`<channel>` positive object* (the cells sharing a number are one body;
+0 for a cell that is not positive). Against Quillan's clicks on 39 slide scans
+(`05_watershed_cells`) the count roughly halves and comes much closer to his:
+F1 0.34 → 0.43, agreement per sample (CCC) 0.33 → 0.69. About a second a
+channel per slide scan. Re-scoring merges too, from the saved label maps.
+
 **Where each cell is**, in the *Cells* sheet:
 
 - *Distance to the junction line (µm)*: from the cell's centre to the line the
@@ -1632,7 +1655,12 @@ In the panel:
   each cell was measured over (hidden at first); *`<channel>`+ cells*, the
   positive cells of each channel anywhere in the section, their nucleus outlined
   in red; *`<channel>` positive shape*, the same cells in their own shape, one
-  colour per cell, outlined; and
+  colour per cell, outlined; *`<channel>`+ objects*, the positive cells' grown
+  regions, one colour per object, so cells counted as one body share a colour;
+  *`<channel>` less local median*, each scored channel less its 45 µm local
+  median — the image the rule compares and the merging cuts, in the channel's
+  colour (from 0 to its 99.9th percentile; worked out in the background when a
+  sample is opened from the table, a few seconds); and
   *Junction cells*, the region's cells (hidden at first). Each whole-section
   layer is a label map the size of the scan, ~250 MB. With *Segment only the
   junction region* the layers cover the region only.
@@ -2320,6 +2348,7 @@ microscopy_viewer/
   fusion.py                 junction line -> spline -> band -> label map; no Qt
   junction.py               automatic junction (a seed per organoid, DAPI line, min cut) and QC; no Qt
   junction_analysis.py      cells in the junction region, per-channel positivity, workbook; no Qt
+  cell_bodies.py            positive cells that are one labelled body, counted once; no Qt
   junction_review.py        decisions on the QC pictures, the queue of junctions to redraw; no Qt
   assembloids.py            which sections are from the same assembloid (scene order + shape); no Qt
   positive_counter.py       hand counts of positive cells per channel, counts in the region; no Qt
@@ -2404,6 +2433,7 @@ python tests/test_analysis.py       # region morphometrics, channel statistics, 
 python tests/test_fusion.py         # junction line, spline, band geometry — no Qt needed
 python tests/test_junction.py       # automatic junction, the DAPI line, QC flags, a folder run — no Qt needed
 python tests/test_junction_analysis.py  # per-cell statistics, threshold rules, counting in the region — no Qt, no cellpose
+python tests/test_cell_bodies.py        # positive cells in one labelled body merged, apart ones kept
 python tests/test_junction_review.py    # review decisions kept beside the QC pictures, the redraw queue — no Qt
 python tests/test_assembloids.py        # sections grouped by assembloid: cuts, torn sections, running on — no Qt
 python tests/test_positive_counter.py   # hand counts per channel, dots in the region, the table — no Qt

@@ -76,12 +76,20 @@ DRAWN_KEY = "argus_junction_cells"
 POSITIVE_SUFFIX = "+ cells"
 #: Suffix of the layer of each channel's positive cells in their own shape.
 SHAPE_SUFFIX = " positive shape"
+#: Suffix of the layer of each channel's positive objects: positive cells that
+#: are one labelled body share a colour.
+OBJECTS_SUFFIX = "+ objects"
+#: Suffix of the layer of each scored channel less its local median: the image
+#: the positivity rule and the merging look at.
+FILTERED_SUFFIX = " less local median"
+#: Its brightness range: from 0 to this percentile of the section.
+FILTERED_PERCENTILE = 99.9
 
 #: Columns of the panel's table; the workbook has these and the rest.
 TABLE_COLUMNS = (
-    "Sample", "Channel", "Cells in region", "Positive", "Positive (%)",
+    "Sample", "Channel", "Cells in region", "Positive", "Positive (%)", "Positive objects",
     "Cells in the whole section", "Positive in the whole section (%)", "Enrichment in the region",
-    "Positive per mm²", "Positive per mm of junction", "Threshold",
+    "Positive per mm²", "Positive per mm of junction", "Positive objects per mm of junction", "Threshold",
     "Region drawn by", "Finder status", "Finder second search", "Review decision",
 )
 
@@ -423,6 +431,20 @@ class JunctionAnalysisWidget(QWidget):
         )
         self._region_only.toggled.connect(lambda on: self._shapes.setEnabled(not on))
         form.addRow("", self._shapes)
+        self._merge = QCheckBox("Count positive cells that are one labelled body once")
+        self._merge.setChecked(ja.MERGE_BODIES)
+        self._merge.setToolTip(
+            "A bright labelled cell lying over two or three nuclei lights up the few µm round "
+            "each, and the rule calls every one of them positive. With this on, positive cells "
+            "whose stain is one body — no dip of at least "
+            f"{format_number(ja.cb.H_UM)} µm in it between them — are also counted once, as "
+            "“Positive objects”, beside the positive cells. Who is positive does not change. "
+            "Checked against Quillan's clicks: the count roughly halves and comes much closer to "
+            "his (F1 0.34 → 0.43). A layer per channel (“<channel>+ objects”, one colour per "
+            "object) and a column “<channel> positive object” in the cells. A few seconds a "
+            "channel per sample."
+        )
+        form.addRow("", self._merge)
 
         self._reuse = QCheckBox("Skip samples already segmented: re-score them from their saved cells")
         self._reuse.setChecked(True)
@@ -595,6 +617,7 @@ class JunctionAnalysisWidget(QWidget):
             whole_section=not self._region_only.isChecked(),
             keep_section=not self._positives_only.isChecked(),
             shapes=self._shapes.isChecked(),
+            merge_bodies=self._merge.isChecked(),
             save_cells=self._save_cells.isChecked(),
             settings=settings,
             junction=junction,
@@ -988,6 +1011,7 @@ class JunctionAnalysisWidget(QWidget):
         if result.section_labels is not None or result.labels is not None:
             self._draw(result, str(image.name))
             self._log(f"{result.name}: its cells drawn.")
+            self.show_filtered(result, image)
             return
         table, source = result.section_cells, "the section"
         if table is None and result.cells_file is not None and Path(result.cells_file).is_file():
@@ -1001,6 +1025,78 @@ class JunctionAnalysisWidget(QWidget):
             return
         self._draw_rings(result, image, table)
         self._log(f"{result.name}: positive cells from {source}, ringed in red.")
+        self.show_filtered(result, image)
+
+    # -- each channel less its local median ------------------------------------
+
+    def show_filtered(self, result: ja.JunctionCounts, image) -> None:
+        """A layer per scored channel less its local median: kept with the result, else worked out aside."""
+        channels = [count.channel for count in result.channels if not count.reference]
+        if not channels:
+            return
+        kept = {channel: plane for channel, plane in result.section_filtered.items() if channel in channels}
+        for channel, plane in kept.items():
+            self._put_filtered(result, image, channel, plane, self._limits(plane))
+        missing = [channel for channel in channels if channel not in kept]
+        if not missing or not Path(result.path).is_file():
+            return
+        from napari.qt.threading import thread_worker
+
+        from .. import loaders
+
+        path, voxel, limits_of = Path(result.path), float(result.voxel_yx[-1]), self._limits
+
+        @thread_worker
+        def _work():
+            specs = loaders.load_path(path)
+            try:
+                names = [str(spec.channel_name or spec.name) for spec in specs]
+                for channel in missing:
+                    if channel in names:
+                        plane = ja.filtered_plane(specs[names.index(channel)], voxel)
+                        yield channel, plane, limits_of(plane)
+            finally:
+                # Only this thread's handles: the sample on screen keeps the one its layers read through.
+                loaders.release(path, own_thread_only=True)
+
+        self._log(f"{result.name}: working out {', '.join(missing)} less the local median…")
+        worker = _work()
+        name = str(image.name)
+        worker.yielded.connect(lambda payload: self._put_filtered(
+            result, self._viewer.layers[name] if name in self._viewer.layers else None, *payload))
+        worker.errored.connect(lambda exc: self._log(f"Could not work out the channel less its local median: {exc}"))
+        worker.start()
+
+    @staticmethod
+    def _limits(plane: np.ndarray) -> tuple[float, float]:
+        sample = np.asarray(plane[::4, ::4], dtype=np.float32)
+        top = float(np.nanpercentile(sample, FILTERED_PERCENTILE)) if sample.size else 1.0
+        return 0.0, max(top, 1.0)
+
+    def _put_filtered(self, result: ja.JunctionCounts, image, channel: str, plane: np.ndarray,
+                      limits: tuple[float, float]) -> None:
+        """Add (or replace) the layer of *channel* less its local median over *image*."""
+        from napari.layers import Image
+
+        from ..loaders.layer_spec import units_like
+
+        if image is None:
+            return
+        name = f"{channel}{FILTERED_SUFFIX}"
+        if name in self._viewer.layers:
+            self._viewer.layers.remove(name)
+        source = source_of(image)
+        stain = next((layer for layer in self._viewer.layers if isinstance(layer, Image)
+                      and source_of(layer) == source
+                      and str(layer.metadata.get("mv_channel_name", "") or layer.name) == channel), None)
+        colormap = stain.colormap if stain is not None else "gray"
+        layer = self._viewer.add_image(plane, name=name, scale=result.voxel_yx,
+                                       translate=tuple(float(t) for t in image.translate)[-2:],
+                                       colormap=colormap, contrast_limits=limits, blending="additive",
+                                       **units_like(image, 2))
+        tie_to_sample(layer, str(result.path))
+        layer.metadata[DRAWN_KEY] = True
+        self._log(f"{result.name}: “{name}” added — the image the positivity rule compares.")
 
     def _draw_rings(self, result: ja.JunctionCounts, image, table) -> None:
         """A points layer per channel of its positive cells, and one of the region's cells (hidden)."""
@@ -1105,6 +1201,14 @@ class JunctionAnalysisWidget(QWidget):
                     layer = put(f"{count.channel}{POSITIVE_SUFFIX}", mask, opacity=1.0, **whole)
                     layer.contour = POSITIVE_CONTOUR
                     self._tint(layer, POSITIVE_COLOR)
+                    objects_column = f"{count.channel}{ja.OBJECT_SUFFIX}"
+                    if objects_column in table and result.section_regions is not None:
+                        # One colour per object: positive cells that are one body share it.
+                        ids = table.loc[table[column], ["Label", objects_column]].to_numpy(dtype=np.int64)
+                        lookup = np.zeros(int(max(result.section_regions.max(), ids[:, 0].max(initial=0))) + 1,
+                                          dtype=np.int32)
+                        lookup[ids[:, 0]] = ids[:, 1]
+                        put(f"{count.channel}{OBJECTS_SUFFIX}", lookup[result.section_regions], opacity=0.6, **whole)
                 for count in scored:
                     shapes = result.section_shapes.get(count.channel)
                     if shapes is not None:

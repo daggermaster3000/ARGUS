@@ -445,6 +445,38 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
               f"one shape per positive cell, under its label ({len(green_positive)})")
         check(np.all(green_shapes[np.isin(drawn.section_regions, list(green_positive))] > 0),
               "a positive cell's shape holds at least its grown region")
+        # Positive cells that are one labelled body are counted once, as objects.
+        green_drawn = next(c for c in drawn.channels if c.channel == "AF488")
+        objects = drawn.section_cells["AF488" + ja.OBJECT_SUFFIX].to_numpy()
+        positive = drawn.section_cells["AF488 positive"].to_numpy(dtype=bool)
+        check(np.all(objects[positive] > 0) and np.all(objects[~positive] == 0),
+              "every positive cell, and only those, belongs to an object")
+        check(0 < green_drawn.n_objects_section <= green_drawn.n_positive_section
+              and green_drawn.n_objects_section == len(np.unique(objects[positive])),
+              f"objects are counted in the section ({green_drawn.n_objects_section} of "
+              f"{green_drawn.n_positive_section} positive cells)")
+        check(np.isfinite(green_drawn.n_objects) and green_drawn.n_objects <= green_drawn.n_positive
+              and np.array_equal(drawn.cells["AF488" + ja.OBJECT_SUFFIX].to_numpy(),
+                                 drawn.section_cells.set_index("Label").loc[drawn.cells["Label"],
+                                                                            "AF488" + ja.OBJECT_SUFFIX].to_numpy()),
+              f"and in the region, the region's cells carrying the same objects ({green_drawn.n_objects})")
+        row = ja.counts_dataframe([drawn]).set_index("Channel").loc["AF488"]
+        check(row["Positive objects"] == green_drawn.n_objects
+              and row["Positive objects in the whole section"] == green_drawn.n_objects_section,
+              "the counts table carries the objects")
+        check(sorted(drawn.section_filtered) == sorted(scored)
+              and drawn.section_filtered["AF488"].shape == labels.shape,
+              "a single sample keeps each channel less its local median, to show")
+        unmerged = ja.analyse_sample(paths[0], ja.CountOptions(expand_um=0.0, find_junction=False, full_labels=True,
+                                                               merge_bodies=False), segment=segment_all)
+        check(unmerged.ok and "AF488" + ja.OBJECT_SUFFIX not in unmerged.section_cells
+              and not np.isfinite(next(c for c in unmerged.channels if c.channel == "AF488").n_objects),
+              "merging can be turned off")
+        region_only = ja.analyse_sample(paths[0], ja.CountOptions(expand_um=0.0, find_junction=False,
+                                                                  whole_section=False), segment=segment)
+        green_region = next(c for c in region_only.channels if c.channel == "AF488")
+        check(region_only.ok and np.isfinite(green_region.n_objects) and green_region.n_objects <= green_region.n_positive,
+              f"the region alone is merged too ({green_region.n_objects} of {green_region.n_positive})")
         lean = ja.analyse_sample(paths[0], ja.results_options(
             ja.CountOptions(expand_um=0.0, find_junction=False), ja.run_folder(root / "elsewhere", "lean", when=60.0)),
             segment=segment_all)
@@ -478,6 +510,9 @@ def test_a_sample_end_to_end_and_the_workbook() -> None:
               and ja.labels_files(again) is not None and sorted(again.shape_files) == sorted(drawn.shape_files)
               and all(path.is_file() for path in again.shape_files.values()),
               "and its run folder holds everything a segmenting run's does, the shapes too")
+        check(green_again.n_objects == green_drawn.n_objects
+              and green_again.n_objects_section == green_drawn.n_objects_section,
+              f"re-scoring merges the positive cells as segmenting does ({green_again.n_objects_section})")
         ring = ja.rescore(saved["assembloid_s0"], ja.CountOptions(expand_um=0.0, method=ja.METHOD_RING))
         green_ring = next(c for c in ring.channels if c.channel == "AF488")
         check(ring.ok and green_ring.method == ja.METHOD_RING and green_ring.threshold == ja.RING_RATIO,
