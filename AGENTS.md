@@ -132,7 +132,7 @@ Visual plausibility is not enough; measure against hand annotations.
   108 are much harder (many without a dark line): capped mean 175 µm against 67 on the first 30.
 - Current baseline (bend 1000, tissue from every channel, no-seam fallback on since 26 Oct):
   capped mean 130 µm tuning / 159 µm held out on the 138; 66 µm on the first 30
-  (`junction_seeding.ipynb`, `seeding.jsonl`).
+  (`02_junction_seeding.ipynb`, `seeding.jsonl`).
 - No seam: the cut's "Seam price" > 0.4 flags *no dark line at the junction* and the junction is
   found again from dominant seeds (`no_seam_price`, default `NO_SEAM_PRICE`). Seam price is the
   best single predictor of a bad line (Spearman 0.40). Dominant seeds everywhere help seamless
@@ -150,7 +150,7 @@ Visual plausibility is not enough; measure against hand annotations.
   Triage: draw by hand when status is fail or Shape is Damaged (7/8 failures, no
   good line sent); the "check" status is not useful for triage. On kept samples
   % positive agrees within ~±2 pp, no bias.
-- Write the result into `notebooks/validation/junction_evaluation.ipynb` as a new section
+- Write the result into `notebooks/validation/01_junction_evaluation.ipynb` as a new section
   (method → table/figures → dated "What it showed" with the decision), then execute
   the notebook in the conda env above and check it has 0 errors.
 
@@ -161,16 +161,21 @@ Visual plausibility is not enough; measure against hand annotations.
 
 ## Notebooks
 
-`notebooks/README.md` is the index. Two folders:
+`notebooks/README.md` is the index. Within each folder the notebooks are numbered
+in pipeline order (`01_…`); a new one takes the number of its step and the ones
+after it move up, with every reference to their file names updated.
 
-- `explainers/` (`junction_region`, `junction_pixels`): how the method works, step by
-  step. Update them when a step or a default changes.
+- `explainers/` (`01_junction_region`, `02_junction_pixels`): how the method works,
+  step by step. Update them when a step or a default changes.
 - `validation/`: how well it works on the annotated data, each ending with a dated
-  "What it showed". `junction_evaluation.ipynb` (the finder vs hand-drawn lines;
-  append, don't rewrite history) and the five count notebooks (`counts_in_band`,
-  `counts_crossed`, `positivity_metrics`, `band_choice`, `manual_vs_auto`), which
-  all load through `count_common.py` — put shared code there, not in a notebook.
-  Their scripts sit beside them; the kernel's cwd is the notebook's folder.
+  "What it showed". Junction (`01_junction_evaluation` — the finder vs hand-drawn
+  lines; append, don't rewrite history — and `02_junction_seeding`), positivity
+  (`03_positivity_metrics`, `04_classical_vs_cellpose`, `05_watershed_cells`) and
+  counting (`06_counts_in_band`, `07_counts_crossed`, `08_band_choice`,
+  `09_manual_vs_auto`). The count notebooks all load through `count_common.py` —
+  put shared code there, not in a notebook. Their scripts (unnumbered) sit beside
+  them; the kernel's cwd is the notebook's folder.
+- `dataset/` (`01_whole_dataset`, `02_positivity_dataset`): the whole dataset's run.
 - Edit notebooks with a small script (load JSON → append/replace cells → dump with
   `ensure_ascii=False, indent=1`) or NotebookEdit; back up first, and look up cell
   indices by content, not by number. Execute each after editing and check it has

@@ -1,6 +1,6 @@
 """Tuning the junction finder against junctions drawn by hand.
 
-Used by ``junction_evaluation.ipynb``; run on its own to (re)do the search::
+Used by ``01_junction_evaluation.ipynb``; run on its own to (re)do the search::
 
     python notebooks/validation/junction_tuning.py --trials 60
 

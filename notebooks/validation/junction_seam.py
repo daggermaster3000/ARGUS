@@ -2,7 +2,7 @@
 
 One run per annotated sample and variant (cached overviews, see
 ``junction_tuning``), scored against the hand-drawn line; results to
-``junction_eval/seam.jsonl`` for ``junction_evaluation.ipynb``.
+``junction_eval/seam.jsonl`` for ``01_junction_evaluation.ipynb``.
 
     python notebooks/validation/junction_seam.py
 """

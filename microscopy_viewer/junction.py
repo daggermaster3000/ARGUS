@@ -249,7 +249,7 @@ class JunctionOptions:
     #: is found again from dominant seeds with ``no_seam_edge`` as the cells'
     #: edge weight (see :data:`NO_SEAM_PRICE`); 0 leaves the first cut. On since
     #: 26 Oct 2026: 172 -> 159 um held out on 138 hand-drawn sections, no change
-    #: where there is a dark line (``junction_seeding.ipynb``).
+    #: where there is a dark line (``02_junction_seeding.ipynb``).
     no_seam_price: float = NO_SEAM_PRICE
     #: The settings of that second search, for sections without a dark line
     #: (see :data:`NO_SEAM_SEED_RULE` and below); ``no_seam_lead`` None is

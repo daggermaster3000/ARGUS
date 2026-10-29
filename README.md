@@ -1265,7 +1265,7 @@ A run writes `junction_QC/` into the experiment folder:
   its picture the same way.
 - `junction_QC_sheet_NN.png` — the same pictures, twenty to a page.
 
-`notebooks/explainers/junction_region.ipynb` walks through the method step by step on one
+`notebooks/explainers/01_junction_region.ipynb` walks through the method step by step on one
 section, with a figure for each step, calling the same functions a run does.
 
 #### What is stored, and what to do next

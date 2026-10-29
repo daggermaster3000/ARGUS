@@ -26,7 +26,7 @@ where a hand-drawn region exists.
    tissue lies within :data:`NEAR_UM` of a line. Each cell measured over its
    nucleus grown by 3 µm, raw and less its 45 µm local median, and over a ring
    3–6 µm out (its local background) — what the rules chosen in
-   ``notebooks/validation/positivity_metrics.ipynb`` need.
+   ``notebooks/validation/03_positivity_metrics.ipynb`` need.
 4. **Where each cell is** — in which band, signed distance to each line
    (+ into the band's side), distance to the tissue edge.
 5. **Positive** for AF488 and AF555 under the rules compared, and the counts in

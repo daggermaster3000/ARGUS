@@ -5,7 +5,7 @@ For each section in ``junction_eval/annotated_all.csv``:
 - two pictures of the overview cropped to the tissue (nuclear stain; the two labels
   over a dim nuclear stain), JPEG at the overview's resolution;
 - the hand-drawn line, today's line and seeds, and the line of the per-class
-  settings of ``junction_seeding.ipynb`` section 7, in picture pixels;
+  settings of ``02_junction_seeding.ipynb`` section 7, in picture pixels;
 - the errors of several settings (from the sweeps' JSONL, and from the two runs here);
 - the finder's figures, and **polarity** figures: inside each organoid (as split by
   the hand-drawn line) whether its own label sits near the junction or at the far
@@ -36,7 +36,7 @@ from microscopy_viewer import junction as jn  # noqa: E402
 
 OUT = jt.OUT
 MARGIN_UM = 150.0
-#: The settings each class chose in junction_seeding.ipynb section 7 (seeds' lead 0.35).
+#: The settings each class chose in 02_junction_seeding.ipynb section 7 (seeds' lead 0.35).
 PER_CLASS = {"seed_rule": "dominant", "label_change": 1.0, "tear_price": 1.0, "bend_um": 1000.0, "edge_weight": 0.0,
              "no_seam_seed_rule": "dominant", "no_seam_label_change": 1.0, "no_seam_tear_price": 1.0,
              "no_seam_bend_um": 400.0, "no_seam_edge": 0.0, "no_seam_lead": 0.35}

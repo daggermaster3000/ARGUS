@@ -989,7 +989,7 @@ def cells_crop(cells, meta, dots, fresh: bool) -> tuple[dict, dict]:
 
 NUMBERS = {
     "triage": {
-        "source": "junction_evaluation.ipynb, 21 October 2026",
+        "source": "01_junction_evaluation.ipynb, 21 October 2026",
         "n_samples": 30, "excluded": "028-027_s20 (organoids separated)",
         "failed_over_100_um": 8,
         "check_status_sends": 21, "check_status_fine": 14,
@@ -1009,7 +1009,7 @@ NUMBERS = {
                      "Fine for group comparisons; for a single-sample claim, or a 1-2 pp expected difference, draw by hand."],
     },
     "annotators": {
-        "source": "junction_evaluation.ipynb, 21 October 2026 (27 samples drawn by both)",
+        "source": "01_junction_evaluation.ipynb, 21 October 2026 (27 samples drawn by both)",
         "samples_both": 27, "line_distance_median_um": 15, "line_distance_mean_um": 28, "dice": 0.95,
         "over_100_um": 1, "over_100_sample": "037-036_s25", "over_100_um_value": 128,
         "af488_pp_range": [-0.9, 0.8], "af488_ccc": 0.99, "af555_pp_range": [-2.3, 2.0], "af555_ccc": 0.95,
@@ -1023,7 +1023,7 @@ NUMBERS = {
         "band_jaccard": {"first-second": 0.92, "first-automatic": 0.81, "second-automatic": 0.87},
     },
     "positivity": {
-        "source": "positivity_metrics.ipynb, manual_vs_auto.ipynb, 21 October 2026 (30 samples, 920 000 cells; clicks on 12)",
+        "source": "03_positivity_metrics.ipynb, 09_manual_vs_auto.ipynb, 21 October 2026 (30 samples, 920 000 cells; clicks on 12)",
         "cells": 920000, "samples": 30, "clicked_samples": 12, "clicks": 822,
         "chosen": "band median + 7 SD, median filter",
         "check": "ring contrast ≥ 1.5",
@@ -1056,7 +1056,7 @@ NUMBERS = {
                     "AF488 is not bimodal over a section: Otsu calls half the cells."],
     },
     "results": {
-        "source": "counts_in_band.ipynb, counts_crossed.ipynb, band_choice.ipynb, manual_vs_auto.ipynb, 21 October 2026",
+        "source": "06_counts_in_band.ipynb, 07_counts_crossed.ipynb, 08_band_choice.ipynb, 09_manual_vs_auto.ipynb, 21 October 2026",
         "samples": 30, "gd1": 19, "wt3": 11, "slides": {"GD1": 11, "WT3": 8},
         "in_band_per_mm": {"current": 85, "calibrated": 12, "contrast": 53},
         "in_band_pct": {"current": 1.5, "calibrated": 0.3, "contrast": 1.0},

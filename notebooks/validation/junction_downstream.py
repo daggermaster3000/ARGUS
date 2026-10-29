@@ -1,6 +1,6 @@
 """Does the automatic band change the cell counts? The hand-drawn band against it.
 
-Used by ``junction_evaluation.ipynb``; run on its own to redo it (Cellpose on the
+Used by ``01_junction_evaluation.ipynb``; run on its own to redo it (Cellpose on the
 GPU, a few minutes a sample)::
 
     python notebooks/validation/junction_downstream.py            # every annotated sample

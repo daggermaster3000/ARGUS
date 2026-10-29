@@ -8,7 +8,7 @@ shape alone, scored against the hand-drawn line as the finder is.
 
 Results to ``junction_eval/morphology.csv`` (one row per sample) and
 ``morphology.pkl`` (the geometry, for pictures), read by
-``junction_evaluation.ipynb``.
+``01_junction_evaluation.ipynb``.
 
     python notebooks/validation/junction_morphology.py
 """

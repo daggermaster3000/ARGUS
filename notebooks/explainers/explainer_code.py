@@ -561,7 +561,7 @@ def crossed_cells(cells_um, contrast, positive, line_um, reach_um=300, gap_um=2)
     away = -signed if home_on_plus else signed                # + = µm into the other organoid
     return positive & beside & (away > gap_um) & (away <= reach_um)
 
-# %% counting | Counting fairly | notebooks/dataset/whole_dataset.ipynb
+# %% counting | Counting fairly | notebooks/dataset/01_whole_dataset.ipynb
 import numpy as np
 import statsmodels.formula.api as smf
 

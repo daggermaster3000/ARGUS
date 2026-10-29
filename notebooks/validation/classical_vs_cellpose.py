@@ -1,6 +1,6 @@
 """AF488 segmented directly, by classical thresholds, against Cellpose nuclei scored positive.
 
-Used by ``classical_vs_cellpose.ipynb``; run on its own to (re)compute the cache::
+Used by ``04_classical_vs_cellpose.ipynb``; run on its own to (re)compute the cache::
 
     python notebooks/validation/classical_vs_cellpose.py        # every sample not done yet
     python notebooks/validation/classical_vs_cellpose.py 2      # just the first two, to time it

@@ -1,6 +1,6 @@
 """Random walker against the minimum cut, on the hand-drawn junctions.
 
-Used by ``junction_evaluation.ipynb``; run on its own to redo it (a few minutes)::
+Used by ``01_junction_evaluation.ipynb``; run on its own to redo it (a few minutes)::
 
     python notebooks/validation/junction_walk.py
 
