@@ -121,6 +121,12 @@ def _register_builtin_panels() -> None:
         # the File explorer last scanned.
         return PopulationAnalysisWidget(app)
 
+    def _phenoscape(app):
+        from .phenoscape_widget import PhenoscapeWidget
+
+        # Takes the app: results open as layers in its viewer.
+        return PhenoscapeWidget(app)
+
     def _batch(app):
         from .batch_widget import BatchSegmentationWidget
 
@@ -234,6 +240,19 @@ def _register_builtin_panels() -> None:
             # After the Measurement analysis panel: this one reads the combined
             # .h5ad that panel writes, and shares its tab stack.
             order=80,
+            start_hidden=True,
+        )
+    )
+    register_panel(
+        PanelSpec(
+            identifier="phenoscape",
+            title="Phenoscape",
+            factory=_phenoscape,
+            attribute="phenoscape_widget",
+            tabify_with="segmentation",
+            # A whole pipeline of its own, from stitched TIFFs to tables; it shares
+            # the processing panels' tab stack and depends on none of them.
+            order=90,
             start_hidden=True,
         )
     )
