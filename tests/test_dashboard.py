@@ -140,15 +140,20 @@ def test_running_it_standalone() -> None:
         f"no file is still a valid start: {db.module_command(None)[1:]}",
     )
 
-    # The page is served to this machine and no further. Streamlit's own default
-    # binds every interface, which on a university network puts an unauthenticated
-    # page holding the object tables in front of anyone who can route to it.
-    streamlit_argv = db.command("x.h5ad", port=8600)
-    check(
-        "--server.address" in streamlit_argv
-        and streamlit_argv[streamlit_argv.index("--server.address") + 1] == "127.0.0.1",
-        "it binds to loopback only, not to every interface",
-    )
+    # Served to the network by default, so a colleague can open it from their own
+    # machine; --local keeps it to this one.
+    def bound(argv):
+        return argv[argv.index("--server.address") + 1] if "--server.address" in argv else None
+
+    check(bound(db.command("x.h5ad", port=8600)) == "0.0.0.0",
+          "it binds every interface, so the network can reach it")
+    check(bound(db.command("x.h5ad", port=8600, address=db.LOCAL_ADDRESS)) == "127.0.0.1",
+          "and loopback only when asked")
+    check("--local" in db.module_command("x.h5ad", local=True)
+          and "--local" not in db.module_command("x.h5ad"),
+          "the shortcut's command carries --local only when asked")
+    check(all(url.startswith("http://") and url.endswith(":8600") for url in db.network_urls(8600)),
+          f"the network addresses are URLs on the port: {db.network_urls(8600)}")
 
 
 def test_the_warm_up() -> None:

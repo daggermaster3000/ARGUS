@@ -1304,13 +1304,29 @@ def app_path() -> Path:
     return Path(__file__).with_name("dashboard_app.py")
 
 
-def command(path: str | Path | None = None, port: int = 8501, python: str | None = None) -> list[str]:
+#: Every interface: the page can be opened from any machine on the network.
+NETWORK_ADDRESS = "0.0.0.0"
+#: Loopback: this machine only.
+LOCAL_ADDRESS = "127.0.0.1"
+
+
+def command(
+    path: str | Path | None = None,
+    port: int = 8501,
+    python: str | None = None,
+    address: str = NETWORK_ADDRESS,
+) -> list[str]:
     """The command line that starts the dashboard.
 
     ``python -m streamlit`` rather than the ``streamlit`` executable: the
     executable is only on PATH when the environment's Scripts directory is, which
     on Windows it frequently is not, while the module is importable wherever the
     package is installed.
+
+    Served to the whole network by default, so a colleague can open the page from
+    their own machine. There is no authentication in front of it: anyone who can
+    reach this machine's address can read the object tables and write clusters
+    into the plate. *address* :data:`LOCAL_ADDRESS` keeps it to this machine.
     """
     argv = [
         str(python or sys.executable),
@@ -1322,12 +1338,8 @@ def command(path: str | Path | None = None, port: int = 8501, python: str | None
         str(int(port)),
         "--server.headless",
         "true",
-        # Loopback only. Streamlit's default binds every interface, which puts the
-        # object tables -- and on a university network, potentially the internet --
-        # in front of anyone who can reach this machine's address. Nothing here
-        # has any authentication in front of it.
         "--server.address",
-        "127.0.0.1",
+        str(address),
         # Without this the first run stops at a terminal prompt asking for an
         # email address, and the window never opens.
         "--browser.gatherUsageStats",
@@ -1343,6 +1355,7 @@ def module_command(
     port: int = 8504,
     python: str | None = None,
     open_browser: bool = True,
+    local: bool = False,
 ) -> list[str]:
     """The command the shortcut runs, and the one the viewer's button runs too.
 
@@ -1357,23 +1370,53 @@ def module_command(
     argv += ["--port", str(int(port))]
     if not open_browser:
         argv.append("--no-browser")
+    if local:
+        argv.append("--local")
     return argv
 
 
 def free_port(start: int = 8504, tries: int = 20) -> int:
-    """A port nothing is listening on, so a second dashboard does not fail silently."""
+    """A port nothing is listening on, so a second dashboard does not fail silently.
+
+    Probed on loopback and on every interface: the page binds every interface, and
+    a port another program holds on either one is a port it cannot have.
+    """
     import socket
 
     for offset in range(int(tries)):
         port = int(start) + offset
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                probe.bind(("127.0.0.1", port))
-            except OSError:
-                continue
+        free = True
+        for host in (LOCAL_ADDRESS, NETWORK_ADDRESS):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                if os.name != "nt":
+                    # On Windows this option lets a bind steal a port in use, which
+                    # is the opposite of what a probe is for.
+                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    probe.bind((host, port))
+                except OSError:
+                    free = False
+                    break
+        if free:
             return port
     return int(start)
+
+
+def network_urls(port: int) -> list[str]:
+    """The addresses another machine can open the page at: by name, then by IPv4."""
+    import socket
+
+    urls = []
+    try:
+        name = socket.gethostname()
+        urls.append(f"http://{name}:{int(port)}")
+        _, _, addresses = socket.gethostbyname_ex(name)
+    except OSError:
+        return urls
+    for address in addresses:
+        if not address.startswith("127.") and not address.startswith("169.254."):
+            urls.append(f"http://{address}:{int(port)}")
+    return urls
 
 
 def launch(
@@ -1483,6 +1526,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("file", nargs="?", default=None, help="an .h5ad to open")
     parser.add_argument("--port", type=int, default=None, help="port to serve on")
     parser.add_argument("--no-browser", action="store_true", help="do not open a browser")
+    parser.add_argument(
+        "--local", action="store_true",
+        help="serve to this machine only, not to the network",
+    )
     arguments = parser.parse_args(list(argv) if argv is not None else None)
 
     configure_logging()
@@ -1493,7 +1540,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     port = int(arguments.port) if arguments.port else free_port()
     url = f"http://localhost:{port}"
-    print(f"Microscopy Viewer — spatial dashboard\n{url}\n")
+    print(f"Microscopy Viewer — spatial dashboard\n{url}")
+    if arguments.local:
+        print("(this machine only)\n")
+    else:
+        others = network_urls(port)
+        if others:
+            print("From another machine on the network:")
+            for other in others:
+                print(f"  {other}")
+        print(
+            "Anyone who can reach those addresses can open the page — there is no "
+            "login.\nStart with --local to keep it to this machine.\n"
+        )
     if arguments.file:
         print(f"opening {arguments.file}")
     print("Close this window to stop the server.\n", flush=True)
@@ -1513,7 +1572,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from streamlit.web import cli as stcli
 
-    sys.argv = command(arguments.file, port=port)[2:]  # drop "python -m"
+    address = LOCAL_ADDRESS if arguments.local else NETWORK_ADDRESS
+    sys.argv = command(arguments.file, port=port, address=address)[2:]  # drop "python -m"
     try:
         return int(stcli.main(standalone_mode=False) or 0)
     except SystemExit as exit_code:  # click raises this on a clean stop
