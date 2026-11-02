@@ -249,8 +249,44 @@ def test_the_check_command() -> None:
     done = subprocess.run(ph.check_command(sys.executable), capture_output=True, text=True, timeout=300)
     ok, missing, version = ph.parse_check(done.stdout)
     check(version == sys.version.split()[0], "the version is reported")
-    check(len(ok) + len(missing) == len(ph.REQUIRED_MODULES), "every module is accounted for")
+    check(len(ok) + len(missing) == len(ph.CHECKED_MODULES), "every module is accounted for")
     check("yaml" in ok, "what is there is reported as there")
+
+    # A module one step needs is not a broken environment. louvain has no wheel
+    # past Python 3.11, so pip builds igraph's C core and stops on CMake; the
+    # panel used to answer that by advising the install that had just failed.
+    check(
+        "louvain" in ph.OPTIONAL_MODULES and "louvain" not in ph.REQUIRED_MODULES,
+        "louvain is one step's dependency, not the environment's",
+    )
+    check(
+        set(ph.CHECKED_MODULES) == set(ph.REQUIRED_MODULES) | set(ph.OPTIONAL_MODULES),
+        "and the check still probes both, so a missing one is still reported",
+    )
+
+    pretend = [
+        "louvain - ModuleNotFoundError No module named 'louvain'",
+        "itk - ImportError DLL load failed",
+    ]
+    blocking, optional = ph.split_missing(pretend)
+    check(
+        [ph.module_of(entry) for entry in blocking] == ["itk"],
+        f"what every run needs is told apart from what one step needs: {blocking}",
+    )
+    check(
+        [ph.module_of(entry) for entry in optional] == ["louvain"],
+        f"and the optional one is named separately: {optional}",
+    )
+    note = ph.optional_note(optional)
+    check(
+        "Overview plots" in note and "cmake" in note.lower(),
+        f"the advice says what it costs and what actually installs it: {note}",
+    )
+    check(
+        "requirements.txt" not in note,
+        "and does not send the reader back to the install that failed",
+    )
+    check(ph.optional_note(blocking) == "", "a blocking module gets no such note")
 
 
 def main() -> int:

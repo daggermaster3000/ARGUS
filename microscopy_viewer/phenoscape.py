@@ -41,6 +41,7 @@ import sys
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 from .utils import get_logger
 
@@ -76,8 +77,9 @@ DEFAULT_REGEX = (
     r"_z\d{3}_c\d{1}_stitch_ch(?P<channel_id>\d{2})\.tif$"
 )
 
-#: The modules the runner imports, which is what "phenoscapes works in this
-#: Python" means. Checked one by one so a missing elastix is named as such.
+#: The modules the runner imports for every run, which is what "phenoscapes
+#: works in this Python" means. Checked one by one so a missing elastix is named
+#: as such.
 REQUIRED_MODULES = (
     "phenoscapes",
     "yaml",
@@ -88,10 +90,27 @@ REQUIRED_MODULES = (
     "cellpose",
     "scanpy",
     "cv2",
-    # Only the Overview plots step needs it (scanpy's Louvain clustering), and it
-    # has no wheel past Python 3.11: building it takes CMake and a C compiler.
-    "louvain",
 )
+
+#: Modules one step needs, mapped to that step and to how to get them.
+#:
+#: Kept apart from :data:`REQUIRED_MODULES` because a missing one is not a
+#: broken environment. ``louvain`` has no wheel past Python 3.11, so pip builds
+#: igraph's C core from source and stops at "You need to install CMake before
+#: compiling igraph" — and the panel used to answer that by advising the very
+#: install that had just failed. Everything except the Overview plots runs
+#: without it.
+OPTIONAL_MODULES = {
+    "louvain": (
+        "the Overview plots step, for scanpy's Louvain clustering",
+        "it has no wheel past Python 3.11, so pip builds igraph's C core from "
+        "source: install CMake first (python -m pip install cmake), then "
+        "python -m pip install louvain",
+    ),
+}
+
+#: Everything the check probes: what every run needs, then what one step needs.
+CHECKED_MODULES = REQUIRED_MODULES + tuple(OPTIONAL_MODULES)
 
 
 @dataclass(frozen=True)
@@ -411,10 +430,10 @@ def child_environment(source_dir: str | Path | None) -> dict[str, str]:
 
 
 def check_command(python: str) -> list[str]:
-    """A command that prints which of :data:`REQUIRED_MODULES` import in *python*."""
+    """A command that prints which of :data:`CHECKED_MODULES` import in *python*."""
     probe = (
         "import importlib, sys\n"
-        f"for name in {list(REQUIRED_MODULES)!r}:\n"
+        f"for name in {list(CHECKED_MODULES)!r}:\n"
         "    try:\n"
         "        importlib.import_module(name)\n"
         "        print('ok', name)\n"
@@ -436,6 +455,37 @@ def parse_check(output: str) -> tuple[list[str], list[str], str]:
         elif line.startswith("python "):
             version = line[7:].strip()
     return ok, missing, version
+
+
+def module_of(entry: str) -> str:
+    """The module name out of one ``missing`` line, which carries its reason too."""
+    return str(entry).split(" ", 1)[0].strip()
+
+
+def split_missing(missing: Sequence[str]) -> tuple[list[str], list[str]]:
+    """``(blocking, optional)`` out of what :func:`parse_check` found missing.
+
+    A run needs everything in :data:`REQUIRED_MODULES`; the rest costs one step.
+    Telling the two apart is the difference between "this Python will not work"
+    and "this Python will not draw the overview plots".
+    """
+    blocking, optional = [], []
+    for entry in missing:
+        (optional if module_of(entry) in OPTIONAL_MODULES else blocking).append(str(entry))
+    return blocking, optional
+
+
+def optional_note(missing: Sequence[str]) -> str:
+    """One sentence per optional module that is missing: what it costs, and how to get it."""
+    lines = []
+    for entry in missing:
+        name = module_of(entry)
+        detail = OPTIONAL_MODULES.get(name)
+        if detail is None:
+            continue
+        needed_by, remedy = detail
+        lines.append(f"{name} is missing; only {needed_by} needs it. To install it, {remedy}.")
+    return " ".join(lines)
 
 
 @dataclass(frozen=True)

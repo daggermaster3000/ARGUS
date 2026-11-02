@@ -879,14 +879,26 @@ class PhenoscapeWidget(QWidget):
                     "That Python did not answer. Is it a python executable?\n"
                     + "\n".join(self._check_output[-5:])
                 )
-            elif missing:
-                self._env_status.setText(
-                    f"Python {version}. Missing: " + "; ".join(missing)
-                    + ". Install phenoscapes' requirements.txt in it, or set Code to the "
-                    "folder holding the phenoscapes package."
-                )
             else:
-                self._env_status.setText(f"Python {version}: phenoscapes and everything it needs import.")
+                blocking, optional = ph.split_missing(missing)
+                if blocking:
+                    self._env_status.setText(
+                        f"Python {version}. Missing: " + "; ".join(blocking)
+                        + ". Install phenoscapes' requirements.txt in it, or set Code to "
+                        "the folder holding the phenoscapes package."
+                        + (" " + ph.optional_note(optional) if optional else "")
+                    )
+                elif optional:
+                    # Not a broken environment: every step but one runs. Saying
+                    # "missing" and pointing at requirements.txt sent people back
+                    # to the install that had just failed to build.
+                    self._env_status.setText(
+                        f"Python {version}: phenoscapes runs. " + ph.optional_note(optional)
+                    )
+                else:
+                    self._env_status.setText(
+                        f"Python {version}: phenoscapes and everything it needs import."
+                    )
         else:
             if self._failed:
                 self._status.setText("Finished with failures: " + "; ".join(self._failed))
