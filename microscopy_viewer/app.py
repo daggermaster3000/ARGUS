@@ -87,6 +87,10 @@ class MicroscopyViewer:
         self._build_docks()
         self._bind_shortcuts()
         self._install_dragdrop()
+        # Right-click an image layer ▸ less its local median, as the cells analysis sees it.
+        from .widgets.local_median import install_layer_action
+
+        install_layer_action(self.viewer, self.toolbar.set_status)
 
         # Must exist before any image is added: it registers each pyramid the
         # first time it sees the layer.

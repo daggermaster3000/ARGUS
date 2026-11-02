@@ -432,6 +432,20 @@ gives you the whole panel as tab-separated text.
 If a file carries no voxel size, the panel says so explicitly and measurements
 switch to pixels rather than silently reporting wrong micrometres.
 
+### Median filter: an image less its local median
+
+Right-click any image layer in the layer list ▸ **Median filter: less the local
+median (45 µm)**. The layer is flattened to its brightest plane (as the cells
+analysis measures it), the median over 45 µm round each pixel is worked out
+and taken away — the same settings as the analysis' *mean (median filter)*,
+which its positivity rule compares — and the result is added above it as
+*`<layer>` less local median*, in the layer's colour, from 0 to its 99.9th
+percentile. Labelled cells stand out of a bright patch of tissue; an evenly
+bright patch, which the raw channel shows as bright, goes dark. A few seconds a
+slide scan, in the background; it closes with its sample. Select several image
+layers to do them all. The Cell counter's **Show less local median** button does
+the same for the image it counts on.
+
 ### Cell counter
 
 **Cell counter** counts cells by hand, into a label map the analysis reads like a
@@ -445,7 +459,13 @@ segmentation.
    - **Every plane (3D)**: a dot belongs to its plane. Offered for stacks up to
      250 million voxels.
    **Show maximum projection** adds the sample's projection, every channel, to
-   count on.
+   count on. **Show less local median** adds the chosen image less its local
+   median over 45 µm — the image the cells analysis compares to call a cell
+   positive, with the same settings — so you count the cells the way the rule
+   sees them: a labelled cell stands out of a bright patch of tissue, and the
+   patch itself goes dark. The same is on every image layer's right-click menu
+   in the layer list: **Median filter: less the local median (45 µm)** (see
+   below).
 2. Switch **Count** on. A click puts a dot on a cell, a small disc of the chosen
    **Dot diameter** with a label of its own, so each dot is one cell and touching
    dots stay separate. Shift-click removes a dot; dragging still pans; Ctrl+Z and
@@ -2371,6 +2391,7 @@ microscopy_viewer/
     movie_dialog.py         pick a range and a rate, render the frames
     overview_window.py      the folder's overview with every sample outlined
     cell_counter_widget.py  click cells onto a labels layer, save it for the analysis
+    local_median.py         an image layer less its local median (right-click action, Cell counter)
     sample_files.py         close, write into and reopen a sample that is on screen
     acquisition_widget.py   pick a stack and its channels, preview, export the movie
   utils.py                  logging, unit conversion, geometry helpers

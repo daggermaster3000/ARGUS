@@ -140,6 +140,16 @@ class CellCounterWidget(QWidget):
         )
         self._mip_button.clicked.connect(self.show_projection)
         form.addRow(self._mip_button)
+        self._median_button = QPushButton("Show less local median")
+        self._median_button.setToolTip(
+            "Add the chosen image less its local median over 45 µm — the image the cells "
+            "analysis compares to call a cell positive (the same settings), so a labelled "
+            "cell stands out of a bright patch of tissue the way the analysis sees it. A stack "
+            "is flattened to its brightest plane first. Also: right-click any image layer ▸ "
+            "Median filter."
+        )
+        self._median_button.clicked.connect(self.show_less_local_median)
+        form.addRow(self._median_button)
         return box
 
     def _build_count_box(self) -> QGroupBox:
@@ -262,6 +272,7 @@ class CellCounterWidget(QWidget):
         has_layer = self._layer is not None
         self._new_button.setEnabled(has_image)
         self._mip_button.setEnabled(has_image)
+        self._median_button.setEnabled(has_image)
         self._load_button.setEnabled(has_image and bool(self._source()))
         for button in (self._count_button, self._undo_button, self._clear_button):
             button.setEnabled(has_layer)
@@ -481,6 +492,18 @@ class CellCounterWidget(QWidget):
         data = np.asarray(self._layer.data)
         self._count = cc.count(data)
         self._count_label.setText(f"{self._count} cell{'s' if self._count != 1 else ''}")
+
+    # -- the channel less its local median -------------------------------------
+
+    def show_less_local_median(self, *_args) -> None:
+        """Add the chosen image less its local median, as the cells analysis compares it."""
+        from .local_median import add_less_local_median
+
+        image = self.image_layer()
+        if image is None:
+            self._status.setText("Choose an image first.")
+            return
+        add_less_local_median(self._viewer, image, self._status.setText)
 
     # -- the projection -------------------------------------------------------
 
