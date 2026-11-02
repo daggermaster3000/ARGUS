@@ -960,11 +960,30 @@ By default only the *first* acquisition is selected. Every 4i cycle images the s
 cells, so segmenting all seven gives you the same nuclei seven times and takes
 seven times as long.
 
+That is also the reason for **from every cycle of the well**. Segment one cycle,
+and measure every channel of every other cycle against the objects it found: one
+row per cell, carrying every stain of the experiment. Segmenting each cycle
+instead gives seven sets of objects that nothing links — there is no object
+identity between them, so a reporter from cycle 5 cannot be put beside a marker
+from cycle 1 without matching the two sets up first, which is the problem 4i
+alignment exists to avoid having.
+
+The other cycles are found through the plate survey rather than the ticked job
+list, because the whole point is that they are *not* ticked. Columns carry the
+cycle (`Mean intensity (Ab1_DAPI, cycle 3)`) since a plate usually gives its
+nuclear stain the same label in every cycle and the columns would otherwise
+collide silently, the last one read winning with numbers that look right. A
+cycle whose grid does not match the segmented one is left out and named in the
+image's notes: the objects are at the coordinates of the image they were found
+in, so the same index on a different grid is a different place, and the
+measurement cannot tell.
+
 | Setting | What it does |
 |---|---|
 | **Wells** / **Acquisitions** | What to run. Everything, one row, one cycle — ctrl-click and shift-click. Wells that already carry the label set are marked. |
 | **Segment** / **Nuclei** / **Membrane** / **Measure** | As in the Segmentation panel, but resolved per image by wavelength or label. **Nuclei** gives whole cells instead of nuclei; **Membrane** grows the nuclei into cells along a stain, written as `<name>_cells`. A cycle that lacks a picked channel is reported in its outcome rather than quietly substituted. |
 | **every channel, in columns of its own** | Measure all the stains of each image rather than one, adding `Mean intensity (Green488-bCAT)` and its four companions per channel. One segmentation, four answers. |
+| **from every cycle of the well, not just this one** | Measure the channels of *every* cycle against this image's objects, adding a set of columns per channel per cycle: `Mean intensity (Green488-bCAT, cycle 3)`. Needs the box above it. |
 | **Median filter** | The same setting as the Segmentation panel's, shown here because a plate run is where it costs real time; the two are kept in step. The line under it estimates what it adds to the selected images. |
 | **Label set** | Name written under `labels/`. Give a second run a different name to keep both. |
 | **Pyramid level** | Which level to segment. 0 is full resolution; each step up halves the image and quarters the time. The panel shows the resulting extent and µm/px. |

@@ -196,6 +196,25 @@ class BatchSegmentationWidget(QWidget):
         )
         self._measure_all.toggled.connect(self.refresh_settings_summary)
         form.addRow("", self._measure_all)
+
+        self._measure_cycles = QCheckBox("from every cycle of the well, not just this one")
+        self._measure_cycles.setToolTip(
+            "Measure the channels of every cycle of the well against this image's "
+            "objects, adding a set of columns per channel per cycle.\n\n"
+            "A 4i plate images the same cells every cycle onto the same grid, so one "
+            "segmentation describes the objects in all of them. Segmenting each cycle "
+            "instead finds the same nuclei seven times and gives seven sets of objects "
+            "that nothing links — a reporter from cycle 5 cannot be put beside a marker "
+            "from cycle 1. Measured this way there is one object per cell carrying every "
+            "stain of the experiment.\n\n"
+            "Tick one cycle on the left: the others are read for their intensities, not "
+            "segmented. Costs one read of every channel of every cycle. A cycle on a "
+            "different grid is left out and named in the run's notes."
+        )
+        self._measure_cycles.setEnabled(False)
+        self._measure_all.toggled.connect(self._measure_cycles.setEnabled)
+        self._measure_cycles.toggled.connect(self.refresh_settings_summary)
+        form.addRow("", self._measure_cycles)
         return box
 
     def _build_preprocessing_box(self) -> QGroupBox:
@@ -550,6 +569,9 @@ class BatchSegmentationWidget(QWidget):
             membrane=self._membrane_box.currentData() or batch.ChannelPick(),
             measure=self._measure_box.currentData() or batch.ChannelPick(),
             measure_all_channels=self._measure_all.isChecked(),
+            measure_every_cycle=(
+                self._measure_all.isChecked() and self._measure_cycles.isChecked()
+            ),
             label_name=self._label_name.text().strip() or batch.DEFAULT_LABEL_NAME,
             level=int(self._level.value()),
             overwrite=self._overwrite.isChecked(),
@@ -617,14 +639,18 @@ class BatchSegmentationWidget(QWidget):
         try:
             from napari.qt.threading import thread_worker
         except Exception:  # pragma: no cover - no Qt threading available
-            for outcome in batch.iter_batch(jobs, settings, progress=_progress):
+            for outcome in batch.iter_batch(
+                jobs, settings, progress=_progress, survey=self._survey
+            ):
                 self._on_outcome(outcome)
             self._on_finished(settings)
             return
 
         @thread_worker
         def _work():
-            for outcome in batch.iter_batch(jobs, settings, progress=_progress):
+            for outcome in batch.iter_batch(
+                jobs, settings, progress=_progress, survey=self._survey
+            ):
                 yield outcome
 
         worker = _work()

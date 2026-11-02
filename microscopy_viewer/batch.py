@@ -189,6 +189,23 @@ class ImageJob:
             float(by_axis.get("X", 1.0) or 1.0),
         )
 
+    def spatial_shape(self, level: int = 0) -> tuple[int, ...]:
+        """The shape one channel comes back as, without reading it.
+
+        :func:`read_channel` indexes the channel axis away, so this is what the
+        array it returns is shaped like. Known from the metadata, which is what
+        makes it possible to reject a cycle that does not line up before paying
+        to read a 288 MB plane of it.
+        """
+        if not self.levels:
+            return ()
+        shape = self.level(level).shape
+        return tuple(
+            int(size)
+            for axis, size in zip(self.axes, shape)
+            if axis.upper() not in ("C", "T")
+        )
+
     def describe(self) -> str:
         if self.acquisition is not None:
             return f"{self.well} · cycle {self.acquisition}"
@@ -231,6 +248,45 @@ class PlateSurvey:
                 key = channel.wavelength_id or channel.label or str(channel.index)
                 seen.setdefault(key, channel)
         return tuple(seen.values())
+
+    def cycle_siblings(self, job: ImageJob) -> tuple[ImageJob, ...]:
+        """The same field of the same well, in the plate's other cycles.
+
+        A 4i plate images the same cells every cycle onto the same grid, so one
+        segmentation describes the objects in all of them. This is how the other
+        cycles are found: by the well, not by what happens to have been ticked
+        for segmenting — the point of measuring every cycle is to segment one.
+
+        A well with several fields per cycle is matched by position: the second
+        field of cycle 0 pairs with the second field of cycle 1. Pairing by
+        acquisition alone would hand every field of every cycle to one
+        segmentation, which is the same cells measured in the wrong place.
+
+        Empty when the plate records no acquisitions, which is what a plate that
+        is not a 4i plate looks like.
+        """
+        if job.acquisition is None:
+            return ()
+        by_acquisition: dict[Any, list[ImageJob]] = {}
+        for other in self.jobs:
+            if other.well != job.well or other.acquisition is None:
+                continue
+            by_acquisition.setdefault(other.acquisition, []).append(other)
+
+        mine = by_acquisition.get(job.acquisition, [])
+        try:
+            field = mine.index(job)
+        except ValueError:
+            field = 0
+
+        siblings: list[ImageJob] = []
+        for acquisition in sorted(by_acquisition):
+            if acquisition == job.acquisition:
+                continue
+            group = by_acquisition[acquisition]
+            if field < len(group):
+                siblings.append(group[field])
+        return tuple(siblings)
 
     def labels_present(self, name: str) -> tuple[ImageJob, ...]:
         """Images that already carry a label set called *name*."""
@@ -584,6 +640,21 @@ class BatchSettings:
     #: stains per object for one segmentation, and it is the only way to ask
     #: whether the nuclei picked out by DAPI are the ones carrying the reporter.
     measure_all_channels: bool = False
+    #: Measure the channels of **every cycle** of the well, not only this image's.
+    #:
+    #: A 4i plate images the same cells every cycle onto the same grid, so one
+    #: segmentation describes the objects in all of them. Segmenting each cycle
+    #: instead finds the same nuclei seven times and gives seven sets of objects
+    #: that nothing links: there is no object identity across the cycles, so a
+    #: reporter measured in cycle 5 cannot be put beside a marker from cycle 1.
+    #: Measured this way there is one object per cell carrying every stain of
+    #: the experiment, which is what a 4i run is for.
+    #:
+    #: Needs :attr:`measure_all_channels`, which is what says "the other
+    #: channels too"; this says which images those channels come from. The
+    #: columns then carry the cycle, because a plate usually gives its nuclear
+    #: stain the same label in every one.
+    measure_every_cycle: bool = False
     #: Name of the label set written into each image.
     label_name: str = DEFAULT_LABEL_NAME
     #: Pyramid level segmented. 0 is full resolution; 1 is half, four times
@@ -706,24 +777,94 @@ class _LazyChannels(Mapping):
     and lets it go.
     """
 
-    def __init__(self, job: ImageJob, channels: Sequence[ChannelInfo], level: int):
-        self._job = job
-        self._channels = {_channel_name(channel): channel for channel in channels}
+    def __init__(self, entries: "Mapping[str, tuple[ImageJob, ChannelInfo]]", level: int):
+        self._entries = dict(entries)
         self._level = level
 
     def __getitem__(self, key: str) -> np.ndarray:
-        return read_channel(self._job, self._channels[key], self._level)
+        job, channel = self._entries[key]
+        return read_channel(job, channel, self._level)
 
     def __iter__(self):
-        return iter(self._channels)
+        return iter(self._entries)
 
     def __len__(self) -> int:
-        return len(self._channels)
+        return len(self._entries)
 
 
 def _channel_name(channel: ChannelInfo) -> str:
     """Short, stable column name for a channel: its label, else its wavelength."""
     return channel.label or channel.wavelength_id or f"channel {channel.index}"
+
+
+def _cycle_channel_name(job: ImageJob, channel: ChannelInfo) -> str:
+    """The same, with the cycle on it.
+
+    Used only when a run measures across cycles. A 4i plate usually gives its
+    nuclear stain the same label in every cycle, so without the cycle the
+    columns collide and the last one read wins — silently, and with numbers that
+    look right. When the plate records no acquisition there is nothing to add.
+    """
+    name = _channel_name(channel)
+    if job.acquisition is None:
+        return name
+    return f"{name}, cycle {job.acquisition}"
+
+
+def _channels_to_measure(
+    job: ImageJob,
+    settings: "BatchSettings",
+    measured: ChannelInfo,
+    survey: "PlateSurvey | None",
+) -> tuple[dict[str, tuple[ImageJob, ChannelInfo]], list[str]]:
+    """``(name -> (image, channel), notes)`` for every extra channel to measure.
+
+    The image's own other channels, and — when asked — every channel of every
+    other cycle of the same well. A cycle whose grid does not match the one the
+    objects were found on is left out and named: the intensities would be read
+    at the wrong pixels, and the measurement cannot tell.
+    """
+    entries: dict[str, tuple[ImageJob, ChannelInfo]] = {}
+    notes: list[str] = []
+    if not settings.measure_all_channels:
+        return entries, notes
+
+    across = bool(settings.measure_every_cycle)
+    name_of = (lambda c: _cycle_channel_name(job, c)) if across else _channel_name
+    for channel in job.channels:
+        if channel.index != measured.index:
+            entries[name_of(channel)] = (job, channel)
+
+    if not across:
+        return entries, notes
+    if survey is None:
+        notes.append(
+            "Measuring every cycle needs the plate survey, which this run was not "
+            "given; only this image's channels were measured."
+        )
+        return entries, notes
+
+    siblings = survey.cycle_siblings(job)
+    if not siblings:
+        notes.append(
+            "No other cycle of this well to measure: the plate records no further "
+            "acquisitions for it."
+        )
+        return entries, notes
+
+    here = job.spatial_shape(settings.level)
+    for sibling in siblings:
+        there = sibling.spatial_shape(settings.level)
+        if here and there and there != here:
+            notes.append(
+                f"cycle {sibling.acquisition} is {there} and this image is {here}; "
+                "its channels were not measured, because the objects are not in "
+                "the same place on a different grid."
+            )
+            continue
+        for channel in sibling.channels:
+            entries.setdefault(_cycle_channel_name(sibling, channel), (sibling, channel))
+    return entries, notes
 
 
 def _table_name(job: ImageJob) -> str:
@@ -766,6 +907,7 @@ def segment_job(
     job: ImageJob,
     settings: BatchSettings,
     progress: Callable[[str], None] | None = None,
+    survey: PlateSurvey | None = None,
 ) -> ImageOutcome:
     """Segment one image and write its labels. Never raises; failures come back
     as an outcome so one bad image does not end a run of three hundred."""
@@ -862,14 +1004,12 @@ def segment_job(
                     signal, measured_channel = candidate, measured
 
         extra = None
-        if settings.measure_all_channels:
-            others = [
-                other for other in job.channels if other.index != measured_channel.index
-            ]
-            if others:
-                if progress is not None:
-                    progress(f"{job.describe()}: measuring {len(others)} further channel(s)")
-                extra = _LazyChannels(job, others, settings.level)
+        entries, extra_notes = _channels_to_measure(job, settings, measured_channel, survey)
+        notes.extend(extra_notes)
+        if entries:
+            if progress is not None:
+                progress(f"{job.describe()}: measuring {len(entries)} further channel(s)")
+            extra = _LazyChannels(entries, settings.level)
 
         stats = sg.object_table(
             result.masks,
@@ -918,17 +1058,22 @@ def iter_batch(
     jobs: Sequence[ImageJob],
     settings: BatchSettings,
     progress: Callable[[str], None] | None = None,
+    survey: PlateSurvey | None = None,
 ) -> Iterator[ImageOutcome]:
     """Run *jobs* one at a time, yielding each outcome as it lands.
 
     A generator so that a caller can stop between images — a plate takes hours,
     and the only safe place to interrupt is between one image and the next, with
     the labels of the last one already on disk.
+
+    *survey* is the whole plate, which a run needs when it measures across
+    cycles: the other cycles of a well are deliberately **not** in *jobs* — the
+    point of measuring them is that only one of them is segmented.
     """
     for index, job in enumerate(jobs, start=1):
         if progress is not None:
             progress(f"[{index}/{len(jobs)}] {job.describe()}")
-        yield segment_job(job, settings, progress=progress)
+        yield segment_job(job, settings, progress=progress, survey=survey)
 
 
 def run_batch(
@@ -940,7 +1085,7 @@ def run_batch(
     """Run the whole batch to completion and write the plate-level summary."""
     started = time.perf_counter()
     report = BatchReport()
-    for outcome in iter_batch(jobs, settings, progress=progress):
+    for outcome in iter_batch(jobs, settings, progress=progress, survey=survey):
         report.outcomes.append(outcome)
     report.elapsed_s = time.perf_counter() - started
     if settings.write_tables and survey is not None:

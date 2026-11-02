@@ -705,6 +705,176 @@ def test_measuring_every_channel(directory: Path) -> None:
     )
 
 
+def test_measuring_every_cycle(directory: Path) -> None:
+    """One segmentation, every stain of the experiment on the same objects.
+
+    The alternative is to segment each cycle, which finds the same nuclei once
+    per cycle and gives one set of objects per cycle that nothing links: a
+    reporter from cycle 2 cannot be put beside a marker from cycle 1, because
+    there is no object identity between them.
+    """
+    print("every cycle of the well, against one segmentation")
+
+    try:
+        import pandas as pd
+    except ImportError:
+        print("  skip pandas is not installed")
+        return
+
+    seg.register_backend(_StubBackend())
+    plate = _make_plate(directory)
+    survey = batch.survey_plate(plate)
+
+    # One cycle is segmented. That is the point: the other is read, not run.
+    jobs = batch.select_jobs(survey, wells=["B/02"], acquisitions=[1])
+    check(len(jobs) == 1, f"one image is segmented ({len(jobs)})")
+
+    siblings = survey.cycle_siblings(jobs[0])
+    check(
+        [job.acquisition for job in siblings] == [2],
+        f"and the well's other cycle is found through the survey, not the job "
+        f"list: {[job.acquisition for job in siblings]}",
+    )
+    check(
+        all(job.well == jobs[0].well for job in siblings),
+        "from the same well, which is the only well whose cells these are",
+    )
+
+    settings = _stub_settings(
+        measure_all_channels=True,
+        measure_every_cycle=True,
+        write_tables=True,
+        table_dir=directory / "tables",
+    )
+    report = batch.run_batch(jobs, settings, survey=survey)
+    outcome = report.outcomes[0]
+    check(outcome.ok, f"the run finishes ({outcome.message})")
+
+    # Cycle 1 is Ab1_DAPI + Green488-x1 and cycle 2 is Ab2_DAPI + Green488-x2.
+    # DAPI is segmented and measured, so it is not repeated as an extra.
+    check(
+        outcome.measured_extra == (
+            "Green488-x1, cycle 1",
+            "Ab2_DAPI, cycle 2",
+            "Green488-x2, cycle 2",
+        ),
+        f"every other channel of every cycle is measured: {outcome.measured_extra}",
+    )
+    check(
+        all(", cycle " in name for name in outcome.measured_extra),
+        "each carrying its cycle, because a plate gives its nuclear stain the "
+        "same label in every one and the columns would collide",
+    )
+
+    frame = pd.read_csv(outcome.table_path)
+    for column in (
+        "Mean intensity (Green488-x1, cycle 1)",
+        "Mean intensity (Ab2_DAPI, cycle 2)",
+        "Mean intensity (Green488-x2, cycle 2)",
+    ):
+        check(column in frame.columns, f"{column!r} is in the table")
+        check(frame[column].notna().all(), f"with a number for every object in {column!r}")
+    check(
+        "Mean intensity" in frame.columns,
+        "and the segmented channel keeps its own unqualified columns",
+    )
+    check(
+        len(frame) == int(outcome.n_objects),
+        f"one row per object, not one per cycle ({len(frame)} rows, "
+        f"{outcome.n_objects} objects)",
+    )
+    check(
+        not frame["Mean intensity (Ab2_DAPI, cycle 2)"].equals(frame["Mean intensity"]),
+        "the other cycle really is a different image, not this one read twice",
+    )
+
+    summary = pd.read_csv(report.summary_path)
+    check(
+        "cycle 2" in str(summary["extra_channels"].iloc[0]),
+        f"the plate summary records what was measured: "
+        f"{summary['extra_channels'].iloc[0]}",
+    )
+
+    # Without the flag, nothing changes: only this image's channels.
+    plain = _stub_settings(
+        measure_all_channels=True,
+        write_tables=True,
+        overwrite=True,  # the labels of the run above are already on this image
+        table_dir=directory / "plain",
+    )
+    only_here = batch.run_batch(jobs, plain, survey=survey).outcomes[0]
+    check(
+        only_here.measured_extra == ("Green488-x1",),
+        f"off, a run measures this image alone and the column names do not move: "
+        f"{only_here.measured_extra}",
+    )
+
+    # And it needs the survey: without one there is nothing to find the other
+    # cycles in, which is worth saying rather than quietly measuring one cycle.
+    from dataclasses import replace as _replace
+
+    blind = batch.segment_job(jobs[0], _replace(settings, overwrite=True))
+    check(
+        blind.measured_extra == ("Green488-x1, cycle 1",),
+        f"with no survey only this image's channels are measured: "
+        f"{blind.measured_extra}",
+    )
+    check(
+        "survey" in blind.message,
+        f"and the run says why rather than looking like it worked: {blind.message}",
+    )
+
+
+def test_a_cycle_on_another_grid_is_left_out(directory: Path) -> None:
+    """Intensities read at the wrong pixels are wrong, and look fine.
+
+    The objects are at the coordinates of the image they were found in. A cycle
+    of a different size is a different grid, so the same index is a different
+    place, and nothing downstream can tell.
+    """
+    print("a cycle that does not line up")
+
+    seg.register_backend(_StubBackend())
+    plate = _make_plate(directory)
+    survey = batch.survey_plate(plate)
+    jobs = batch.select_jobs(survey, wells=["B/02"], acquisitions=[1])
+    job = jobs[0]
+
+    check(
+        job.spatial_shape(0) == (1, 32, 48),
+        f"the shape one channel comes back as is known from the metadata, "
+        f"without reading it: {job.spatial_shape(0)}",
+    )
+
+    # Shrink the sibling's recorded shape, as a plate with a smaller cycle has.
+    from dataclasses import replace
+
+    sibling = survey.cycle_siblings(job)[0]
+    smaller = replace(
+        sibling, levels=tuple(replace(info, shape=(2, 1, 16, 24)) for info in sibling.levels)
+    )
+    patched = batch.PlateSurvey(
+        path=survey.path,
+        name=survey.name,
+        jobs=tuple(smaller if other is sibling else other for other in survey.jobs),
+    )
+
+    settings = _stub_settings(measure_all_channels=True, measure_every_cycle=True)
+    outcome = batch.segment_job(job, settings, survey=patched)
+    check(
+        outcome.ok,
+        f"the image is still measured rather than failed ({outcome.message})",
+    )
+    check(
+        outcome.measured_extra == ("Green488-x1, cycle 1",),
+        f"but the cycle on another grid contributes nothing: {outcome.measured_extra}",
+    )
+    check(
+        "cycle 2" in outcome.message and "same place" in outcome.message,
+        f"and it is named, with why: {outcome.message}",
+    )
+
+
 def test_anndata_beside_the_tables(directory: Path) -> None:
     print("an .h5ad beside each table")
 
@@ -815,6 +985,8 @@ def main() -> int:
             ("cells", test_cells_are_grown_along_a_membrane_channel),
             ("measured", test_which_channel_was_measured),
             ("allchannels", test_measuring_every_channel),
+            ("everycycle", test_measuring_every_cycle),
+            ("offgrid", test_a_cycle_on_another_grid_is_left_out),
             ("anndata", test_anndata_beside_the_tables),
         ):
             case = directory / name
