@@ -978,12 +978,71 @@ image's notes: the objects are at the coordinates of the image they were found
 in, so the same index on a different grid is a different place, and the
 measurement cannot tell.
 
+#### Registration quality: which cycles still line up, and where
+
+Every cycle is aligned onto a reference before anything is measured, and the
+alignment is never perfect everywhere — an organoid lifts at one edge, a corner
+of the well dries, the stage repositions a micron out. Where it failed, the
+objects found in the reference cycle sit over *different cells* in the later
+ones, and every number measured there is a number about the wrong cell with
+nothing in the table to say so.
+
+**score how well the cycles line up** measures that two ways, per image:
+
+- **A correlation, per object.** The nuclear stain is imaged in every cycle, so
+  inside one object it should look like itself; where it does not, that object
+  moved. This is the metric
+  [`abbott-features`](https://github.com/pelkmanslab/abbott-features) uses in its
+  `cycle_registration_quality` task — the pixels inside one label, in two
+  cycles, through Pearson — computed here on the segmented channel, which is the
+  stain the alignment was fitted on in the first place.
+- **A shift, per field,** by phase cross-correlation, in µm, in the run summary.
+  Upsampled, because a 4i misalignment worth finding is often well under a pixel
+  and an integer answer would report it as none at all.
+
+**Why both, and why the per-object one is the one to gate on.** On a field
+whose top-left corner has moved four pixels and whose rest has not, the
+whole-field shift reads **0.00 µm** — correctly, because as a whole it did not
+move — while the per-object correlation puts every object over the moved corner
+below every object outside it, with no overlap, so a single cut separates them
+exactly. A number per image cannot see a corner; a number per object can. (Both
+of those are asserted, against a shift this repo's own test applied.)
+
+Per **object** rather than per tile because that is the unit everything else
+here answers in: an object straddling a tile boundary would get two different
+answers for the one row it has in the table.
+
+#### Keeping the regions that are right
+
+Nothing is dropped by the run. The scores arrive as ordinary columns, so they are
+already gateable in the **Population analysis** panel like any other measurement
+— `measurable_names()` offers them, and the gates, the include/exclude modes and
+the and/or/xor joins all work on them unchanged. Set `Registration r, worst of N
+cycle(s)` ≥ some value, look at where that cut falls on the distribution, and the
+objects that moved are excluded from everything downstream.
+
+Gate on the **worst-of** column rather than a single cycle's: an object that
+matches in six cycles and not the seventh is an object that moved, and the
+measurement from the seventh is as wrong as if it had moved in all of them. One
+decision instead of seven.
+
+Two things get **no number at all** rather than a confident one, and a blank is
+what the gates already read as "this gate has no opinion":
+
+- an object of fewer than eight pixels, where Pearson's r is near ±1 whatever
+  the data says;
+- a saturated object with no variance inside it, where r is 0/0.
+
+An r of 1.0 over four pixels would otherwise read as "perfectly registered" and
+keep an object that nothing was actually checked on.
+
 | Setting | What it does |
 |---|---|
 | **Wells** / **Acquisitions** | What to run. Everything, one row, one cycle — ctrl-click and shift-click. Wells that already carry the label set are marked. |
 | **Segment** / **Nuclei** / **Membrane** / **Measure** | As in the Segmentation panel, but resolved per image by wavelength or label. **Nuclei** gives whole cells instead of nuclei; **Membrane** grows the nuclei into cells along a stain, written as `<name>_cells`. A cycle that lacks a picked channel is reported in its outcome rather than quietly substituted. |
 | **every channel, in columns of its own** | Measure all the stains of each image rather than one, adding `Mean intensity (Green488-bCAT)` and its four companions per channel. One segmentation, four answers. |
 | **from every cycle of the well, not just this one** | Measure the channels of *every* cycle against this image's objects, adding a set of columns per channel per cycle: `Mean intensity (Green488-bCAT, cycle 3)`. Needs the box above it. |
+| **score how well the cycles line up** | Add `Registration r, cycle N` per object and a `worst of N cycle(s)` column to gate on, plus the whole-field shift in µm in the run summary. Needs the box above it. |
 | **Median filter** | The same setting as the Segmentation panel's, shown here because a plate run is where it costs real time; the two are kept in step. The line under it estimates what it adds to the selected images. |
 | **Label set** | Name written under `labels/`. Give a second run a different name to keep both. |
 | **Pyramid level** | Which level to segment. 0 is full resolution; each step up halves the image and quarters the time. The panel shows the resulting extent and µm/px. |

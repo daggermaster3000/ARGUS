@@ -875,6 +875,100 @@ def test_a_cycle_on_another_grid_is_left_out(directory: Path) -> None:
     )
 
 
+def test_registration_quality_reaches_the_table(directory: Path) -> None:
+    """A cycle that moved is a cycle whose numbers are about different cells.
+
+    The plate is rewritten so cycle 2 is cycle 1 exactly, except where one of
+    the two objects sits: there it is shifted. A score worth having has to call
+    that object bad and the other one good, from the same run, in one table.
+    """
+    print("scoring how well the cycles line up")
+
+    try:
+        import pandas as pd
+        import zarr
+    except ImportError:
+        print("  skip pandas and zarr are needed")
+        return
+
+    from microscopy_viewer import alignment as al
+
+    seg.register_backend(_StubBackend())
+    plate = _make_plate(directory)
+
+    # The stub puts object 1 at rows/cols 0-6 and object 2 at 10-14. Make cycle
+    # 2 a copy of cycle 1 and then move the ground under object 1 alone.
+    root = zarr.open_group(str(plate), mode="a")
+    first = np.asarray(root["B/02/0/0"])
+    second = np.array(first)
+    patch = second[0, :, 0:8, 0:8]
+    second[0, :, 0:8, 0:8] = np.roll(patch, shift=3, axis=-1)
+    root["B/02/1/0"][...] = second
+
+    survey = batch.survey_plate(plate)
+    jobs = batch.select_jobs(survey, wells=["B/02"], acquisitions=[1])
+    settings = _stub_settings(
+        measure_all_channels=True,
+        measure_every_cycle=True,
+        check_registration=True,
+        write_tables=True,
+        table_dir=directory / "tables",
+    )
+    report = batch.run_batch(jobs, settings, survey=survey)
+    outcome = report.outcomes[0]
+    check(outcome.ok, f"the run finishes ({outcome.message})")
+
+    check(
+        [item.cycle for item in outcome.alignment] == [2],
+        f"the other cycle was scored: {[item.cycle for item in outcome.alignment]}",
+    )
+
+    frame = pd.read_csv(outcome.table_path).set_index("Label")
+    per_cycle = al.r_column(2)
+    worst = al.worst_column([2])
+    check(per_cycle in frame.columns, f"{per_cycle!r} is a column of the table")
+    check(worst in frame.columns, f"and so is {worst!r}, which is the one to gate on")
+
+    moved = float(frame.loc[1, per_cycle])
+    still = float(frame.loc[2, per_cycle])
+    check(
+        still > 0.99,
+        f"the object whose ground did not move matches itself (r = {still:.3f})",
+    )
+    check(
+        moved < still - 0.2,
+        f"and the one whose ground moved does not (r = {moved:.3f} against {still:.3f})",
+    )
+    check(
+        float(frame.loc[1, worst]) == moved,
+        "the worst-of column is the worst, which with one cycle is that cycle",
+    )
+
+    # The whole-field number is in the plate summary, beside the per-object one.
+    summary = pd.read_csv(report.summary_path)
+    reported = str(summary["registration"].iloc[0])
+    check(
+        "cycle 2" in reported and "um" in reported and "median r" in reported,
+        f"the summary says how far the field moved and how well it matched: {reported}",
+    )
+
+    # Off by default: a run that did not ask gets no such columns.
+    plain = _stub_settings(
+        measure_all_channels=True,
+        measure_every_cycle=True,
+        write_tables=True,
+        overwrite=True,
+        table_dir=directory / "plain",
+    )
+    quiet = batch.run_batch(jobs, plain, survey=survey).outcomes[0]
+    columns = list(pd.read_csv(quiet.table_path).columns)
+    check(
+        not any(col.startswith(al.R_COLUMN) for col in columns),
+        f"a run that did not ask for it gets no score columns: {columns[-2:]}",
+    )
+    check(quiet.alignment == (), "and nothing to report in the summary")
+
+
 def test_anndata_beside_the_tables(directory: Path) -> None:
     print("an .h5ad beside each table")
 
@@ -987,6 +1081,7 @@ def main() -> int:
             ("allchannels", test_measuring_every_channel),
             ("everycycle", test_measuring_every_cycle),
             ("offgrid", test_a_cycle_on_another_grid_is_left_out),
+            ("registration", test_registration_quality_reaches_the_table),
             ("anndata", test_anndata_beside_the_tables),
         ):
             case = directory / name

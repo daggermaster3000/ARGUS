@@ -215,6 +215,26 @@ class BatchSegmentationWidget(QWidget):
         self._measure_all.toggled.connect(self._measure_cycles.setEnabled)
         self._measure_cycles.toggled.connect(self.refresh_settings_summary)
         form.addRow("", self._measure_cycles)
+
+        self._check_registration = QCheckBox("score how well the cycles line up")
+        self._check_registration.setToolTip(
+            "Add a column per cycle holding, for each object, how well that cycle's "
+            "nuclear stain matches this one's inside it.\n\n"
+            "The nuclear stain is imaged in every cycle, so inside one object it "
+            "should look like itself. Where it does not, that object moved, and "
+            "every intensity measured on it in that cycle is a number about a "
+            "different cell. A field that is well aligned on average can still "
+            "have a corner that lifted, which a single shift per image cannot "
+            "show and a number per object can.\n\n"
+            "Nothing is dropped here. The columns are gated on in the Population "
+            "analysis panel, where the threshold is chosen against the "
+            "distribution. Gate on the worst-of-all-cycles column: an object that "
+            "matches in six cycles and not the seventh still moved."
+        )
+        self._check_registration.setEnabled(False)
+        self._measure_cycles.toggled.connect(self._check_registration.setEnabled)
+        self._check_registration.toggled.connect(self.refresh_settings_summary)
+        form.addRow("", self._check_registration)
         return box
 
     def _build_preprocessing_box(self) -> QGroupBox:
@@ -571,6 +591,11 @@ class BatchSegmentationWidget(QWidget):
             measure_all_channels=self._measure_all.isChecked(),
             measure_every_cycle=(
                 self._measure_all.isChecked() and self._measure_cycles.isChecked()
+            ),
+            check_registration=(
+                self._measure_all.isChecked()
+                and self._measure_cycles.isChecked()
+                and self._check_registration.isChecked()
             ),
             label_name=self._label_name.text().strip() or batch.DEFAULT_LABEL_NAME,
             level=int(self._level.value()),

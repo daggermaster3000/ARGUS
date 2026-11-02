@@ -38,6 +38,7 @@ from typing import Any, Callable, Iterator, Sequence
 
 import numpy as np
 
+from . import alignment as al
 from . import segmentation as sg
 from .loaders.ome_zarr import (
     LABELS_GROUP,
@@ -655,6 +656,19 @@ class BatchSettings:
     #: columns then carry the cycle, because a plate usually gives its nuclear
     #: stain the same label in every one.
     measure_every_cycle: bool = False
+    #: Score how well each other cycle lines up with this one, per object.
+    #:
+    #: Adds a correlation column per cycle and a worst-of-all column, computed
+    #: on the segmented channel — the nuclear stain, imaged in every cycle, so
+    #: inside one object it should look like itself. Where it does not, that
+    #: object moved, and every intensity measured on it in that cycle is a
+    #: number about a different cell. Nothing is dropped here: the columns are
+    #: gated on in the Population analysis panel, against the distribution,
+    #: where a threshold can be chosen by looking.
+    #:
+    #: Needs the other cycles, so it implies the reading
+    #: :attr:`measure_every_cycle` does.
+    check_registration: bool = False
     #: Name of the label set written into each image.
     label_name: str = DEFAULT_LABEL_NAME
     #: Pyramid level segmented. 0 is full resolution; 1 is half, four times
@@ -722,6 +736,8 @@ class ImageOutcome:
     #: this number" cannot be answered from the settings alone.
     measured_channel: str = ""
     measured_extra: tuple[str, ...] = ()
+    #: How each other cycle lined up, when the run was asked to score it.
+    alignment: tuple[Any, ...] = ()
     #: The object table as a DataFrame, kept only while a run is building one
     #: combined AnnData and dropped as soon as it has. Holding every image's
     #: numbers for a whole plate is about sixty megabytes; holding the masks too
@@ -811,11 +827,49 @@ def _cycle_channel_name(job: ImageJob, channel: ChannelInfo) -> str:
     return f"{name}, cycle {job.acquisition}"
 
 
+def _usable_siblings(
+    job: ImageJob,
+    settings: "BatchSettings",
+    survey: "PlateSurvey | None",
+) -> tuple[list[ImageJob], list[str]]:
+    """The other cycles of this well that are on this image's grid, and the notes.
+
+    Shared by the measuring and the registration check so the two cannot
+    disagree about which cycles were in play.
+    """
+    if survey is None:
+        return [], [
+            "Reading the other cycles needs the plate survey, which this run was "
+            "not given; only this image's channels were used."
+        ]
+    siblings = survey.cycle_siblings(job)
+    if not siblings:
+        return [], [
+            "No other cycle of this well: the plate records no further "
+            "acquisitions for it."
+        ]
+
+    here = job.spatial_shape(settings.level)
+    usable, notes = [], []
+    for sibling in siblings:
+        there = sibling.spatial_shape(settings.level)
+        if here and there and there != here:
+            notes.append(
+                f"cycle {sibling.acquisition} is {there} and this image is {here}; "
+                "it was not used, because the objects are not in the same place "
+                "on a different grid."
+            )
+            continue
+        usable.append(sibling)
+    return usable, notes
+
+
 def _channels_to_measure(
     job: ImageJob,
     settings: "BatchSettings",
     measured: ChannelInfo,
     survey: "PlateSurvey | None",
+    siblings: "Sequence[ImageJob] | None" = None,
 ) -> tuple[dict[str, tuple[ImageJob, ChannelInfo]], list[str]]:
     """``(name -> (image, channel), notes)`` for every extra channel to measure.
 
@@ -837,34 +891,77 @@ def _channels_to_measure(
 
     if not across:
         return entries, notes
-    if survey is None:
-        notes.append(
-            "Measuring every cycle needs the plate survey, which this run was not "
-            "given; only this image's channels were measured."
-        )
-        return entries, notes
 
-    siblings = survey.cycle_siblings(job)
-    if not siblings:
-        notes.append(
-            "No other cycle of this well to measure: the plate records no further "
-            "acquisitions for it."
-        )
-        return entries, notes
-
-    here = job.spatial_shape(settings.level)
+    if siblings is None:
+        siblings, found_notes = _usable_siblings(job, settings, survey)
+        notes.extend(found_notes)
     for sibling in siblings:
-        there = sibling.spatial_shape(settings.level)
-        if here and there and there != here:
-            notes.append(
-                f"cycle {sibling.acquisition} is {there} and this image is {here}; "
-                "its channels were not measured, because the objects are not in "
-                "the same place on a different grid."
-            )
-            continue
         for channel in sibling.channels:
             entries.setdefault(_cycle_channel_name(sibling, channel), (sibling, channel))
     return entries, notes
+
+
+def _check_registration(
+    job: ImageJob,
+    settings: "BatchSettings",
+    siblings: "Sequence[ImageJob]",
+    masks: np.ndarray,
+    reference: np.ndarray,
+    voxel_size_um: "Sequence[float]",
+    progress: Callable[[str], None] | None = None,
+) -> tuple[list[al.CycleAlignment], list[str]]:
+    """Score every other cycle against this one, on the segmented channel.
+
+    The segmented channel rather than a channel of its own: it is the nuclear
+    stain, it is in every cycle, and it is the one the alignment was computed
+    on in the first place. Scoring on a marker that is only in cycle 4 would
+    answer a different question in every cycle.
+    """
+    alignments: list[al.CycleAlignment] = []
+    notes: list[str] = []
+    for sibling in siblings:
+        channel = settings.channel.resolve(sibling.channels)
+        if channel is None:
+            notes.append(
+                f"cycle {sibling.acquisition} has no channel matching "
+                f"{settings.channel.describe()}, so it could not be scored."
+            )
+            continue
+        if progress is not None:
+            progress(f"{job.describe()}: scoring cycle {sibling.acquisition}")
+        try:
+            moving = read_channel(sibling, channel, settings.level)
+            alignments.append(
+                al.align_cycle(
+                    masks, reference, moving, sibling.acquisition, voxel_size_um
+                )
+            )
+        except Exception as error:  # noqa: BLE001 - one bad cycle, not a bad image
+            notes.append(f"cycle {sibling.acquisition} could not be scored: {error}")
+            logger.debug("scoring cycle %s failed", sibling.acquisition, exc_info=True)
+    return alignments, notes
+
+
+def _write_alignment(stats, alignments: "Sequence[al.CycleAlignment]") -> None:
+    """Put the per-object correlations into the table, one column per cycle.
+
+    Written into :attr:`ObjectStat.extra`, which is where a column that is not
+    one of the fixed measurements goes; it reaches the CSV, the .h5ad and the
+    gates with no further plumbing. An object a cycle could not judge gets no
+    number, so the gates abstain on it rather than reading a NaN as a failure.
+    """
+    if not alignments or not stats:
+        return
+    labels = [int(stat.label) for stat in stats]
+    worst = al.worst_of(alignments, labels)
+    cycles = [alignment.cycle for alignment in alignments]
+    for stat in stats:
+        label = int(stat.label)
+        for alignment in alignments:
+            if label in alignment.r:
+                stat.extra[al.r_column(alignment.cycle)] = float(alignment.r[label])
+        if label in worst:
+            stat.extra[al.worst_column(cycles)] = float(worst[label])
 
 
 def _table_name(job: ImageJob) -> str:
@@ -1003,8 +1100,17 @@ def segment_job(
                 else:
                     signal, measured_channel = candidate, measured
 
+        # One sibling list for both jobs, so the measuring and the scoring
+        # cannot disagree about which cycles were in play.
+        siblings: list[ImageJob] = []
+        if settings.measure_every_cycle or settings.check_registration:
+            siblings, sibling_notes = _usable_siblings(job, settings, survey)
+            notes.extend(sibling_notes)
+
         extra = None
-        entries, extra_notes = _channels_to_measure(job, settings, measured_channel, survey)
+        entries, extra_notes = _channels_to_measure(
+            job, settings, measured_channel, survey, siblings=siblings
+        )
         notes.extend(extra_notes)
         if entries:
             if progress is not None:
@@ -1020,6 +1126,21 @@ def segment_job(
             expanded=result.expanded_masks,
         )
 
+        alignments: list[al.CycleAlignment] = []
+        if settings.check_registration:
+            alignments, scored_notes = _check_registration(
+                job,
+                settings,
+                siblings,
+                result.masks,
+                image,
+                result.voxel_size_um[-result.masks.ndim :],
+                progress=progress,
+            )
+            notes.extend(scored_notes)
+            _write_alignment(stats, alignments)
+            notes.extend(alignment.describe() for alignment in alignments)
+
         outcome = ImageOutcome(
             job=job,
             status=STATUS_DONE,
@@ -1030,6 +1151,7 @@ def segment_job(
             summary=sg.count_summary(stats),
             measured_channel=_channel_name(measured_channel),
             measured_extra=tuple(extra) if extra is not None else (),
+            alignment=tuple(alignments),
         )
         if settings.write_tables and stats:
             # One combined file is built from the frames rather than per-image
@@ -1159,6 +1281,15 @@ def summary_rows(report: BatchReport) -> list[dict[str, Any]]:
                 "n_dropped": outcome.n_dropped,
                 "measured_channel": outcome.measured_channel,
                 "extra_channels": " | ".join(outcome.measured_extra),
+                # One row per image, so the per-cycle numbers are joined rather
+                # than given a column each: how many cycles a plate has is not
+                # known until it is surveyed, and a summary whose columns depend
+                # on the plate is a summary two plates cannot be compared in.
+                "registration": " | ".join(
+                    f"cycle {item.cycle}: {item.distance_um:.2f} um, "
+                    f"median r {item.median_r:.3f}"
+                    for item in outcome.alignment
+                ),
                 "median_solidity": totals.get("median_solidity", ""),
                 "median_volume_um3": totals.get("median_volume_um3", ""),
                 "median_diameter_um": totals.get("median_diameter_um", ""),
