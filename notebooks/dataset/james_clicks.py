@@ -65,12 +65,46 @@ def match(dots_um: np.ndarray, cells_um: np.ndarray) -> np.ndarray:
     return matched
 
 
+def section_info(name: str) -> dict:
+    """The run's record of one section (file, pixel size, line, region file …)."""
+    return json.loads((RUN / "cells" / f"{name}.json").read_text(encoding="utf-8"))
+
+
+def run_cells(name: str) -> pd.DataFrame:
+    """Every segmented cell of the section, with the columns in :data:`COLUMNS` (renamed)."""
+    cells = pacsv.read_csv(RUN / "cells" / f"{name}.csv",
+                           convert_options=pacsv.ConvertOptions(include_columns=list(COLUMNS))).to_pandas()
+    return cells.rename(columns=COLUMNS)
+
+
+def place(info: dict, cells: pd.DataFrame, yx_um: np.ndarray) -> pd.DataFrame:
+    """Points (µm) placed like the run's cells: ``region``, ``d`` (the run's sign), ``beside``, ``edge``.
+
+    The edge distance is that of the nearest segmented cell.
+    """
+    yx_um = np.asarray(yx_um, float).reshape(-1, 2)
+    voxel = np.asarray(info["voxel_yx"], float)
+    cells_um = cells[["y", "x"]].to_numpy(float)
+    # The flip that turns the line's raw signed distance into the cells' stored one.
+    line = np.asarray(info["line"], float)
+    raw, beside, _length = fu.signed_distance(yx_um, line)
+    some = np.random.default_rng(0).choice(len(cells), min(5000, len(cells)), replace=False)
+    raw_cells, _b, _l = fu.signed_distance(cells_um[some], line)
+    stored = cells["d"].to_numpy(float)[some]
+    ok = np.isfinite(stored) & (np.abs(raw_cells) > 1)
+    flip = float(np.sign(np.median(np.sign(stored[ok]) * np.sign(raw_cells[ok])))) if ok.any() else 1.0
+    band = ja.read_labels(RUN / info["region_file"]) > 0
+    rr = np.clip(np.round(yx_um[:, 0] / voxel[0]).astype(int), 0, band.shape[0] - 1)
+    cc = np.clip(np.round(yx_um[:, 1] / voxel[1]).astype(int), 0, band.shape[1] - 1)
+    _dist, nearest = cKDTree(cells_um).query(yx_um) if len(yx_um) else (None, np.zeros(0, int))
+    return pd.DataFrame({"region": band[rr, cc], "d": raw * (flip or 1.0), "beside": beside,
+                         "edge": cells["edge"].to_numpy(float)[nearest]})
+
+
 def one_section(info: dict) -> pd.DataFrame:
     name, path = info["sample"], Path(info["file"])
     voxel = np.asarray(info["voxel_yx"], float)
-    cells = pacsv.read_csv(RUN / "cells" / f"{name}.csv",
-                           convert_options=pacsv.ConvertOptions(include_columns=list(COLUMNS))).to_pandas()
-    cells = cells.rename(columns=COLUMNS)
+    cells = run_cells(name)
     cover = MASKS / name / "cells.parquet"
     if cover.exists():
         cover = pd.read_parquet(cover).set_index("Label")
@@ -86,27 +120,12 @@ def one_section(info: dict) -> pd.DataFrame:
     matched = match(dots_um, cells_um)
     cells["clicked"] = False
     cells.loc[matched[matched >= 0], "clicked"] = True
-
-    # The dots' distance to the run's line, with the run's sign: the flip that turns the
-    # line's raw signed distance into the cells' stored one.
-    line = np.asarray(info["line"], float)
-    raw, beside, _length = fu.signed_distance(dots_um, line)
-    some = np.random.default_rng(0).choice(len(cells), min(5000, len(cells)), replace=False)
-    raw_cells, _b, _l = fu.signed_distance(cells_um[some], line)
-    stored = cells["d"].to_numpy(float)[some]
-    ok = np.isfinite(stored) & (np.abs(raw_cells) > 1)
-    flip = float(np.sign(np.median(np.sign(stored[ok]) * np.sign(raw_cells[ok])))) if ok.any() else 1.0
-    band = ja.read_labels(RUN / info["region_file"]) > 0
-    rr = np.clip(np.round(centres[:, 0]).astype(int), 0, band.shape[0] - 1)
-    cc = np.clip(np.round(centres[:, 1]).astype(int), 0, band.shape[1] - 1)
-    _dist, nearest = cKDTree(cells_um).query(dots_um)
+    placed = place(info, cells, dots_um)
 
     TARGET.joinpath("cells").mkdir(parents=True, exist_ok=True)
     cells.to_parquet(TARGET / "cells" / f"{name}.parquet", index=False)
     return pd.DataFrame({
-        "name": name, "dot": ids, "y": dots_um[:, 0], "x": dots_um[:, 1],
-        "region": band[rr, cc], "d": raw * (flip or 1.0), "beside": beside,
-        "edge": cells["edge"].to_numpy(float)[nearest],
+        "name": name, "dot": ids, "y": dots_um[:, 0], "x": dots_um[:, 1], **{c: placed[c] for c in placed},
         "cell": matched, "matched": matched >= 0,
         "label": np.where(matched >= 0, cells["label"].to_numpy()[np.maximum(matched, 0)], -1),
     })
