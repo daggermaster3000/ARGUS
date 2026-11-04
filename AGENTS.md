@@ -178,6 +178,7 @@ after it move up, with every reference to their file names updated.
 - `junction_graph/` (`01_nuclei_graph_cut`): the junction from the segmented nuclei
   instead of the overview's pixels; scored as `02_junction_seeding`.
 - `dataset/` (`01_whole_dataset`, `02_positivity_dataset`): the whole dataset's run.
+- `publication/` (`01_pipeline_validation`): the verdict on the whole pipeline for the paper, claim by claim.
 - Edit notebooks with a small script (load JSON → append/replace cells → dump with
   `ensure_ascii=False, indent=1`) or NotebookEdit; back up first, and look up cell
   indices by content, not by number. Execute each after editing and check it has

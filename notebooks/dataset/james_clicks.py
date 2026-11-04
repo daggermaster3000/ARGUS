@@ -1,7 +1,10 @@
-"""James's hand counts ("James counts", one 5 µm dot per AF488+ cell) placed like the run's cells.
+"""Hand counts (one 5 µm dot per AF488+ cell) placed like the run's cells.
 
-For every section of the run with a stored "James counts" label map, writes into
-``<OUT>/james_counts/``:
+Two annotators clicked AF488+ cells, each into a label map stored with the sample
+(:data:`ANNOTATORS`): James ("James counts", the whole section) and Quillan
+("Manual counts Quillan", the junction and the cells that crossed). For every
+section of the run with the annotator's label map, writes into his folder
+(``<OUT>/james_counts/`` or ``<OUT>/quillan_counts/``):
 
 * ``clicks.parquet`` — one row per dot: its position, whether it is in the run's
   junction region, its signed distance to the run's junction line (the run's own
@@ -13,7 +16,12 @@ For every section of the run with a stored "James counts" label map, writes into
   near the line, as the 03/04 cache), with the columns the positivity rules need,
   each AF488 mask's cover (from ``af488_masks.py``) and ``clicked``.
 
-Run it once (about a minute); ``05_james_counts.ipynb`` reads the result.
+Run it once per annotator (about a minute each); ``05_james_counts.ipynb`` reads
+James's, ``publication/01_pipeline_validation.ipynb`` both::
+
+    python notebooks/dataset/james_clicks.py            # James (the default)
+    python notebooks/dataset/james_clicks.py quillan    # Quillan
+
 No Qt.
 """
 
@@ -37,9 +45,14 @@ from microscopy_viewer import junction_analysis as ja  # noqa: E402
 
 RUN = Path(r"D:\Slidescanner extracted\cells_analysis\2026-10-28_090440 re-scored")
 OUT = Path(r"D:\Slidescanner extracted\run_analysis_20261028")
-TARGET = OUT / "james_counts"
 MASKS = OUT / "af488_mask"
-COUNTS = "James counts"
+#: Per annotator: the label map of his dots, and the folder his placed dots go to.
+ANNOTATORS = {
+    "james": ("James counts", OUT / "james_counts"),
+    "quillan": ("Manual counts Quillan", OUT / "quillan_counts"),
+}
+#: James's, which the other ``james_*.py`` scripts read.
+COUNTS, TARGET = ANNOTATORS["james"]
 #: A dot and a cell further apart than this are not matched (µm).
 MATCH_UM = 7.0
 
@@ -101,7 +114,8 @@ def place(info: dict, cells: pd.DataFrame, yx_um: np.ndarray) -> pd.DataFrame:
                          "edge": cells["edge"].to_numpy(float)[nearest]})
 
 
-def one_section(info: dict) -> pd.DataFrame:
+def one_section(info: dict, counts: str = COUNTS, target: Path = TARGET) -> pd.DataFrame:
+    """One section's dots of the label map *counts* (placed and matched); its cells go to *target*."""
     name, path = info["sample"], Path(info["file"])
     voxel = np.asarray(info["voxel_yx"], float)
     cells = run_cells(name)
@@ -111,7 +125,7 @@ def one_section(info: dict) -> pd.DataFrame:
         for column in cover.columns:
             cells[column] = cells["label"].map(cover[column]).to_numpy()
 
-    lab, _attrs = ims_store.load_labels(path, COUNTS)
+    lab, _attrs = ims_store.load_labels(path, counts)
     lab = np.asarray(lab).reshape(np.shape(lab)[-2:])
     ids = np.unique(lab[lab > 0])
     centres = np.asarray(ndimage.center_of_mass(lab > 0, lab, ids)).reshape(-1, 2)
@@ -122,8 +136,8 @@ def one_section(info: dict) -> pd.DataFrame:
     cells.loc[matched[matched >= 0], "clicked"] = True
     placed = place(info, cells, dots_um)
 
-    TARGET.joinpath("cells").mkdir(parents=True, exist_ok=True)
-    cells.to_parquet(TARGET / "cells" / f"{name}.parquet", index=False)
+    target.joinpath("cells").mkdir(parents=True, exist_ok=True)
+    cells.to_parquet(target / "cells" / f"{name}.parquet", index=False)
     return pd.DataFrame({
         "name": name, "dot": ids, "y": dots_um[:, 0], "x": dots_um[:, 1], **{c: placed[c] for c in placed},
         "cell": matched, "matched": matched >= 0,
@@ -131,17 +145,23 @@ def one_section(info: dict) -> pd.DataFrame:
     })
 
 
-def main() -> None:
+def main(argv: list[str]) -> int:
+    annotator = argv[0].lower() if argv else "james"
+    if annotator not in ANNOTATORS:
+        print(f"unknown annotator {annotator!r}: one of {', '.join(ANNOTATORS)}")
+        return 2
+    counts, target = ANNOTATORS[annotator]
     infos = [json.loads(p.read_text(encoding="utf-8")) for p in sorted((RUN / "cells").glob("*.json"))]
-    infos = [i for i in infos if COUNTS in ims_store.list_labels(Path(i["file"]))]
+    infos = [i for i in infos if counts in ims_store.list_labels(Path(i["file"]))]
     clicks = []
     for info in infos:
-        clicks.append(one_section(info))
+        clicks.append(one_section(info, counts, target))
         c = clicks[-1]
         print(f"{info['sample']}: {len(c)} dots, {c['matched'].mean():.0%} on a cell, {c['region'].mean():.0%} in the region")
-    pd.concat(clicks, ignore_index=True).to_parquet(TARGET / "clicks.parquet", index=False)
-    print(f"{len(infos)} sections → {TARGET}")
+    pd.concat(clicks, ignore_index=True).to_parquet(target / "clicks.parquet", index=False)
+    print(f"{len(infos)} sections of {counts!r} → {target}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))
