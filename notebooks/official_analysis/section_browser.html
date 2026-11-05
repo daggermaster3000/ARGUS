@@ -284,6 +284,7 @@ function buildHead() {
     th.onclick = () => {
       if (sortKey === c.k) sortDir = -sortDir; else { sortKey = c.k; sortDir = c.txt ? 1 : -1; }
       refresh();
+      saveUI();
     };
     tr.appendChild(th);
   }
@@ -607,6 +608,7 @@ function applyToggles() {
   const ch = $("tChannel").value, shown = $("tImage").checked;
   $("img").style.display = shown && ch.includes("g") ? "" : "none";
   $("imgR").style.display = shown && ch.includes("r") ? "" : "none";
+  saveUI();
 }
 
 function row(k, v) { return "<dt>" + k + "</dt><dd>" + v + "</dd>"; }
@@ -660,6 +662,7 @@ function open(id) {
   const tr = $("rows").querySelector('tr[data-id="' + id + '"]');
   if (tr) { tr.classList.add("sel"); tr.scrollIntoView({ block: "nearest" }); }
   if (location.hash.slice(1) !== id) history.replaceState(null, "", "#" + id);
+  saveUI();
 }
 
 function step(d) {
@@ -723,12 +726,43 @@ function buildGallery() {
   for (const f of g.querySelectorAll("figure")) f.onclick = () => open(f.dataset.id);
 }
 
+// ------------------------------------------------------------------ remembered settings
+// Kept in this browser (localStorage), so they come back after closing the window or visiting the figure builder.
+// A section in the address (#id) or a method (?m=…) still wins over them.
+const UI_KEY = "argus.section_browser.settings";
+let UI_READY = false;              // nothing is saved while the page is still starting
+
+function saveUI() {
+  if (!UI_READY) return;
+  const ui = {
+    filters: { geno: $("fGeno").value, exp: $("fExp").value, qc: $("fQc").value, human: $("fHuman").checked, name: $("fName").value },
+    sort: [sortKey, sortDir], method: KEY,
+    toggles: Object.fromEntries(["tLine", "tRegion", "tObjects", "tHumans", "tImage"].map((id) => [id, $(id).checked])),
+    channel: $("tChannel").value,
+    size: { x: $("sizeX").value, y: $("sizeY").value, logX: $("logX").checked, logY: $("logY").checked },
+    logStrip: $("logStrip").checked, section: CUR ? CUR.id : null, gallery: document.body.classList.contains("gallery"),
+  };
+  try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch (e) { /* storage blocked (private window) */ }
+}
+
+function loadUI() {
+  try { return JSON.parse(localStorage.getItem(UI_KEY)) || null; } catch (e) { return null; }
+}
+
+function setValue(id, value) {           // a select keeps its value only when it is one of its options
+  const el = $(id);
+  if (value === undefined || value === null) return;
+  if (el.type === "checkbox") el.checked = !!value;
+  else if (el.tagName !== "SELECT" || [...el.options].some((o) => o.value === String(value))) el.value = value;
+}
+
 function setMode(gallery) {
   document.body.classList.toggle("gallery", gallery);
   $("mGallery").classList.toggle("on", gallery);
   $("mViewer").classList.toggle("on", !gallery);
   if (gallery) buildGallery();
   else { window.dispatchEvent(new Event("resize")); if (CUR) { fit(); } }
+  saveUI();
 }
 
 // ------------------------------------------------------------------ start
@@ -737,27 +771,40 @@ function init(d) {
   fillSelect("fGeno", ["WT3", "GD1"].filter((g) => S.some((s) => s.genotype === g)));
   fillSelect("fExp", [...new Set(S.map((s) => s.experiment))].sort());
   fillSelect("fQc", [...new Set(S.map((s) => s.qc))].sort());
-  for (const id of ["fGeno", "fExp", "fQc", "fHuman"]) $(id).onchange = refresh;
-  $("fName").oninput = refresh;
+  for (const id of ["fGeno", "fExp", "fQc", "fHuman"]) $(id).onchange = () => { refresh(); saveUI(); };
+  $("fName").oninput = () => { refresh(); saveUI(); };
   $("mViewer").onclick = () => setMode(false);
   $("mGallery").onclick = () => setMode(true);
-  $("logStrip").onchange = () => Plotly.relayout("p2", { "yaxis.type": $("logStrip").checked ? "log" : "linear" });
+  $("logStrip").onchange = () => { Plotly.relayout("p2", { "yaxis.type": $("logStrip").checked ? "log" : "linear" }); saveUI(); };
   $("sizeX").innerHTML = Object.entries(SIZE_X).map(([k, h]) => '<option value="' + k + '">' + h + "</option>").join("");
   $("sizeX").value = "area_mm2";
-  for (const id of ["sizeX", "sizeY", "logX", "logY"]) $(id).onchange = () => window.Plotly && plotSize();
+  for (const id of ["sizeX", "sizeY", "logX", "logY"]) $(id).onchange = () => { if (window.Plotly) plotSize(); saveUI(); };
   // the method: ?m=<method>-<k> in the address, or the counting method
   let start_m = null;
   try { start_m = new URLSearchParams(location.search).get("m"); } catch (e) { /* no query */ }
-  setMethod(start_m || d.default, false);
-  $("mMethod").onchange = () => setMethod($("mMethod").value + "-" + $("mK").value, true);
-  $("mK").onchange = () => setMethod(METHOD.key + "-" + $("mK").value, true);
+  const kept = loadUI() || {};
+  setMethod(start_m || kept.method || d.default, false);
+  if (kept.filters) {
+    setValue("fGeno", kept.filters.geno); setValue("fExp", kept.filters.exp); setValue("fQc", kept.filters.qc);
+    setValue("fHuman", kept.filters.human); setValue("fName", kept.filters.name);
+  }
+  if (kept.sort) { sortKey = kept.sort[0]; sortDir = kept.sort[1]; }
+  for (const [id, on] of Object.entries(kept.toggles || {})) setValue(id, on);
+  setValue("tChannel", kept.channel);
+  if (kept.size) { setValue("sizeX", kept.size.x); setValue("sizeY", kept.size.y); setValue("logX", kept.size.logX); setValue("logY", kept.size.logY); }
+  setValue("logStrip", kept.logStrip);
+  $("mMethod").onchange = () => { setMethod($("mMethod").value + "-" + $("mK").value, true); saveUI(); };
+  $("mK").onchange = () => { setMethod(METHOD.key + "-" + $("mK").value, true); saveUI(); };
   setupStage();
   refresh();
   if (window.Plotly) { plotHuman(); plotStrip(); plotSize(); }
   else { $("p1").textContent = "The plots need plotly from cdnjs (no internet connection?)."; }
   const start = location.hash.slice(1);
-  open(BYID[start] ? start : (VIEW[0] && VIEW[0].id));
-  if (new URLSearchParams(location.search).has("gallery")) setMode(true);    // ?gallery opens on the thumbnails
+  open(BYID[start] ? start : BYID[kept.section] ? kept.section : (VIEW[0] && VIEW[0].id));
+  applyToggles();
+  UI_READY = true;
+  if (new URLSearchParams(location.search).has("gallery") || kept.gallery) setMode(true);    // ?gallery opens on the thumbnails
+  saveUI();
 }
 
 loadData().then(init).catch((e) => {

@@ -168,7 +168,7 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
   <details open>
     <summary>Export and settings</summary>
     <div class="row"><button id="bSvg">Dot plot SVG</button><button id="bPng">Dot plot PNG, 600 dpi</button><button id="bCsv">Dot plot CSV</button></div>
-    <div class="row"><button id="bLink">Copy link to this figure</button><button id="bApply">Apply the settings below</button><button id="bReset">Reset the text</button></div>
+    <div class="row"><button id="bLink">Copy link to this figure</button><button id="bApply">Apply the settings below</button><button id="bReset">Reset the text</button><button id="bForget" title="Clear the settings this browser remembers and start from the defaults">Start over (forget saved settings)</button></div>
     <textarea id="settings" spellcheck="false" aria-label="settings as JSON"></textarea>
     <p class="hint">The page's address holds every setting (after #), so a bookmark or the copied link reopens this figure. The box shows the same settings; paste settings there and press Apply.</p>
   </details>
@@ -672,6 +672,10 @@ function buildControls() {
   $("bPng").onclick = () => exportImage("png");
   $("bCsv").onclick = exportCsv;
   $("bLink").onclick = copyLink;
+  $("bForget").onclick = () => {
+    try { localStorage.removeItem(STORE_KEY); } catch (e) { /* storage blocked */ }
+    location.replace(location.pathname);
+  };
   $("bApply").onclick = () => {
     try { setState(JSON.parse($("settings").value)); } catch (e) { alert("Those settings are not valid JSON: " + e.message); }
   };
@@ -715,6 +719,7 @@ function setState(s) {
   const base = JSON.parse(JSON.stringify(DEFAULTS));
   ST = Object.assign(base, s, { sc: Object.assign(base.sc, (s && s.sc) || {}) });
   if (!METHODS.some((m) => m.ks.some((k) => m.key + "-" + k === ST.method)) && METHODS.length) ST.method = "gauss-5";
+  if (!["genotype", "geno_exp"].includes(ST.group)) ST.group = "genotype";      // a stale or mistyped saved value
   applyMethod();
   writeControls();
   update();
@@ -977,7 +982,15 @@ function figure(z) {
 
 let LAST = null, DRAWN = false, BUSY = false;
 
+// Six groups do not fit the default 62 mm: widen it while grouped by experiment, unless a width was chosen.
+const WIDE_MM = 130;
+function autoWidth() {
+  if (ST.group === "geno_exp" && ST.widthMm === DEFAULTS.widthMm) { ST.widthMm = WIDE_MM; writeControls(); }
+  else if (ST.group === "genotype" && ST.widthMm === WIDE_MM) { ST.widthMm = DEFAULTS.widthMm; writeControls(); }
+}
+
 function update() {
+  autoWidth();
   // formula
   const msg = $("formulaMsg");
   try {
@@ -1425,8 +1438,13 @@ function diffFromDefaults() {
   return out;
 }
 
+// The settings are also kept in this browser (localStorage), so they come back after closing the window or
+// visiting the section browser; a link with settings after # still wins over them.
+const STORE_KEY = "argus.figure_builder.settings";
+
 function saveHash() {
   const text = JSON.stringify(diffFromDefaults());
+  try { localStorage.setItem(STORE_KEY, text); } catch (e) { /* storage blocked (private window): the link still works */ }
   if (document.activeElement !== $("settings")) $("settings").value = JSON.stringify(ST, null, 1);
   try { history.replaceState(null, "", "#" + encodeURIComponent(text)); } catch (e) { /* file:// in some browsers */ }
 }
@@ -1456,7 +1474,10 @@ function start() {
     loadRows();
     buildControls();
     buildScatterControls();
-    const h = readHash();
+    let h = readHash();
+    if (!h) {                         // no settings in the link: the ones this browser remembers
+      try { const kept = localStorage.getItem(STORE_KEY); if (kept) h = JSON.parse(kept); } catch (e) { h = null; }
+    }
     if (h && h.preset && Object.keys(h).every((k) => ["preset", "method", "group", "scale"].includes(k))) {
       ST = JSON.parse(JSON.stringify(DEFAULTS));
       if (h.method) ST.method = h.method;
