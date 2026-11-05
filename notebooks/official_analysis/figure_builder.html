@@ -183,6 +183,22 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
     <div id="dropped2" class="note" style="margin: 6px 0"></div>
     <div id="scStats"></div>
   </div>
+  <div id="methodsBox">
+    <h2>Methods</h2>
+    <p class="note">Methods text for the figure as it is set up now: the image analysis, the positivity method and threshold chosen,
+      the plotted outcome (your formula, with every variable defined), the sections included and the statistics shown. It
+      follows every change; copy it into the manuscript and edit there.</p>
+    <div class="row">
+      <label><input type="checkbox" id="mImage" checked> image analysis</label>
+      <label><input type="checkbox" id="mOutcome" checked> outcome and sections</label>
+      <label><input type="checkbox" id="mStats" checked> statistics on the plot</label>
+      <label><input type="checkbox" id="mModel" checked> mixed model (the notebook's reference analysis)</label>
+      <label><input type="checkbox" id="mScatter"> scatter panel</label>
+      <label><input type="checkbox" id="mSoftware" checked> software</label>
+    </div>
+    <textarea id="methodsText" readonly rows="18" style="width: 100%; max-width: 900px; font: 13px/1.45 Arial, sans-serif; padding: 8px;"></textarea>
+    <div class="row"><button id="bCopyMethods">Copy the methods text</button><span id="methodsMsg" class="note"></span></div>
+  </div>
 </section>
 </main>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.34.0/plotly.min.js"></script>
@@ -672,6 +688,13 @@ function buildControls() {
   $("bPng").onclick = () => exportImage("png");
   $("bCsv").onclick = exportCsv;
   $("bLink").onclick = copyLink;
+  for (const id of ["mImage", "mOutcome", "mStats", "mModel", "mScatter", "mSoftware"]) $(id).onchange = updateMethods;
+  $("bCopyMethods").onclick = () => {
+    const text = $("methodsText").value;
+    const done = () => { $("methodsMsg").textContent = "copied"; setTimeout(() => { $("methodsMsg").textContent = ""; }, 1500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, () => { $("methodsText").select(); document.execCommand("copy"); done(); });
+    else { $("methodsText").select(); document.execCommand("copy"); done(); }
+  };
   $("bForget").onclick = () => {
     try { localStorage.removeItem(STORE_KEY); } catch (e) { /* storage blocked */ }
     location.replace(location.pathname);
@@ -1013,6 +1036,7 @@ function update() {
   textFields();
   colorFields();
   updateScatter();
+  updateMethods();
   saveHash();
 }
 
@@ -1465,6 +1489,150 @@ function readHash() {
     return out;
   }
   try { return JSON.parse(h); } catch (e) { return null; }
+}
+
+
+// ------------------------------------------------------------------ methods text
+// Written from the settings on screen. Fixed parts follow the Methods of 02_biology.ipynb.
+const VERSIONS = "Python 3.10/3.13, Cellpose 4.2, scikit-image 0.25, SciPy 1.15, statsmodels 0.14 and Plotly.js 2.34";
+
+function positivityMethods(key) {
+  const [m, k] = key.split("-");
+  const sd = k + " robust standard deviations (1.4826 × median absolute deviation)";
+  const cleanup = "Objects smaller than 20 µm² were removed and holes smaller than 10 µm² filled; each connected object " +
+    "(8-connectivity) was counted as one AF488⁺ cell, at its centroid.";
+  const nuclei = "Nuclei were segmented over the whole section with Cellpose (cpsam) on the nuclear stain and grown by 6 µm to " +
+    "approximate cells.";
+  if (m === "gauss") return "AF488⁺ cells were counted as objects of a mask of the AF488 channel: the brightest plane over z, " +
+    "smoothed with a Gaussian (σ = 0.5 µm), less its local background (Gaussian, σ = 20 µm), and thresholded inside the tissue " +
+    "(Otsu mask of the nuclear stain at 1/8 resolution, closed and hole-filled) at the median + " + sd + " of the section's tissue. " + cleanup;
+  if (m === "median") return "AF488⁺ cells were counted as objects of a mask of the AF488 channel: the brightest plane over z, " +
+    "less its local median (45 µm window, computed at 1/8 resolution), smoothed with a Gaussian (σ = 0.5 µm) and thresholded inside " +
+    "the tissue (Otsu mask of the nuclear stain) at the median + " + sd + " of the section's tissue. " + cleanup;
+  const value = m === "cellmf" ? "mean AF488 intensity over the grown nucleus, measured on the AF488 image less its local median " +
+    "(45 µm window)" : "mean AF488 intensity over the grown nucleus (raw image)";
+  return nuclei + " A cell was called AF488⁺ when its " + value + ", exceeded the median + " + sd + " of all cells in the junction " +
+    "region of the same section; each positive cell was placed at its centroid.";
+}
+
+const WORDS = {   // variable → plain words for the outcome sentence
+  total: "all AF488⁺ cells of the section", region: "AF488⁺ cells in the junction region",
+  crossed: "AF488⁺ cells that crossed (on the far side of the junction line)", home: "AF488⁺ cells on the home side",
+  auto_in_human_area: "AF488⁺ cells in the area counted by hand", threshold: "the section's positivity threshold",
+  junction_mm: "the junction line's length (mm)", junction_um: "the junction line's length (µm)",
+  area_mm2: "the assembloid (tissue) area of the section (mm²)", nuclei: "the number of segmented nuclei in the section",
+  assembloid_um: "the assembloid's length across the junction line (µm)", human: "the human count",
+  edge_um: "the crossed cells' mean distance to the organoid edge (µm)", past_um: "the crossed cells' mean distance past the line (µm)",
+  edge_rel: "the crossed cells' distance to the edge divided by the organoid's local half-width",
+  past_rel: "the crossed cells' distance past the line divided by the assembloid length",
+  share_crossed: "the share of AF488⁺ cells that crossed, crossed ÷ (crossed + home)",
+};
+
+// variable → short words, to write the formula itself in words
+const SHORT_WORDS = {
+  total: "all AF488⁺ cells", region: "cells in the junction region", crossed: "crossed cells", home: "home cells",
+  auto_in_human_area: "cells in the hand-counted area", junction_mm: "junction length (mm)", junction_um: "junction length (µm)",
+  area_mm2: "assembloid area (mm²)", nuclei: "nuclei", assembloid_um: "assembloid length (µm)", human: "human count",
+  edge_um: "distance to the edge (µm)", past_um: "distance past the line (µm)", share_crossed: "share crossed",
+};
+
+function formulaInWords(formula) {
+  return String(formula).replace(/[A-Za-z_][A-Za-z0-9_]*/g, (n) => (SHORT_WORDS[n] ? SHORT_WORDS[n] : n))
+    .replace(/\*/g, " × ").replace(/\//g, " ÷ ").replace(/\s+/g, " ").replace(/\( /g, "(").replace(/ \)/g, ")").trim();
+}
+
+function methodPhrase(meth, k) {
+  // "AF488 mask, Gaussian 20 µm background" → "the AF488 mask (Gaussian 20 µm background)"
+  const [head, ...rest] = meth.label.split(", ");
+  const name = head.startsWith("AF488") ? head : head.charAt(0).toLowerCase() + head.slice(1);
+  return "the " + name + (rest.length ? " (" + rest.join(", ") + ")" : "") + " at median + " + k + " robust SD";
+}
+
+function usedVariables(formula) {
+  const names = String(formula || "").match(/[A-Za-z_][A-Za-z0-9_]*/g) || [];
+  return [...new Set(names)].filter((n) => KNOWN.has(n));
+}
+
+function describeVariables(formula) {
+  return usedVariables(formula).map((v) => "*" + v + "* is " + (WORDS[v] || (([...SECTION_VARS, ...NOTEBOOK_VARS].find((x) => x[0] === v) || [])[2] || v)));
+}
+
+function nText(gs) {
+  const by = {};
+  for (const g of gs) {
+    by[g.g] = by[g.g] || { sec: 0, slides: new Set() };
+    by[g.g].sec += g.sec.length;
+    for (const sl of g.slides) by[g.g].slides.add(sl.slide);
+  }
+  const parts = GENOTYPES.filter((g) => by[g]).map((g) => g + " " + by[g].sec + " sections from " + by[g].slides.size + " slides");
+  const sec = GENOTYPES.reduce((a, g) => a + (by[g] ? by[g].sec : 0), 0);
+  const sl = GENOTYPES.reduce((a, g) => a + (by[g] ? by[g].slides.size : 0), 0);
+  return "n = " + sec + " sections from " + sl + " slides (" + parts.join("; ") + ")";
+}
+
+function methodsText() {
+  if (!LAST) return "";
+  const meth = METHODS.find((m) => ST.method.startsWith(m.key + "-"));
+  const k = ST.method.split("-")[1];
+  const out = [];
+  if ($("mImage").checked) {
+    out.push("Image analysis. Assembloid sections were imaged on a slide scanner (0.325 µm per pixel). The junction between the two " +
+      "organoids of each assembloid was found automatically on the tissue overview; every junction line was screened by eye and " +
+      "redrawn by hand where it was wrong, and a junction region (counting band) was built along it. " + positivityMethods(ST.method) +
+      " To give every point of a section a side, the junction line was extended straight past both ends (along the direction of its " +
+      "last 60 µm) and each cell's signed distance to the extended line was computed. The home side of a section was the side holding " +
+      "more AF488 mask-object area (AF488 mask, Gaussian 20 µm background, median + 5 robust SD), the same side for every positivity " +
+      "method; AF488⁺ cells on the other side were classed as crossed, all others as home.");
+  }
+  if ($("mOutcome").checked) {
+    const vars = describeVariables(ST.formula);
+    const filters = [];
+    const exps = experiments();
+    if (ST.exps && ST.exps.length < exps.length) filters.push("experiment" + (ST.exps.length > 1 ? "s " : " ") + ST.exps.join(", ") + " only");
+    if (ST.qcOnly) filters.push("sections whose junction passed the review's quality check (status ok) only");
+    if (ST.noUncertain) filters.push("sections whose home side was uncertain left out");
+    if (ST.humanOnly) filters.push("sections counted by hand only");
+    if (ST.region !== "all") filters.push(ST.region === "hand" ? "sections with a hand-drawn junction region only" : "sections with an automatic junction region only");
+    const nDropped = LAST.rows && LAST.values ? LAST.rows.length - LAST.values.length : 0;
+    const dropped = nDropped > 0 ? " Sections for which the outcome was not defined (" + nDropped + ", e.g. division by zero) were excluded." : "";
+    const preset = ST.preset && PRESETS[ST.preset] && PRESETS[ST.preset].formula === ST.formula ? PRESETS[ST.preset].name.replace(/^.*· /, "").replace(/^[A-Z](?=[a-z])/, (c) => c.toLowerCase()) : null;
+    out.push("Outcome. For each section the plotted value" + (preset ? " (" + preset + ")" : "") + " was " + formulaInWords(ST.formula) +
+      (vars.length ? ", where " + vars.join("; ") + "." : ".") +
+      (meth ? " AF488⁺ cells were defined with " + methodPhrase(meth, k) + "." : "") +
+      (filters.length ? " Sections: " + filters.join("; ") + "." : " All analysed sections were included.") + dropped +
+      " Groups: " + (ST.group === "geno_exp" ? "genotype within each experiment" : "genotype") + "; " + nText(LAST.gs) + ".");
+  }
+  if ($("mStats").checked) {
+    const scaleWords = { none: "the values", log1p: "log(1 + y)", log: "log y" }[ST.testScale];
+    out.push("Statistics shown. Each marker is one section; larger markers are slide means; bars are mean ± SEM over sections. WT3 " +
+      "and GD1 were compared " + (ST.group === "geno_exp" ? "within each experiment " : "") + "by the " +
+      (ST.effect === "fold" ? "ratio of the section means (WT3 ÷ GD1)" : "difference of the section means (WT3 − GD1)") +
+      ", by the two-sided Mann–Whitney U test on sections (normal approximation with tie and continuity correction when both groups " +
+      "had more than 20 values, exact otherwise), and at the slide level, with slides as the unit, by Welch's t-test on the slide means " +
+      "of " + scaleWords + " and the Mann–Whitney U test on slide means. Two-sided P < 0.05 was taken as significant.");
+  }
+  if ($("mModel").checked) {
+    out.push("Mixed model. The reference analysis of the study compared genotypes with a linear mixed model (statsmodels MixedLM, REML) " +
+      "with genotype and experiment as fixed effects and slide as a random intercept; counts per mm were modelled as log(1 + y) and " +
+      "reported as the back-transformed fold WT3 ÷ GD1 with its Wald 95 % confidence interval, and distances and shares as differences " +
+      "WT3 − GD1. (The mixed model is computed in 02_biology.ipynb, not on this page; quote its numbers for the outcomes of Table 1.)");
+  }
+  if ($("mScatter").checked && ST.sc) {
+    out.push("Scatter. Each point is one " + (ST.sc.unit === "slide" ? "slide mean" : "section") + "; x = " + ST.sc.x + " and y = " +
+      ST.sc.y + (describeVariables(ST.sc.x + " " + ST.sc.y).length ? ", where " + describeVariables(ST.sc.x + " " + ST.sc.y).join("; ") : "") +
+      ". Lines are ordinary least-squares fits per genotype on the axes as drawn (log axes on the logarithm), and associations are " +
+      "reported as Spearman's rank correlation ρ.");
+  }
+  if ($("mSoftware").checked) {
+    out.push("Software. Image analysis used ARGUS, a custom napari-based pipeline (version: git commit of the analysis), with " +
+      VERSIONS + ". Code: notebooks/official_analysis (02_biology.ipynb, sides.py, figure_builder.html), notebooks/dataset/af488_masks.py.");
+  }
+  return out.join("\n\n");
+}
+
+function updateMethods() {
+  const box = $("methodsText");
+  if (box) { const text = methodsText(); box.textContent = text; box.value = text; }
 }
 
 // ------------------------------------------------------------------ start
