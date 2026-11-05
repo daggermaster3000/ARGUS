@@ -78,7 +78,15 @@ sections, same split), so the numbers compare directly.
 | `cellpose488_retrain.py` | Cellpose (cpsam) fine-tuned on the AF488 channel from the two annotators' clicks (masks grown from each dot over the AF488 label; unclicked cells in the counted area taught as background): `tiles`, `train` (2-fold cross-validation by section, and trained on one annotator to predict the other; 30 epochs), `predict`, `numbers`. Writes `cellpose_retrained\` and the `cellpose488_retrained` family under each annotator's `methods\`. Precise but finds ~half the cells: not used (publication §3e). |
 | `05_james_counts.ipynb` | James's counts against 79 positivity methods in six families (Cellpose nuclei + rule; the AF488 mask with no background, a Gaussian 20 µm or a local median 45 µm taken off, at 3–10 SD, Otsu and triangle, as covered cells and as objects; Cellpose on AF488 itself; merged bodies; watershed territories), as validation/09 did for Quillan: where the dots are, per-section agreement (Spearman, CCC, R²) in the whole section, junction region and crossed zone, cell-by-cell precision / recall / F1, one scoreboard, whether each gives the same WT3-against-GD1 conclusions as his count (14 sections, and the whole run where it can be computed), and pictures of the cells where they disagree. Figures in `figures_james\`. |
 
-## `publication/` — the verdict for the paper
+## `official_analysis/` — the analysis as it goes into the paper
+
+Publication figures (greyscale data, AF488 images with white / magenta overlays, figure-legend titles), human annotators anonymised. AF488+ cells are counted as objects of the AF488 mask (Gaussian 20 µm background, median + 5 SD; `dataset/af488_masks.py`), chosen in `dataset/05` and `publication/01`.
+
+| File | What |
+|---|---|
+| `01_validation.ipynb` | Automated against human totals of AF488+ cells per section (27 sections, two annotators, each in the area they counted): Lin's CCC and ratio-scale Bland–Altman with section-bootstrap CIs; the per-nucleus rule and the fine-tuned Cellpose for comparison; whether the human and the automated count give the same WT3-against-GD1 conclusion; a gallery of 12 regions with human dots and automated outlines. |
+| `02_biology.ipynb` | WT3 against GD1 on the 614 analysed sections with that count: cells in the junction region, crossed (primary), on the home side, the share crossed, the crossed cells' distance to the edge and past the line (mixed model, Holm); robustness (leave one experiment / slide out, slide level, covariates); representative images; conclusion and methods text. |
+ — the verdict for the paper
 
 | File | What |
 |---|---|
