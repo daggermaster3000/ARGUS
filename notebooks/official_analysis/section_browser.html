@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Section browser</title>
+<style>
+:root {
+  --ink: #000; --dark: #4d4d4d; --mid: #8c8c8c; --light: #d9d9d9; --paper: #fff; --soft: #f4f4f4;
+  --magenta: #ff00ff;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--paper); color: var(--ink); font-family: Arial, Helvetica, sans-serif; font-size: 13px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; padding: 10px 16px; border-bottom: 1px solid var(--ink); }
+header h1 { font-size: 16px; margin: 0; font-weight: bold; }
+header .sub { color: var(--dark); }
+header .modes { margin-left: auto; display: flex; gap: 4px; }
+button, select, input[type=search] { font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--ink); padding: 3px 8px; border-radius: 0; }
+button.on { background: var(--ink); color: var(--paper); }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+main { display: grid; grid-template-columns: minmax(340px, 560px) minmax(0, 1fr); min-height: calc(100vh - 44px); }
+#left { border-right: 1px solid var(--ink); display: flex; flex-direction: column; min-width: 0; max-height: calc(100vh - 44px); }
+#filters { display: flex; flex-wrap: wrap; gap: 6px 10px; padding: 10px 12px; border-bottom: 1px solid var(--light); align-items: center; }
+#filters label { display: inline-flex; gap: 4px; align-items: center; }
+#filters input[type=search] { width: 140px; }
+#count { color: var(--dark); width: 100%; }
+#tablewrap { overflow: auto; flex: 1; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { padding: 3px 6px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--light); }
+th { position: sticky; top: 0; background: var(--paper); border-bottom: 1px solid var(--ink); cursor: pointer; user-select: none; font-weight: bold; }
+th:first-child, td:first-child, th.txt, td.txt { text-align: left; }
+th .arrow { color: var(--dark); font-weight: normal; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--soft); }
+tbody tr.sel { background: var(--ink); color: var(--paper); }
+#right { min-width: 0; display: flex; flex-direction: column; }
+#plots { display: grid; grid-template-columns: 1fr 1.6fr; border-bottom: 1px solid var(--light); }
+.plot { height: 270px; min-width: 0; }
+.plotbox { position: relative; min-width: 0; padding: 4px 6px 0; }
+.plotbox h2, #info h2 { font-size: 13px; margin: 4px 4px 0; font-weight: bold; }
+.plotbox .note { font-size: 11px; color: var(--dark); margin: 0 4px; }
+.plotbox .opt { position: absolute; right: 10px; top: 6px; font-size: 11px; }
+#viewerrow { display: grid; grid-template-columns: minmax(0, 1fr) 280px; flex: 1; min-height: 420px; }
+#stage { position: relative; background: #000; min-height: 420px; overflow: hidden; touch-action: none; }
+#svg { width: 100%; height: 100%; position: absolute; inset: 0; cursor: grab; display: block; }
+#svg.drag { cursor: grabbing; }
+#scalebar { position: absolute; left: 14px; bottom: 12px; color: #fff; font-size: 12px; pointer-events: none; }
+#scalebar div { height: 3px; background: #fff; margin-bottom: 3px; }
+#toggles { position: absolute; top: 8px; left: 8px; display: flex; flex-wrap: wrap; gap: 4px 10px; color: #fff; background: rgba(0,0,0,.6); padding: 4px 8px; font-size: 12px; }
+#toggles label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+#nav { position: absolute; top: 8px; right: 8px; display: flex; gap: 4px; }
+#nav button { background: rgba(0,0,0,.6); color: #fff; border-color: #fff; }
+#info { padding: 8px 12px; overflow: auto; border-left: 1px solid var(--light); }
+#info dl { display: grid; grid-template-columns: auto auto; gap: 2px 10px; margin: 6px 0 12px; font-variant-numeric: tabular-nums; }
+#info dt { color: var(--dark); }
+#info dd { margin: 0; text-align: right; }
+#info .name { font-weight: bold; word-break: break-all; }
+#legend { font-size: 12px; line-height: 1.7; }
+#legend svg { vertical-align: middle; background: #000; margin-right: 4px; }
+#gallery { display: none; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; padding: 12px; overflow: auto; }
+#gallery figure { margin: 0; cursor: pointer; border: 1px solid var(--light); }
+#gallery figure:hover { border-color: var(--ink); }
+#gallery figure.sel { outline: 3px solid var(--ink); }
+#gallery img { width: 100%; aspect-ratio: 1; object-fit: contain; background: #000; display: block; }
+#gallery figcaption { padding: 3px 5px; font-size: 11px; display: flex; justify-content: space-between; gap: 6px; }
+body.gallery #plots, body.gallery #viewerrow { display: none; }
+body.gallery #gallery { display: grid; }
+#err { padding: 20px; display: none; }
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; }
+  #left { max-height: 45vh; border-right: 0; border-bottom: 1px solid var(--ink); }
+  #plots { grid-template-columns: 1fr; }
+  #viewerrow { grid-template-columns: 1fr; }
+  #stage { height: 70vh; }
+  header, #filters { padding-left: 16px; padding-right: 16px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Section browser</h1>
+  <span class="sub" id="subtitle">AF488 and what the counting method labelled, every analysed section</span>
+  <span class="modes"><button id="mViewer" class="on">Viewer</button><button id="mGallery">Gallery</button></span>
+</header>
+<div id="err"></div>
+<main>
+  <section id="left">
+    <div id="filters">
+      <label>Genotype <select id="fGeno"><option value="">all</option></select></label>
+      <label>Experiment <select id="fExp"><option value="">all</option></select></label>
+      <label>QC <select id="fQc"><option value="">all</option></select></label>
+      <label><input type="checkbox" id="fHuman"> human-counted only</label>
+      <input type="search" id="fName" placeholder="search name" aria-label="search by name">
+      <span id="count"></span>
+    </div>
+    <div id="tablewrap"><table><thead><tr id="head"></tr></thead><tbody id="rows"></tbody></table></div>
+  </section>
+  <section id="right">
+    <div id="plots">
+      <div class="plotbox">
+        <h2>Automated against human count</h2>
+        <p class="note">Human-counted sections, in the area each human counted. Circles annotator 1, squares annotator 2; WT3 filled, GD1 open.</p>
+        <div id="p1" class="plot"></div>
+      </div>
+      <div class="plotbox">
+        <h2>Crossed AF488 mask objects per mm of junction</h2>
+        <p class="note">One point per section; the line is the median. Click a point to open the section.</p>
+        <label class="opt"><input type="checkbox" id="logStrip"> log axis</label>
+        <div id="p2" class="plot"></div>
+      </div>
+    </div>
+    <div id="viewerrow">
+      <div id="stage">
+        <svg id="svg" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+          <image id="img" x="0" y="0"></image>
+          <g id="gRegion" fill="none" stroke="#d9d9d9" stroke-width="1.5" stroke-dasharray="5 4"></g>
+          <g id="gLine" fill="none" stroke="#ffffff" stroke-width="2"></g>
+          <g id="gObjects" fill="none" stroke-width="1.3"></g>
+          <g id="gHumans" fill="none" stroke="#ffffff" stroke-width="1.3"></g>
+        </svg>
+        <div id="toggles">
+          <label><input type="checkbox" id="tLine" checked> junction line</label>
+          <label><input type="checkbox" id="tRegion" checked> junction region</label>
+          <label><input type="checkbox" id="tObjects" checked> automated objects</label>
+          <label><input type="checkbox" id="tHumans" checked> human dots</label>
+          <label><input type="checkbox" id="tImage" checked> image</label>
+        </div>
+        <div id="nav"><button id="prev" title="previous (left arrow)">&larr;</button><button id="fit" title="fit (0)">fit</button><button id="next" title="next (right arrow)">&rarr;</button></div>
+        <div id="scalebar"><div></div><span></span></div>
+      </div>
+      <aside id="info"></aside>
+    </div>
+    <div id="gallery"></div>
+  </section>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.34.0/plotly.min.js"></script>
+<!-- data.js (written by section_browser.py) sets window.SECTION_DATA, so the page also opens straight from disk;
+     without it the page fetches data.json, which needs a web server. -->
+<script src="data.js"></script>
+<script>
+"use strict";
+const INK = "#000000", DARK = "#4d4d4d", MID = "#8c8c8c", LIGHT = "#d9d9d9", MAGENTA = "#ff00ff";
+const FACE = { WT3: DARK, GD1: "#ffffff" };
+const SVGNS = "http://www.w3.org/2000/svg";
+const $ = (id) => document.getElementById(id);
+
+let DATA = null, S = [], BYID = {}, VIEW = [], CUR = null;
+let sortKey = "crossed_per_mm", sortDir = -1;
+let vb = { x: 0, y: 0, w: 1, h: 1 };
+
+// Table columns: key, header, how to show, text or number
+const COLS = [
+  { k: "id", h: "Section", txt: true },
+  { k: "genotype", h: "Gt", txt: true },
+  { k: "experiment", h: "Exp", txt: true },
+  { k: "n_objects", h: "Objects", f: 0 },
+  { k: "n_region", h: "In region", f: 0 },
+  { k: "n_crossed", h: "Crossed", f: 0 },
+  { k: "n_home", h: "Home", f: 0 },
+  { k: "crossed_per_mm", h: "Crossed/mm", f: 2 },
+  { k: "share_crossed", h: "Share crossed", f: 2 },
+  { k: "length_um", h: "Junction (µm)", f: 0 },
+  { k: "human", h: "Human", f: 0 },
+  { k: "automated_area", h: "Auto (human area)", f: 0 },
+  { k: "ratio", h: "Auto ÷ human", f: 2 },
+  { k: "qc", h: "QC", txt: true },
+];
+
+function fmt(v, d) {
+  if (v === null || v === undefined || (typeof v === "number" && !isFinite(v))) return "–";
+  if (typeof v !== "number") return String(v);
+  return d === undefined ? String(v) : v.toFixed(d);
+}
+
+function loadData() {
+  if (window.SECTION_DATA) return Promise.resolve(window.SECTION_DATA);
+  return fetch("data.json").then((r) => { if (!r.ok) throw new Error("data.json: " + r.status); return r.json(); });
+}
+
+function prepare(d) {
+  DATA = d;
+  S = d.sections;
+  for (const s of S) {
+    BYID[s.id] = s;
+    // one human per section (none is counted by both); the first if there were two
+    const h = s.humans && s.humans.length ? s.humans[0] : null;
+    s.human = h ? h.human : null;
+    s.automated_area = h ? h.automated : null;
+    s.ratio = h ? h.ratio : null;
+    s.annotator = h ? h.label : null;
+    s.qc = s.qc || "–";
+  }
+}
+
+// ------------------------------------------------------------------ table and filters
+function fillSelect(id, values) {
+  const sel = $(id);
+  for (const v of values) { const o = document.createElement("option"); o.value = v; o.textContent = v; sel.appendChild(o); }
+}
+
+function buildHead() {
+  const tr = $("head");
+  tr.innerHTML = "";
+  for (const c of COLS) {
+    const th = document.createElement("th");
+    if (c.txt) th.className = "txt";
+    th.innerHTML = c.h + (c.k === sortKey ? ' <span class="arrow">' + (sortDir > 0 ? "▲" : "▼") + "</span>" : "");
+    th.onclick = () => {
+      if (sortKey === c.k) sortDir = -sortDir; else { sortKey = c.k; sortDir = c.txt ? 1 : -1; }
+      refresh();
+    };
+    tr.appendChild(th);
+  }
+}
+
+function compare(a, b) {
+  const x = a[sortKey], y = b[sortKey];
+  const xn = x === null || x === undefined || x === "–", yn = y === null || y === undefined || y === "–";
+  if (xn && yn) return a.id < b.id ? -1 : 1;
+  if (xn) return 1;          // missing values always last
+  if (yn) return -1;
+  if (x < y) return -sortDir;
+  if (x > y) return sortDir;
+  return a.id < b.id ? -1 : 1;
+}
+
+function refresh() {
+  const g = $("fGeno").value, e = $("fExp").value, q = $("fQc").value, hum = $("fHuman").checked;
+  const text = $("fName").value.trim().toLowerCase();
+  VIEW = S.filter((s) => (!g || s.genotype === g) && (!e || s.experiment === e) && (!q || s.qc === q)
+    && (!hum || s.human !== null) && (!text || s.name.toLowerCase().includes(text) || (s.slide || "").toLowerCase().includes(text)));
+  VIEW.sort(compare);
+  buildHead();
+  const body = $("rows");
+  const frag = document.createDocumentFragment();
+  for (const s of VIEW) {
+    const tr = document.createElement("tr");
+    tr.dataset.id = s.id;
+    if (CUR && s.id === CUR.id) tr.className = "sel";
+    tr.innerHTML = COLS.map((c) => "<td" + (c.txt ? ' class="txt"' : "") + ">" + fmt(s[c.k], c.f) + "</td>").join("");
+    tr.onclick = () => open(s.id);
+    frag.appendChild(tr);
+  }
+  body.innerHTML = "";
+  body.appendChild(frag);
+  $("count").textContent = VIEW.length + " of " + S.length + " sections";
+  if (document.body.classList.contains("gallery")) buildGallery();
+}
+
+// ------------------------------------------------------------------ plots
+const PLOT_LAYOUT = {
+  font: { family: "Arial, Helvetica, sans-serif", size: 11, color: INK },
+  paper_bgcolor: "#fff", plot_bgcolor: "#fff", margin: { l: 56, r: 12, t: 8, b: 44 }, showlegend: false,
+  hoverlabel: { bgcolor: "#fff", bordercolor: INK, font: { family: "Arial", color: INK } },
+};
+const AXIS = { showline: true, linecolor: INK, linewidth: 1, ticks: "outside", tickcolor: INK, zeroline: false, showgrid: false, mirror: false };
+
+function hoverText(s) {
+  return "<b>" + s.id + "</b> (" + s.genotype + ", exp " + s.experiment + ")<br>" +
+    "objects " + s.n_objects + ", in region " + s.n_region + "<br>crossed " + s.n_crossed + " (" + fmt(s.crossed_per_mm, 2) + "/mm), home " + s.n_home +
+    (s.human !== null ? "<br>" + s.annotator + ": human " + s.human + ", automated " + s.automated_area + " (×" + fmt(s.ratio, 2) + ")" : "");
+}
+
+function plotHuman() {
+  const traces = [];
+  const counted = S.filter((s) => s.human !== null);
+  const vals = counted.flatMap((s) => [Math.max(s.human, 0.5), Math.max(s.automated_area, 0.5)]);
+  const lo = Math.pow(10, Math.floor(Math.log10(Math.min(...vals, 10)) * 2) / 2), hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...vals, 10)) * 4) / 4);
+  traces.push({ x: [lo, hi], y: [lo, hi], mode: "lines", line: { color: MID, dash: "dash", width: 1 }, hoverinfo: "skip" });
+  for (const ann of ["human annotator 1", "human annotator 2"]) {
+    for (const g of ["WT3", "GD1"]) {
+      const part = counted.filter((s) => s.annotator === ann && s.genotype === g);
+      traces.push({
+        x: part.map((s) => Math.max(s.human, 0.5)), y: part.map((s) => Math.max(s.automated_area, 0.5)),
+        customdata: part.map((s) => s.id), text: part.map(hoverText), hovertemplate: "%{text}<extra></extra>",
+        mode: "markers", name: g + ", " + ann,
+        marker: { symbol: ann.endsWith("1") ? "circle" : "square", size: 9, color: FACE[g], line: { color: INK, width: 1 } },
+      });
+    }
+  }
+  traces.push(selTrace());
+  const ticks = [1, 3, 10, 30, 100, 300, 1000, 3000, 10000];
+  Plotly.newPlot("p1", traces, {
+    ...PLOT_LAYOUT,
+    xaxis: { ...AXIS, type: "log", range: [Math.log10(lo), Math.log10(hi)], tickvals: ticks, title: { text: "Human count (AF488⁺ cells)" } },
+    yaxis: { ...AXIS, type: "log", range: [Math.log10(lo), Math.log10(hi)], tickvals: ticks, title: { text: "Automated count (objects)" } },
+  }, { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
+  $("p1").on("plotly_click", (ev) => { const id = ev.points[0].customdata; if (id) open(id); });
+}
+
+let STRIP_GROUPS = [];
+function plotStrip() {
+  const exps = [...new Set(S.map((s) => s.experiment))].sort((a, b) => Number(a) - Number(b) || (a < b ? -1 : 1));
+  STRIP_GROUPS = [];
+  for (const g of ["WT3", "GD1"]) for (const e of exps) if (S.some((s) => s.genotype === g && s.experiment === e)) STRIP_GROUPS.push([g, e]);
+  const traces = [];
+  // deterministic jitter so the points stay put between redraws
+  const jitter = (id) => { let h = 0; for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return ((h % 1000) / 1000 - 0.5) * 0.5; };
+  STRIP_GROUPS.forEach(([g, e], i) => {
+    const part = S.filter((s) => s.genotype === g && s.experiment === e && s.crossed_per_mm !== null);
+    for (const s of part) s._sx = i + jitter(s.id);
+    traces.push({
+      x: part.map((s) => s._sx), y: part.map((s) => s.crossed_per_mm), customdata: part.map((s) => s.id),
+      text: part.map(hoverText), hovertemplate: "%{text}<extra></extra>", mode: "markers",
+      marker: { symbol: g === "WT3" ? "circle" : "square", size: 6, color: FACE[g], line: { color: INK, width: 0.8 } },
+    });
+    const ys = part.map((s) => s.crossed_per_mm).sort((a, b) => a - b);
+    const med = ys.length ? (ys.length % 2 ? ys[(ys.length - 1) / 2] : (ys[ys.length / 2 - 1] + ys[ys.length / 2]) / 2) : null;
+    if (med !== null) traces.push({ x: [i - 0.32, i + 0.32], y: [med, med], mode: "lines", line: { color: INK, width: 2 }, hoverinfo: "skip" });
+  });
+  traces.push(selTrace());
+  Plotly.newPlot("p2", traces, {
+    ...PLOT_LAYOUT, margin: { l: 56, r: 12, t: 8, b: 56 },
+    xaxis: { ...AXIS, tickvals: STRIP_GROUPS.map((_, i) => i), ticktext: STRIP_GROUPS.map(([g, e]) => g + "<br>exp " + e), range: [-0.6, STRIP_GROUPS.length - 0.4] },
+    yaxis: { ...AXIS, type: $("logStrip").checked ? "log" : "linear", title: { text: "Crossed objects per mm" } },
+  }, { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
+  $("p2").on("plotly_click", (ev) => { const id = ev.points[0].customdata; if (id) open(id); });
+}
+
+function selTrace() {
+  return { x: [], y: [], mode: "markers", hoverinfo: "skip", marker: { size: 18, color: "rgba(0,0,0,0)", line: { color: INK, width: 2.5 } } };
+}
+
+function markPlots(s) {
+  const p1 = $("p1"), p2 = $("p2");
+  if (p1 && p1.data) {
+    const on = s.human !== null;
+    Plotly.restyle(p1, { x: [on ? [Math.max(s.human, 0.5)] : []], y: [on ? [Math.max(s.automated_area, 0.5)] : []] }, [p1.data.length - 1]);
+  }
+  if (p2 && p2.data) {
+    const on = s.crossed_per_mm !== null && s._sx !== undefined;
+    Plotly.restyle(p2, { x: [on ? [s._sx] : []], y: [on ? [s.crossed_per_mm] : []] }, [p2.data.length - 1]);
+  }
+}
+
+// ------------------------------------------------------------------ viewer
+function el(tag, attrs) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
+
+function setViewBox() { $("svg").setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); scaleBar(); }
+
+function fit() {
+  if (!CUR) return;
+  vb = { x: 0, y: 0, w: CUR.width, h: CUR.height };
+  setViewBox();
+}
+
+function screenScale() {          // screen px per image px (preserveAspectRatio meet)
+  const r = $("svg").getBoundingClientRect();
+  return Math.min(r.width / vb.w, r.height / vb.h) || 1;
+}
+
+function scaleBar() {
+  if (!CUR) return;
+  const umPerScreen = CUR.um_per_px / screenScale();
+  const nice = [5, 10, 20, 50, 100, 200, 500, 1000, 2000];
+  let len = nice[0];
+  for (const n of nice) if (n / umPerScreen <= 160) len = n;
+  $("scalebar").querySelector("div").style.width = (len / umPerScreen).toFixed(1) + "px";
+  $("scalebar").querySelector("span").textContent = len + " µm";
+}
+
+function draw(s) {
+  $("img").setAttribute("href", "img/" + s.id + ".jpg");
+  $("img").setAttribute("width", s.width);
+  $("img").setAttribute("height", s.height);
+  const gL = $("gLine"), gR = $("gRegion"), gO = $("gObjects"), gH = $("gHumans");
+  for (const g of [gL, gR, gO, gH]) g.innerHTML = "";
+  if (s.line && s.line.length) gL.appendChild(el("polyline", { points: s.line.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
+  for (const c of s.region || []) gR.appendChild(el("polygon", { points: c.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
+  const o = s.objects, px = s.um_per_px;
+  const KIND = [{ c: MID, n: "other" }, { c: MAGENTA, n: "crossed" }, { c: "#ffffff", n: "home" }];
+  const order = o.k.map((k, i) => i).sort((a, b) => (o.k[a] === 0 ? 0 : 1) - (o.k[b] === 0 ? 0 : 1));   // grey first, underneath
+  const frag = document.createDocumentFragment();
+  for (const i of order) {
+    const k = o.k[i];
+    const c = el("circle", { cx: o.x[i], cy: o.y[i], r: Math.max(o.r[i] + 2, 3).toFixed(2), stroke: KIND[k].c, "vector-effect": "non-scaling-stroke" });
+    const t = el("title", {});
+    t.textContent = "automated object, " + KIND[k].n + (o.away[i] !== null ? ", " + o.away[i].toFixed(0) + " µm from the line (+ past it)" : "") +
+      ", area " + (Math.PI * Math.pow(o.r[i] * px, 2)).toFixed(0) + " µm²" + (o.reg[i] ? ", in the junction region" : "");
+    c.appendChild(t);
+    frag.appendChild(c);
+  }
+  gO.appendChild(frag);
+  const arm = 4;
+  for (const h of s.humans || []) {
+    const d = h.dots;
+    let path = "", pathOut = "";
+    for (let i = 0; i < d.x.length; i++) {
+      const p = "M" + (d.x[i] - arm) + " " + d.y[i] + "h" + 2 * arm + "M" + d.x[i] + " " + (d.y[i] - arm) + "v" + 2 * arm;
+      if (d.in[i]) path += p; else pathOut += p;
+    }
+    gH.appendChild(el("path", { d: path, "vector-effect": "non-scaling-stroke" }));
+    if (pathOut) gH.appendChild(el("path", { d: pathOut, opacity: 0.45, "vector-effect": "non-scaling-stroke" }));
+  }
+  applyToggles();
+}
+
+function applyToggles() {
+  $("gLine").style.display = $("tLine").checked ? "" : "none";
+  $("gRegion").style.display = $("tRegion").checked ? "" : "none";
+  $("gObjects").style.display = $("tObjects").checked ? "" : "none";
+  $("gHumans").style.display = $("tHumans").checked ? "" : "none";
+  $("img").style.display = $("tImage").checked ? "" : "none";
+}
+
+function row(k, v) { return "<dt>" + k + "</dt><dd>" + v + "</dd>"; }
+
+function info(s) {
+  const i = VIEW.findIndex((x) => x.id === s.id);
+  let html = '<div class="name">' + s.name + "</div>" +
+    '<div style="color:' + DARK + '">' + (i >= 0 ? (i + 1) + " of " + VIEW.length + " in the table" : "not in the filtered table") + "</div>";
+  html += "<h2>Section</h2><dl>" + row("Genotype", s.genotype) + row("Experiment", s.experiment) + row("Slide", s.slide) +
+    row("Junction length", fmt(s.length_um, 0) + " µm") + row("Region drawn", fmt(s.region_by)) + row("QC", fmt(s.qc)) +
+    row("Review", fmt(s.review) + (s.decision ? " (" + s.decision + ")" : "")) + row("Pixel", fmt(s.um_per_px, 2) + " µm") + "</dl>";
+  html += "<h2>Automated (AF488 mask objects)</h2><dl>" + row("Objects, whole section", s.n_objects) + row("In junction region", s.n_region) +
+    row("Crossed (2–300 µm past)", s.n_crossed) + row("Home (2–300 µm before)", s.n_home) + row("Crossed per mm", fmt(s.crossed_per_mm, 2)) +
+    row("Share crossed", fmt(s.share_crossed, 2)) + "</dl>";
+  for (const h of s.humans || []) {
+    html += "<h2>" + h.label.charAt(0).toUpperCase() + h.label.slice(1) + "</h2><dl>" + row("Counted area", '<span style="white-space:normal">' + h.area + "</span>") +
+      row("Human count", h.human) + row("Automated, same area", h.automated) + row("Automated ÷ human", fmt(h.ratio, 2)) +
+      row("Dots shown", h.dots.x.length) + "</dl>";
+  }
+  html += '<h2>Overlays</h2><div id="legend">' +
+    legendItem('<circle cx="9" cy="9" r="5" fill="none" stroke="#ffffff" stroke-width="1.5"/>', "object at home (2–300 µm before the line)") +
+    legendItem('<circle cx="9" cy="9" r="5" fill="none" stroke="' + MAGENTA + '" stroke-width="1.5"/>', "object crossed (2–300 µm past the line)") +
+    legendItem('<circle cx="9" cy="9" r="5" fill="none" stroke="' + MID + '" stroke-width="1.5"/>', "other object (farther, or past the line\'s ends)") +
+    legendItem('<path d="M5 9h8M9 5v8" stroke="#ffffff" stroke-width="1.5"/>', "human dot (faint: outside the counted area)") +
+    legendItem('<path d="M2 14L16 4" stroke="#ffffff" stroke-width="2"/>', "junction line") +
+    legendItem('<rect x="3" y="4" width="12" height="10" fill="none" stroke="#d9d9d9" stroke-dasharray="3 2" stroke-width="1.5"/>', "junction region") +
+    '<div style="color:' + DARK + ';margin-top:6px">AF488, brightest plane over z, display ' + s.display[0] + "–" + s.display[1] +
+    " (tissue 1st–99.7th percentile). Wheel to zoom, drag to pan, ←/→ previous/next, 0 to fit.</div></div>";
+  $("info").innerHTML = html;
+}
+
+function legendItem(svg, text) { return '<div><svg width="18" height="18" viewBox="0 0 18 18">' + svg + "</svg>" + text + "</div>"; }
+
+function open(id) {
+  const s = BYID[id];
+  if (!s) return;
+  const same = CUR && CUR.id === id;
+  CUR = s;
+  if (document.body.classList.contains("gallery")) setMode(false);
+  if (!same) { draw(s); fit(); }
+  info(s);
+  markPlots(s);
+  for (const tr of $("rows").querySelectorAll("tr.sel")) tr.classList.remove("sel");
+  const tr = $("rows").querySelector('tr[data-id="' + id + '"]');
+  if (tr) { tr.classList.add("sel"); tr.scrollIntoView({ block: "nearest" }); }
+  if (location.hash.slice(1) !== id) history.replaceState(null, "", "#" + id);
+}
+
+function step(d) {
+  if (!VIEW.length) return;
+  const i = CUR ? VIEW.findIndex((s) => s.id === CUR.id) : -1;
+  const j = i < 0 ? 0 : Math.min(Math.max(i + d, 0), VIEW.length - 1);
+  open(VIEW[j].id);
+}
+
+// zoom and pan
+function svgPoint(ev) {
+  const svg = $("svg"), pt = svg.createSVGPoint();
+  pt.x = ev.clientX; pt.y = ev.clientY;
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+
+function setupStage() {
+  const svg = $("svg");
+  svg.addEventListener("wheel", (ev) => {
+    if (!CUR) return;
+    ev.preventDefault();
+    const p = svgPoint(ev);
+    const k = Math.exp(ev.deltaY * 0.0015);
+    const w = Math.min(Math.max(vb.w * k, 30), CUR.width * 4), f = w / vb.w;
+    vb = { x: p.x - (p.x - vb.x) * f, y: p.y - (p.y - vb.y) * f, w: w, h: vb.h * f };
+    setViewBox();
+  }, { passive: false });
+  let drag = null;
+  svg.addEventListener("pointerdown", (ev) => { drag = { x: ev.clientX, y: ev.clientY, vb: { ...vb } }; svg.setPointerCapture(ev.pointerId); svg.classList.add("drag"); });
+  svg.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const k = 1 / screenScale();
+    vb = { ...drag.vb, x: drag.vb.x - (ev.clientX - drag.x) * k, y: drag.vb.y - (ev.clientY - drag.y) * k };
+    setViewBox();
+  });
+  const end = () => { drag = null; svg.classList.remove("drag"); };
+  svg.addEventListener("pointerup", end);
+  svg.addEventListener("pointercancel", end);
+  window.addEventListener("resize", scaleBar);
+  for (const id of ["tLine", "tRegion", "tObjects", "tHumans", "tImage"]) $(id).onchange = applyToggles;
+  $("prev").onclick = () => step(-1);
+  $("next").onclick = () => step(1);
+  $("fit").onclick = fit;
+  document.addEventListener("keydown", (ev) => {
+    if (ev.target.tagName === "INPUT" && ev.target.type === "search") return;
+    if (ev.target.tagName === "SELECT") return;
+    if (ev.key === "ArrowRight") { step(1); ev.preventDefault(); }
+    else if (ev.key === "ArrowLeft") { step(-1); ev.preventDefault(); }
+    else if (ev.key === "0") fit();
+  });
+}
+
+// ------------------------------------------------------------------ gallery
+function buildGallery() {
+  const col = COLS.find((c) => c.k === sortKey);
+  const g = $("gallery");
+  g.innerHTML = VIEW.map((s) =>
+    '<figure data-id="' + s.id + '"' + (CUR && CUR.id === s.id ? ' class="sel"' : "") + '><img loading="lazy" src="img/' + s.id + '_t.jpg" alt="' + s.id + '">' +
+    "<figcaption><span>" + s.id + " · " + s.genotype + "</span><span>" + (col && !col.txt ? col.h + " " + fmt(s[sortKey], col.f) : "crossed/mm " + fmt(s.crossed_per_mm, 2)) +
+    "</span></figcaption></figure>").join("");
+  for (const f of g.querySelectorAll("figure")) f.onclick = () => open(f.dataset.id);
+}
+
+function setMode(gallery) {
+  document.body.classList.toggle("gallery", gallery);
+  $("mGallery").classList.toggle("on", gallery);
+  $("mViewer").classList.toggle("on", !gallery);
+  if (gallery) buildGallery();
+  else { window.dispatchEvent(new Event("resize")); if (CUR) { fit(); } }
+}
+
+// ------------------------------------------------------------------ start
+function init(d) {
+  prepare(d);
+  $("subtitle").textContent = S.length + " sections · AF488 mask objects (" + d.method + "), crossed = beside the line, " +
+    d.gap_um + "–" + d.near_um + " µm past it · built " + d.generated;
+  fillSelect("fGeno", ["WT3", "GD1"].filter((g) => S.some((s) => s.genotype === g)));
+  fillSelect("fExp", [...new Set(S.map((s) => s.experiment))].sort());
+  fillSelect("fQc", [...new Set(S.map((s) => s.qc))].sort());
+  for (const id of ["fGeno", "fExp", "fQc", "fHuman"]) $(id).onchange = refresh;
+  $("fName").oninput = refresh;
+  $("mViewer").onclick = () => setMode(false);
+  $("mGallery").onclick = () => setMode(true);
+  $("logStrip").onchange = () => Plotly.relayout("p2", { "yaxis.type": $("logStrip").checked ? "log" : "linear" });
+  setupStage();
+  refresh();
+  if (window.Plotly) { plotHuman(); plotStrip(); }
+  else { $("p1").textContent = "The plots need plotly from cdnjs (no internet connection?)."; }
+  const start = location.hash.slice(1);
+  open(BYID[start] ? start : (VIEW[0] && VIEW[0].id));
+  if (new URLSearchParams(location.search).has("gallery")) setMode(true);    // ?gallery opens on the thumbnails
+}
+
+loadData().then(init).catch((e) => {
+  const box = $("err");
+  box.style.display = "block";
+  box.textContent = "Could not load the data (" + e.message + "). Open the page through a web server: run " +
+    "'python -m http.server' in this folder and go to http://localhost:8000/section_browser.html, or keep data.js beside the page.";
+});
+</script>
+</body>
+</html>

@@ -86,7 +86,9 @@ Publication figures (greyscale data, AF488 images with white / magenta overlays,
 |---|---|
 | `01_validation.ipynb` | Automated against human totals of AF488+ cells per section (27 sections, two annotators, each in the area they counted): Lin's CCC and ratio-scale Bland–Altman with section-bootstrap CIs; the per-nucleus rule and the fine-tuned Cellpose for comparison; whether the human and the automated count give the same WT3-against-GD1 conclusion; a gallery of 12 regions with human dots and automated outlines. |
 | `02_biology.ipynb` | WT3 against GD1 on the 614 analysed sections with that count: cells in the junction region, crossed (primary), on the home side, the share crossed, the crossed cells' distance to the edge and past the line (mixed model, Holm); robustness (leave one experiment / slide out, slide level, covariates); representative images; conclusion and methods text. |
- — the verdict for the paper
+| `section_browser.py` + `section_browser.html` | A browser of every analysed section (614): the whole section's AF488 (~1.3 µm per pixel) with the junction line, the junction region and the counting method's objects (home white, crossed magenta, others grey) and the human dots as toggled overlays; a sortable, filterable table of the per-section numbers; the automated-against-human scatter and the crossed-per-mm strip plot (click a point to open its section); ←/→ through the table; a gallery of thumbnails. `python notebooks/official_analysis/section_browser.py` (resumes; ~4 s a section, four at a time) writes `run_analysis_20261028\section_browser\`; open `section_browser.html` there (from disk, or `python -m http.server` in the folder and http://localhost:8000/section_browser.html). |
+
+## `publication/` — the verdict for the paper
 
 | File | What |
 |---|---|
