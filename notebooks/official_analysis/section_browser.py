@@ -32,7 +32,9 @@ side is the same for every method. Objects and cells are placed by their centroi
 
 Writes into *out* (default ``run_analysis_20261028/section_browser``) ``data.json``, the same as
 ``data.js`` (so the page opens from disk too), ``img/`` and ``parts/`` (one file per section, so a
-rerun skips what is done), beside a copy of ``section_browser.html``.
+rerun skips what is done), beside a copy of ``section_browser.html`` and of ``figure_builder.html``
+(the biology notebook's graphs with any normalisation; it also reads ``sections_table.js``, which
+the last cell of ``02_biology.ipynb`` writes into the same folder).
 
     python notebooks/official_analysis/section_browser.py            # every section not done yet
     python notebooks/official_analysis/section_browser.py 5          # just five, to time it
@@ -588,6 +590,8 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
     (out / "data.json").write_text(text, encoding="utf-8")
     (out / "data.js").write_text("window.SECTION_DATA = " + text + ";\n", encoding="utf-8")
     shutil.copy(HERE / "section_browser.html", out / "section_browser.html")
+    # the figure builder reads data.js and the biology notebook's sections_table.js (02_biology, last cell)
+    shutil.copy(HERE / "figure_builder.html", out / "figure_builder.html")
     return len(sections)
 
 

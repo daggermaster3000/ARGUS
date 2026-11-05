@@ -90,7 +90,7 @@ body.gallery #gallery { display: grid; }
     <label title="How a cell is called AF488-positive. The mask methods outline bright AF488 in the image itself; the per-nucleus rules call each segmented cell from its mean AF488.">Positivity <select id="mMethod"></select></label>
     <label title="Median + k robust SD (1.4826 × MAD): of the background-subtracted AF488 inside the tissue for the masks, of the junction region's cells for the per-nucleus rules. Higher: fewer, brighter cells.">Threshold <select id="mK"></select></label>
   </span>
-  <span class="modes"><button id="mViewer" class="on">Viewer</button><button id="mGallery">Gallery</button></span>
+  <span class="modes"><a href="figure_builder.html" style="color: var(--ink); align-self: center; margin-right: 8px;" title="The biology notebook's graphs, with your own normalisation, for publication">Figure builder &rarr;</a><button id="mViewer" class="on">Viewer</button><button id="mGallery">Gallery</button></span>
 </header>
 <div id="err"></div>
 <main>
