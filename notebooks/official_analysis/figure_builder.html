@@ -64,6 +64,12 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
 #settings { font-family: Consolas, "Courier New", monospace; font-size: 11px; height: 90px; }
 #err { padding: 20px; display: none; }
 .statText { margin: 4px 0; }
+#dataBox { margin-top: 18px; border-top: 1px solid var(--ink); padding: 6px 0 0; }
+#dataBox > summary h2 { display: inline; }
+#dataTable { max-height: 560px; overflow: auto; border: 1px solid var(--light); }
+#dataT { margin: 0; }
+#dataT th { position: sticky; top: 0; background: var(--paper); cursor: pointer; }
+#dataT td { font-size: 12px; }
 @media (max-width: 900px) {
   main { grid-template-columns: 1fr; }
   #controls { max-height: none; border-right: 0; border-bottom: 1px solid var(--ink); }
@@ -137,6 +143,23 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
     <div class="row"><label>Effect <select id="effect"><option value="fold">fold of means, WT3 / GD1</option><option value="difference">difference of means, WT3 − GD1</option></select></label></div>
     <div class="row"><label title="The scale the slide-level tests are done on. The notebook models counts per mm on log(1 + y), the area on log y, shares and distances as they are.">Slide tests on <select id="testScale"><option value="none">the values as they are</option><option value="log1p">log(1 + y)</option><option value="log">log y</option></select></label></div>
   </details>
+  <details open>
+    <summary>Model</summary>
+    <p class="hint">A mixed model compares WT3 with GD1 with the slide as a random effect, so the sections of one slide are not counted as independent evidence. Grouped by genotype × experiment, each experiment is fitted on its own (without the experiment term). The result is the table under the statistics; the plot can show it.</p>
+    <div class="row"><label>Model <select id="model">
+      <option value="none">none</option>
+      <option value="lmm">linear mixed model of the plotted value (REML)</option>
+      <option value="nb">negative-binomial GLMM of a count</option>
+      <option value="poisson">Poisson GLMM of a count</option>
+      <option value="binomial">binomial GLMM of a share</option></select></label></div>
+    <p class="hint" id="rowLmm">Modelled: the plotted value on the scale chosen under Statistics (“Slide tests on”). log(1 + y) and log y give a fold WT3 / GD1, the values as they are a difference.</p>
+    <div class="row" id="rowCount"><label title="A count per section: the model is for counts, not for a ratio. The offset turns it into a rate (per mm of junction, per mm² …).">Count <select id="mCount"></select></label>
+      <label title="log(exposure) is an offset: the rate ratio is per unit of it.">per <select id="mExposure"></select></label></div>
+    <div class="row" id="rowShare"><label>Successes <select id="mSucc"></select></label><label>out of <select id="mTrials"></select></label></div>
+    <div class="row" id="rowOlre"><label title="A random intercept for every section, inside its slide: sections vary more than a binomial allows (overdispersion). Without it the CI is too narrow when they do."><input type="checkbox" id="mOlre">random effect per section (overdispersion)</label></div>
+    <div class="row" id="rowNodes"><label title="Adaptive Gauss–Hermite quadrature over each slide's random effect. 15 is plenty; more is slower and changes the numbers only in the 4th digit or later.">Quadrature nodes per slide <input type="number" id="mNodes" step="1" min="5" max="41"></label></div>
+    <div class="row"><label>On the plot <select id="modelOnPlot"><option value="tests">the simple tests</option><option value="model">the model</option><option value="both">both</option></select></label></div>
+  </details>
   <details>
     <summary>Colours</summary>
     <p class="hint">Marker fill and edge per group (both panels), the mean ± SEM bar, the fit lines, and the text and axes. The defaults are the publication greys: WT3 dark grey, GD1 white, black edges.</p>
@@ -192,13 +215,31 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
       <label><input type="checkbox" id="mImage" checked> image analysis</label>
       <label><input type="checkbox" id="mOutcome" checked> outcome and sections</label>
       <label><input type="checkbox" id="mStats" checked> statistics on the plot</label>
-      <label><input type="checkbox" id="mModel" checked> mixed model (the notebook's reference analysis)</label>
+      <label><input type="checkbox" id="mModel" checked> mixed model (as chosen under Model)</label>
       <label><input type="checkbox" id="mScatter"> scatter panel</label>
       <label><input type="checkbox" id="mSoftware" checked> software</label>
     </div>
     <textarea id="methodsText" readonly rows="18" style="width: 100%; max-width: 900px; font: 13px/1.45 Arial, sans-serif; padding: 8px;"></textarea>
     <div class="row"><button id="bCopyMethods">Copy the methods text</button><span id="methodsMsg" class="note"></span></div>
   </div>
+  <details id="dataBox">
+    <summary><h2>Data: the raw values behind the plot</h2></summary>
+    <p class="note">One row per section: its design, its section variables, the raw counts of the positivity method chosen above
+      (total, in the junction region, crossed, home, in the area the human counted) with the section's threshold, the formula's value
+      and whether the section is in the plot. Click a column title to sort; the search keeps the rows that contain the text.
+      The CSVs hold the numbers unrounded.</p>
+    <div class="row"><label><input type="checkbox" id="dataAll">all sections (not only those the filters keep)</label>
+      <label>Search <input type="text" id="dataFilter" placeholder="e.g. WT3 e9, 018-017"></label></div>
+    <div class="row"><button id="bDataCsv">Download this table (CSV)</button>
+      <button id="bAllCsv" title="Every section with every positivity method and threshold (crossed_gauss-5, home_gauss-5, …, threshold_cellraw-7), every section variable and the notebook's per-section outcomes">Download all raw counts (CSV)</button>
+      <span id="dataMsg" class="note"></span></div>
+    <div id="dataTable"></div>
+    <p class="note">Further data. Every counted object (AF488 mask, counting method) with its position, area, distance to the junction line and side:
+      <code>af488_mask/&lt;section&gt;/objects.parquet</code> in the run's analysis folder (<code>mask</code> = "kmad5"), with the thresholds in
+      <code>summary.json</code>. The objects drawn in the section browser, per section: <code>section_browser/parts/&lt;section id&gt;.json</code>.
+      The notebook's per-section outcomes: <code>figures_official/sections_table.csv</code> (the same as <code>sections_table.js</code> here).
+      The per-method counts of this page: <code>section_browser/data.js</code> (written by section_browser.py).</p>
+  </details>
 </section>
 </main>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.34.0/plotly.min.js"></script>
@@ -208,6 +249,7 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
 <script src="sections_table.js"></script>
 <script>
 "use strict";
+const PAGE_SCRIPT = document.currentScript ? document.currentScript.textContent : "";   // the GLMM worker is made from its STATS module
 // ==== STATS BEGIN ==== (pure functions; also run by the check script against scipy)
 const STATS = (() => {
   // log Γ(x), Lanczos (Numerical Recipes gammln), ~1e-10 relative
@@ -394,7 +436,461 @@ const STATS = (() => {
     const slope = sxy / sxx;
     return { slope, intercept: my - slope * mx };
   }
-  return { lgamma, ibeta, tTwoSided, tCdf, tQuantile, normSf, mean, variance, sem, median, mannWhitney, mwExactSf, welch, rng, spearman, linfit, pearson };
+  // ---------------------------------------------------------------- mixed models (WT3 against GD1)
+  // Linear mixed model (random intercept, REML) and GLMMs (negative binomial, Poisson, binomial; random intercept per
+  // slide, maximum likelihood by adaptive Gauss–Hermite quadrature). Checked against statsmodels MixedLM and an
+  // independent Python implementation (notebooks/official_analysis/glmm.py) by the check script.
+  const Z975 = 1.959963984540054;
+  const LOG2PI = Math.log(2 * Math.PI);
+  // log Γ(x), x > 0: Stirling series after shifting x up to ≥ 7 (absolute error ~1e-14)
+  function lgammaAcc(x) {
+    let shift = 0;
+    while (x < 7) { shift += Math.log(x); x += 1; }
+    const f = 1 / (x * x);
+    return (x - 0.5) * Math.log(x) - x + 0.9189385332046728 - shift +
+      (1 / 12 - f * (1 / 360 - f * (1 / 1260 - f * (1 / 1680 - f / 1188)))) / x;
+  }
+  // digamma ψ(x), x > 0, the same way
+  function digamma(x) {
+    let r = 0;
+    while (x < 7) { r -= 1 / x; x += 1; }
+    const f = 1 / (x * x);
+    return r + Math.log(x) - 0.5 / x - f * (1 / 12 - f * (1 / 120 - f * (1 / 252 - f * (1 / 240 - f / 132))));
+  }
+  const softplus = (a) => (a > 0 ? a + Math.log1p(Math.exp(-a)) : Math.log1p(Math.exp(a)));
+  const sigmoid = (a) => (a >= 0 ? 1 / (1 + Math.exp(-a)) : Math.exp(a) / (1 + Math.exp(a)));
+  // Gauss–Hermite nodes and weights for ∫ exp(−z²) f(z) dz (Numerical Recipes gauher)
+  function gaussHermite(n) {
+    const EPS = 3e-14, PIM4 = 0.7511255444649425, z = new Float64Array(n), w = new Float64Array(n);
+    let x = 0;
+    for (let i = 0; i < (n + 1) >> 1; i++) {
+      if (i === 0) x = Math.sqrt(2 * n + 1) - 1.85575 * Math.pow(2 * n + 1, -0.16667);
+      else if (i === 1) x -= 1.14 * Math.pow(n, 0.426) / x;
+      else if (i === 2) x = 1.86 * x - 0.86 * z[0];
+      else if (i === 3) x = 1.91 * x - 0.91 * z[1];
+      else x = 2 * x - z[i - 2];
+      let pp = 1;
+      for (let it = 0; it < 200; it++) {
+        let p1 = PIM4, p2 = 0;
+        for (let j = 0; j < n; j++) { const p3 = p2; p2 = p1; p1 = x * Math.sqrt(2 / (j + 1)) * p2 - Math.sqrt(j / (j + 1)) * p3; }
+        pp = Math.sqrt(2 * n) * p2;
+        const x1 = x;
+        x = x1 - p1 / pp;
+        if (Math.abs(x - x1) <= EPS) break;
+      }
+      z[i] = x; z[n - 1 - i] = -x;
+      w[i] = w[n - 1 - i] = 2 / (pp * pp);
+    }
+    return { z, w };
+  }
+
+  // small dense linear algebra (row-major arrays of arrays)
+  function invert(A) {                        // Gauss–Jordan with partial pivoting; null if singular
+    const n = A.length, M = A.map((r, i) => [...r, ...Array.from({ length: n }, (_, j) => (i === j ? 1 : 0))]);
+    for (let c = 0; c < n; c++) {
+      let piv = c;
+      for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+      if (!(Math.abs(M[piv][c]) > 1e-300)) return null;
+      [M[c], M[piv]] = [M[piv], M[c]];
+      const d = M[c][c];
+      for (let j = 0; j < 2 * n; j++) M[c][j] /= d;
+      for (let r = 0; r < n; r++) if (r !== c && M[r][c] !== 0) {
+        const f = M[r][c];
+        for (let j = 0; j < 2 * n; j++) M[r][j] -= f * M[c][j];
+      }
+    }
+    return M.map((r) => r.slice(n));
+  }
+  function logdetPD(A) {                      // log det of a symmetric positive-definite matrix (Cholesky)
+    const n = A.length, L = A.map((r) => r.slice());
+    let ld = 0;
+    for (let j = 0; j < n; j++) {
+      let s = L[j][j];
+      for (let k = 0; k < j; k++) s -= L[j][k] * L[j][k];
+      if (!(s > 0)) return NaN;
+      const d = Math.sqrt(s);
+      L[j][j] = d;
+      ld += 2 * Math.log(d);
+      for (let i = j + 1; i < n; i++) {
+        let t = L[i][j];
+        for (let k = 0; k < j; k++) t -= L[i][k] * L[j][k];
+        L[i][j] = t / d;
+      }
+    }
+    return ld;
+  }
+  const matVec = (A, v) => A.map((r) => r.reduce((s, a, j) => s + a * v[j], 0));
+  const dot = (a, b) => a.reduce((s, x, i) => s + x * b[i], 0);
+  const trace = (A) => A.reduce((s, r, i) => s + r[i], 0);
+  const matMul = (A, B) => A.map((r) => B[0].map((_, j) => r.reduce((s, a, k) => s + a * B[k][j], 0)));
+
+  // group labels → per-group lists of row indices, in first-seen order
+  function groupIndex(groups) {
+    const map = new Map();
+    groups.forEach((g, i) => { if (!map.has(g)) map.set(g, []); map.get(g).push(i); });
+    return [...map.values()];
+  }
+
+  function wald(est, se) {
+    const ok = Number.isFinite(est) && se > 0;
+    return { lo: ok ? est - Z975 * se : NaN, hi: ok ? est + Z975 * se : NaN, z: ok ? est / se : NaN,
+      p: ok ? Math.min(1, 2 * normSf(Math.abs(est / se))) : NaN };
+  }
+
+  // Linear mixed model y = Xβ + b_slide + ε, b ~ N(0, τ²), ε ~ N(0, σ²), fitted by REML as statsmodels MixedLM
+  // does: the variance ratio γ = τ² / σ² is found by a 1-D search of the profiled REML likelihood, β by GLS at that γ.
+  // Standard errors as statsmodels: the inverse of the observed information of (β, γ) (the profiled likelihood's
+  // Hessian); the plain GLS covariance σ² (X'V⁻¹X)⁻¹ is returned as seGls. Wald z: P and 95 % CI from the normal.
+  function lmm(y, X, groups) {
+    const n = y.length, p = X[0].length, G = groupIndex(groups), r = n - p;
+    if (r < 1 || G.length < 2) return null;
+    // per-group sufficient statistics
+    const S = G.map((idx) => {
+      const XX = Array.from({ length: p }, () => new Array(p).fill(0)), s = new Array(p).fill(0), Xy = new Array(p).fill(0);
+      let sy = 0, yy = 0;
+      for (const i of idx) {
+        const xi = X[i];
+        for (let a = 0; a < p; a++) {
+          s[a] += xi[a]; Xy[a] += xi[a] * y[i];
+          for (let b = 0; b < p; b++) XX[a][b] += xi[a] * xi[b];
+        }
+        sy += y[i]; yy += y[i] * y[i];
+      }
+      return { m: idx.length, XX, s, Xy, sy, yy };
+    });
+    function at(gam) {                        // GLS at γ: X'V⁻¹X, β, r'V⁻¹r and the profiled REML log-likelihood
+      const M = Array.from({ length: p }, () => new Array(p).fill(0)), v = new Array(p).fill(0);
+      let yvy = 0, ldV = 0;
+      for (const g of S) {
+        const c = gam / (1 + gam * g.m);
+        for (let a = 0; a < p; a++) {
+          v[a] += g.Xy[a] - c * g.s[a] * g.sy;
+          for (let b = 0; b < p; b++) M[a][b] += g.XX[a][b] - c * g.s[a] * g.s[b];
+        }
+        yvy += g.yy - c * g.sy * g.sy;
+        ldV += Math.log1p(gam * g.m);
+      }
+      const Mi = invert(M);
+      if (!Mi) return null;
+      const beta = matVec(Mi, v), qf = yvy - dot(beta, v), ldM = logdetPD(M);
+      const llf = -ldV / 2 - r * Math.log(qf) / 2 - ldM / 2 - r * LOG2PI / 2 + r * Math.log(r) / 2 - r / 2;
+      return { M, Mi, beta, qf, llf, gam };
+    }
+    // search log γ: a grid, then golden section around the best point
+    let best = null, bestT = -30;
+    const T0 = -30, T1 = 12, STEPS = 84;
+    for (let k = 0; k <= STEPS; k++) {
+      const t = T0 + (T1 - T0) * k / STEPS, f = at(Math.exp(t));
+      if (f && Number.isFinite(f.llf) && (!best || f.llf > best.llf)) { best = f; bestT = t; }
+    }
+    if (!best) return null;
+    let lo = bestT - (T1 - T0) / STEPS, hi = bestT + (T1 - T0) / STEPS;
+    const gr = (Math.sqrt(5) - 1) / 2, F = (t) => { const f = at(Math.exp(t)); return f ? f.llf : -Infinity; };
+    let c = hi - gr * (hi - lo), d = lo + gr * (hi - lo), fc = F(c), fd = F(d);
+    for (let it = 0; it < 200 && hi - lo > 1e-11; it++) {
+      if (fc > fd) { hi = d; d = c; fd = fc; c = hi - gr * (hi - lo); fc = F(c); }
+      else { lo = c; c = d; fc = fd; d = lo + gr * (hi - lo); fd = F(d); }
+    }
+    const tHat = (lo + hi) / 2, fit = at(Math.exp(tHat));
+    const boundary = tHat < T0 + 1;           // slide variance at zero
+    const gam = boundary ? 0 : fit.gam, F0 = boundary ? at(0) : fit;
+    const sigma2 = F0.qf / r, beta = F0.beta;
+    const seGls = F0.Mi.map((row, a) => Math.sqrt(sigma2 * row[a]));
+    // statsmodels' covariance: inverse of minus the Hessian of the profiled REML log-likelihood in (β, γ); statsmodels
+    // keeps the γ row also when γ is at (or next to) zero, and so does this
+    let se = seGls;
+    {
+      const Hbb = F0.M.map((row) => row.map((v) => -r * v / F0.qf));
+      const Hbg = new Array(p).fill(0);
+      let q1 = 0, q2 = 0, a2 = 0;
+      const M1 = Array.from({ length: p }, () => new Array(p).fill(0)), M2 = Array.from({ length: p }, () => new Array(p).fill(0));
+      for (const g of S) {
+        const den = 1 + gam * g.m, R = g.sy - dot(g.s, beta);       // the group's sum of residuals
+        const c1 = 1 / (den * den), c2 = -2 * g.m / (den * den * den);
+        for (let a = 0; a < p; a++) {
+          Hbg[a] += -r * g.s[a] * R / (den * den) / F0.qf;
+          for (let b = 0; b < p; b++) { M1[a][b] -= c1 * g.s[a] * g.s[b]; M2[a][b] -= c2 * g.s[a] * g.s[b]; }
+        }
+        q1 -= c1 * R * R; q2 -= c2 * R * R;
+        a2 += g.m * g.m / (den * den) / 2;
+      }
+      const MiM1 = matMul(F0.Mi, M1);
+      const Hgg = a2 - (r / 2) * (q2 / F0.qf - (q1 * q1) / (F0.qf * F0.qf)) - 0.5 * (trace(matMul(F0.Mi, M2)) - trace(matMul(MiM1, MiM1)));
+      const H = Hbb.map((row, a) => [...row.map((v) => -v), -Hbg[a]]);
+      H.push([...Hbg.map((v) => -v), -Hgg]);
+      const C = invert(H);
+      if (C && C.every((row, a) => row[a] > 0)) se = Array.from({ length: p }, (_, a) => Math.sqrt(C[a][a]));
+    }
+    return { beta, se, seGls, sigma2, tau2: gam * sigma2, gamma: gam, llf: F0.llf, boundary, converged: true,
+      n, groups: G.length };
+  }
+
+  // ---- GLMMs. η = Xβ + offset + b_slide, b ~ N(0, σ²). Families:
+  //   "nb": negative binomial NB2, Var = μ + μ²/θ, log link; "poisson": log link; "binomial": y of n trials, logit link,
+  //   optionally with an observation-level random intercept u ~ N(0, τ²) for overdispersion (integrated per section,
+  //   inside each slide's integral). Parameters (β, log σ, log θ | log τ); minus the log-likelihood is minimised by
+  //   BFGS with the gradient from the quadrature (the posterior mean of the complete-data score); Wald SEs from a
+  //   central-difference Hessian of that gradient.
+  function glmmSetup(o) {
+    const n = o.y.length, p = o.X[0].length, G = groupIndex(o.groups);
+    const order = G.flat(), start = [0];
+    for (const idx of G) start.push(start[start.length - 1] + idx.length);
+    const D = { family: o.family, olre: o.family === "binomial" && !!o.olre, n, p, G: G.length, start,
+      y: Float64Array.from(order, (i) => o.y[i]), off: Float64Array.from(order, (i) => (o.offset ? o.offset[i] : 0)),
+      nt: Float64Array.from(order, (i) => (o.trials ? o.trials[i] : 1)), X: order.map((i) => o.X[i]),
+      eta: new Float64Array(n), cj: new Float64Array(n), dj: new Float64Array(n), bw: new Float64Array(G.length),
+      gh: gaussHermite(o.nodes || 15), ghIn: gaussHermite(o.innerNodes || 11) };
+    if (D.family === "binomial") for (let i = 0; i < n; i++) D.cj[i] = lgammaAcc(D.nt[i] + 1) - lgammaAcc(D.y[i] + 1) - lgammaAcc(D.nt[i] - D.y[i] + 1);
+    if (D.family === "poisson") for (let i = 0; i < n; i++) D.cj[i] = -lgammaAcc(D.y[i] + 1);
+    D.np = p + 1 + (D.family === "nb" || D.olre ? 1 : 0);
+    return D;
+  }
+  // one observation at linear predictor e: log f, d/dη, d²/dη², and (NB) d/d log θ; written into out
+  function obsTerms(D, i, e, th, lth, out) {
+    const y = D.y[i];
+    if (D.family === "poisson") {
+      const mu = Math.exp(e);
+      out[0] = D.cj[i] + y * e - mu; out[1] = y - mu; out[2] = -mu; out[3] = 0;
+    } else if (D.family === "nb") {
+      const a = e - lth, sp = softplus(a), q = sigmoid(a);      // q = μ / (θ + μ); log(θ + μ) = log θ + sp
+      out[0] = D.cj[i] - th * sp + y * (a - sp);
+      out[1] = y * (1 - q) - th * q;
+      out[2] = -(y + th) * q * (1 - q);
+      out[3] = D.dj[i] + th * (1 - sp) - (y + th) * (1 - q);    // θ ∂/∂θ
+    } else {
+      const nt = D.nt[i], q = sigmoid(e);
+      out[0] = D.cj[i] + y * e - nt * softplus(e); out[1] = y - nt * q; out[2] = -nt * q * (1 - q); out[3] = 0;
+    }
+  }
+  // binomial with an observation-level random intercept: log ∫ f(y | e + u) φ(u; τ²) du and its derivatives in e
+  // (adaptive quadrature over u), and the τ score E[u²/τ² − 1]; written into out
+  const TMP = new Float64Array(4);
+  function olreTerms(D, i, e, tau2, out) {
+    let u = 0, g2 = -1 / tau2;
+    for (let it = 0; it < 50; it++) {
+      obsTerms(D, i, e + u, 0, 0, TMP);
+      const g1 = TMP[1] - u / tau2;
+      g2 = TMP[2] - 1 / tau2;
+      let step = -g1 / g2;
+      if (step > 3) step = 3; else if (step < -3) step = -3;
+      u += step;
+      if (Math.abs(step) < 1e-11) break;
+    }
+    obsTerms(D, i, e + u, 0, 0, TMP);
+    g2 = TMP[2] - 1 / tau2;
+    const sc = Math.SQRT2 / Math.sqrt(-g2), { z, w } = D.ghIn, K = z.length;
+    const h = new Float64Array(K), s1 = new Float64Array(K), s2 = new Float64Array(K), su = new Float64Array(K);
+    let mx = -Infinity;
+    for (let k = 0; k < K; k++) {
+      const uk = u + sc * z[k];
+      obsTerms(D, i, e + uk, 0, 0, TMP);
+      h[k] = TMP[0] - uk * uk / (2 * tau2) + Math.log(w[k]) + z[k] * z[k];
+      s1[k] = TMP[1]; s2[k] = TMP[2]; su[k] = uk * uk / tau2 - 1;
+      if (h[k] > mx) mx = h[k];
+    }
+    let sw = 0, m1 = 0, m2 = 0, m11 = 0, mu = 0;
+    for (let k = 0; k < K; k++) {
+      const wk = Math.exp(h[k] - mx);
+      sw += wk; m1 += wk * s1[k]; m11 += wk * s1[k] * s1[k]; m2 += wk * s2[k]; mu += wk * su[k];
+    }
+    m1 /= sw; m11 /= sw; m2 /= sw; mu /= sw;
+    out[0] = mx + Math.log(sw) + Math.log(sc) - 0.5 * (LOG2PI + Math.log(tau2));
+    out[1] = m1; out[2] = m2 + (m11 - m1 * m1); out[3] = mu;
+  }
+  // minus the log-likelihood and its gradient at par
+  function glmmNll(par, D) {
+    const { p, n, start } = D, nb = D.family === "nb";
+    const lsig = par[p], sig2 = Math.exp(2 * lsig);
+    const lth = nb ? par[p + 1] : 0, th = nb ? Math.exp(lth) : 0, tau2 = D.olre ? Math.exp(2 * par[p + 1]) : 0;
+    for (let i = 0; i < n; i++) {
+      let e = D.off[i];
+      const xi = D.X[i];
+      for (let a = 0; a < p; a++) e += xi[a] * par[a];
+      D.eta[i] = e;
+      if (nb) {
+        const y = D.y[i];
+        D.cj[i] = lgammaAcc(y + th) - lgammaAcc(th) - lgammaAcc(y + 1);
+        D.dj[i] = th * (digamma(y + th) - digamma(th));
+      }
+    }
+    const terms = D.olre ? (i, e, out) => olreTerms(D, i, e, tau2, out) : (i, e, out) => obsTerms(D, i, e, th, lth, out);
+    const out = new Float64Array(4), { z, w } = D.gh, K = z.length, np = D.np;
+    const grad = new Float64Array(np);
+    let ll = 0;
+    const hk = new Float64Array(K), gk = Array.from({ length: K }, () => new Float64Array(np));
+    for (let gi = 0; gi < D.G; gi++) {
+      const a0 = start[gi], a1 = start[gi + 1];
+      // the mode of the slide's integrand (Newton; the integrand is log-concave in b)
+      let b = D.bw[gi], H2 = -1 / sig2;
+      for (let it = 0; it < 100; it++) {
+        let H1 = -b / sig2;
+        H2 = -1 / sig2;
+        for (let i = a0; i < a1; i++) { terms(i, D.eta[i] + b, out); H1 += out[1]; H2 += out[2]; }
+        let step = -H1 / H2;
+        if (step > 2) step = 2; else if (step < -2) step = -2;
+        b += step;
+        if (Math.abs(step) < 1e-10) break;
+      }
+      D.bw[gi] = b;
+      H2 = -1 / sig2;
+      for (let i = a0; i < a1; i++) { terms(i, D.eta[i] + b, out); H2 += out[2]; }
+      const sc = Math.SQRT2 / Math.sqrt(-H2);
+      let mx = -Infinity;
+      for (let k = 0; k < K; k++) {
+        const bk = b + sc * z[k], g = gk[k];
+        g.fill(0);
+        let s = -bk * bk / (2 * sig2) - 0.5 * (LOG2PI + 2 * lsig);
+        for (let i = a0; i < a1; i++) {
+          terms(i, D.eta[i] + bk, out);
+          s += out[0];
+          const xi = D.X[i];
+          for (let a = 0; a < p; a++) g[a] += xi[a] * out[1];
+          if (np > p + 1) g[p + 1] += out[3];
+        }
+        g[p] = bk * bk / sig2 - 1;
+        hk[k] = s + Math.log(w[k]) + z[k] * z[k];
+        if (hk[k] > mx) mx = hk[k];
+      }
+      // the slide's posterior weights over the nodes: its gradient is the weighted mean of the node scores
+      let sw = 0;
+      for (let k = 0; k < K; k++) { hk[k] = Math.exp(hk[k] - mx); sw += hk[k]; }
+      for (let a = 0; a < np; a++) {
+        let part = 0;
+        for (let k = 0; k < K; k++) part += hk[k] * gk[k][a];
+        grad[a] += part / sw;
+      }
+      ll += mx + Math.log(sw) + Math.log(sc);
+    }
+    return { f: -ll, g: Array.from(grad, (v) => -v) };
+  }
+  // a GLM without the random effect (IRLS), for the starting values
+  function glmStart(D) {
+    const { p, n } = D;
+    let beta = new Array(p).fill(0);
+    const link = D.family === "binomial" ? "logit" : "log";
+    for (let it = 0; it < 50; it++) {
+      const A = Array.from({ length: p }, () => new Array(p).fill(0)), v = new Array(p).fill(0);
+      for (let i = 0; i < n; i++) {
+        const xi = D.X[i];
+        let e = D.off[i];
+        if (it === 0) e = link === "log" ? Math.log(D.y[i] + 0.5)                  // the first step starts from the data
+          : Math.log((D.y[i] + 0.5) / (D.nt[i] - D.y[i] + 0.5));
+        else for (let a = 0; a < p; a++) e += xi[a] * beta[a];
+        let W, zr;
+        if (link === "log") {
+          const mu = Math.max(Math.exp(e), 1e-8);
+          W = mu; zr = e - D.off[i] + (D.y[i] - mu) / mu;
+        } else {
+          const q = Math.min(Math.max(sigmoid(e), 1e-8), 1 - 1e-8);
+          W = D.nt[i] * q * (1 - q); zr = e - D.off[i] + (D.y[i] - D.nt[i] * q) / W;
+        }
+        for (let a = 0; a < p; a++) { v[a] += W * xi[a] * zr; for (let c = 0; c < p; c++) A[a][c] += W * xi[a] * xi[c]; }
+      }
+      const Ai = invert(A);
+      if (!Ai) break;
+      const next = matVec(Ai, v), diff = Math.max(...next.map((x, a) => Math.abs(x - beta[a])));
+      beta = next;
+      if (diff < 1e-10) break;
+    }
+    let extra = [];
+    if (D.family === "nb") {                  // moment estimate of 1/θ from the GLM's fitted means
+      let num = 0, den = 0;
+      for (let i = 0; i < n; i++) {
+        let e = D.off[i];
+        for (let a = 0; a < p; a++) e += D.X[i][a] * beta[a];
+        const mu = Math.exp(e);
+        num += (D.y[i] - mu) ** 2 - D.y[i]; den += mu * mu;
+      }
+      const alpha = Math.min(Math.max(num / den, 1e-3), 1e3);
+      extra = [-Math.log(alpha)];
+    } else if (D.olre) extra = [Math.log(0.3)];
+    return [...beta, Math.log(0.3), ...extra];
+  }
+  function numHessian(fg, x, h) {
+    const m = x.length, H = Array.from({ length: m }, () => new Array(m).fill(0));
+    for (let k = 0; k < m; k++) {
+      const xp = x.slice(), xm = x.slice();
+      xp[k] += h; xm[k] -= h;
+      const gp = fg(xp).g, gm = fg(xm).g;
+      for (let j = 0; j < m; j++) H[j][k] = (gp[j] - gm[j]) / (2 * h);
+    }
+    for (let j = 0; j < m; j++) for (let k = 0; k < j; k++) H[j][k] = H[k][j] = (H[j][k] + H[k][j]) / 2;
+    return H;
+  }
+  // BFGS (inverse-Hessian update) with a backtracking Armijo line search; H0 = inverse of the numerical Hessian at
+  // the start when it is positive definite
+  function bfgs(fg, x0, opts = {}) {
+    const m = x0.length, maxIter = opts.maxIter || 200, gtol = opts.gtol || 1e-6, maxStep = opts.maxStep || 2;
+    let x = x0.slice(), cur = fg(x), evals = 1, iter = 0, converged = false;
+    let Hi = null;
+    if (opts.startHessian) {
+      const H = numHessian(fg, x, 1e-4);
+      evals += 2 * m;
+      const inv = invert(H);
+      if (inv && inv.every((r, i) => r[i] > 0) && Number.isFinite(logdetPD(H))) Hi = inv;
+    }
+    if (!Hi) { const s = 1 / Math.max(1, Math.max(...cur.g.map(Math.abs))); Hi = Array.from({ length: m }, (_, i) => Array.from({ length: m }, (_, j) => (i === j ? s : 0))); }
+    for (; iter < maxIter; iter++) {
+      if (Math.max(...cur.g.map(Math.abs)) < gtol) { converged = true; break; }
+      let d = matVec(Hi, cur.g).map((v) => -v);
+      let slope = dot(d, cur.g);
+      if (!(slope < 0)) { Hi = Hi.map((r, i) => r.map((_, j) => (i === j ? 1 / Math.max(1, Math.max(...cur.g.map(Math.abs))) : 0))); d = cur.g.map((v) => -v * Hi[0][0]); slope = dot(d, cur.g); }
+      const big = Math.max(...d.map(Math.abs));
+      if (big > maxStep) { d = d.map((v) => v * maxStep / big); slope *= maxStep / big; }
+      let t = 1, next = null;
+      for (let ls = 0; ls < 30; ls++) {
+        const xn = x.map((v, i) => v + t * d[i]), r = fg(xn);
+        evals++;
+        if (Number.isFinite(r.f) && r.f <= cur.f + 1e-4 * t * slope) { next = { x: xn, ...r }; break; }
+        // quadratic interpolation of the step, kept within [0.1, 0.5] of the last one
+        const tq = Number.isFinite(r.f) ? -slope * t * t / (2 * (r.f - cur.f - slope * t)) : 0.1 * t;
+        t = Math.min(Math.max(tq, 0.1 * t), 0.5 * t);
+      }
+      // no decrease found: the gradient is at the level of the quadrature's own error (converged) or the search failed
+      if (!next) { converged = Math.max(...cur.g.map(Math.abs)) < 1e-2; break; }
+      const s = next.x.map((v, i) => v - x[i]), yv = next.g.map((v, i) => v - cur.g[i]), sy = dot(s, yv);
+      if (sy > 1e-14) {
+        const Hy = matVec(Hi, yv), yHy = dot(yv, Hy);
+        for (let i = 0; i < m; i++) for (let j = 0; j < m; j++)
+          Hi[i][j] += ((sy + yHy) * s[i] * s[j]) / (sy * sy) - (Hy[i] * s[j] + s[i] * Hy[j]) / sy;
+      }
+      x = next.x; cur = next;
+    }
+    return { x, f: cur.f, g: cur.g, iter, evals, converged };
+  }
+  // fit a GLMM; o = { family, y, X, groups, offset?, trials?, olre?, nodes?, innerNodes? }. The coefficient of interest
+  // is column *term* of X. Returns estimates, Wald SE / CI / P (log scale), σ, θ or τ, log-likelihood, convergence.
+  function glmm(o) {
+    const D = glmmSetup(o), p = D.p;
+    if (D.G < 2 || D.n <= p + 1) return null;
+    const fg = (x) => { const r = glmmNll(x, D); if (o.trace) o.trace(x, r); return r; };
+    const x0 = glmStart(D);
+    // |gradient| < 1e-4 on minus the log-likelihood: β then lies within ~1e-5 standard errors of the optimum
+    const res = bfgs(fg, x0, { gtol: 1e-4, maxIter: 300, startHessian: true });
+    const sigma = Math.exp(res.x[p]), atZero = !(sigma > 1e-3);
+    // Wald covariance: the inverse Hessian. With the slide variance at its boundary (σ → 0) log σ has no
+    // curvature, and the covariance is that of the other parameters (the model without the slide effect).
+    const H = numHessian(fg, res.x, 1e-4);
+    const keep = Array.from({ length: D.np }, (_, i) => i).filter((i) => !(atZero && i === p));
+    const Cs = invert(keep.map((i) => keep.map((j) => H[i][j])));
+    const pd = !!Cs && Cs.every((r, i) => r[i] > 0);
+    const se = new Array(D.np).fill(NaN);
+    if (pd) keep.forEach((i, a) => { se[i] = Math.sqrt(Cs[a][a]); });
+    return { beta: res.x.slice(0, p), se: se.slice(0, p), sigma, logSigmaSe: se[p],
+      theta: D.family === "nb" ? Math.exp(res.x[p + 1]) : null, tau: D.olre ? Math.exp(res.x[p + 1]) : null, params: res.x,
+      llf: -res.f, converged: res.converged && pd, sigmaAtZero: atZero, hessianOk: pd,
+      iterations: res.iter, evals: res.evals + 2 * D.np, gradMax: Math.max(...res.g.map(Math.abs)), n: D.n, groups: D.G };
+  }
+
+  // One model fit for the page (also run in a worker): job = { kind: "lmm" | "glmm", ..., term }
+  function fitModel(job) {
+    const t0 = Date.now();
+    const r = job.kind === "lmm" ? lmm(job.y, job.X, job.groups) : glmm(job);
+    if (!r) return null;
+    const k = job.term, est = r.beta[k], se = r.se[k], wz = wald(est, se);
+    return { ...r, est, seTerm: se, lo: wz.lo, hi: wz.hi, p: wz.p, z: wz.z, ms: Date.now() - t0 };
+  }
+  return { lgammaAcc, digamma, gaussHermite, lmm, glmm, glmmSetup, glmmNll, wald, fitModel, lgamma, ibeta, tTwoSided, tCdf, tQuantile, normSf, mean, variance, sem, median, mannWhitney, mwExactSf, welch, rng, spearman, linfit, pearson };
 })();
 // ==== STATS END ====
 
@@ -586,6 +1082,8 @@ const DEFAULTS = {
   scale: "symlog", linthresh: 1, ymin: 0, ymax: null, yticks: "", yticklabels: "",
   title: "", ylabel: L.crossed, xlabel: "", xticks: "", legendNames: {}, legendPos: null, statsText: {}, statsPos: {},
   widthMm: 62, heightMm: 75, fontPt: 7, zoom: 2.5, effect: "fold", testScale: "log1p",
+  model: "lmm", mCount: "crossed", mExposure: "junction_mm", mSucc: "crossed", mTrials: "crossed+home", mOlre: true, mNodes: 15,
+  modelOnPlot: "tests",
   colors: null,          // null = the publication greys (PUBLICATION_COLORS)
   sc: { on: true, x: "area_mm2", y: "crossed / junction_mm", unit: "section", logX: true, logY: false, fit: true, rho: true, size: 3,
     widthMm: 80, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null },
@@ -643,8 +1141,9 @@ const KNOWN = new Set([...METHOD_VARS, ...SECTION_VARS, ...NOTEBOOK_VARS].map((x
 // ------------------------------------------------------------------ controls
 const INPUTS = ["method", "formula", "group", "qcOnly", "noUncertain", "humanOnly", "region", "showSections", "showSlides", "showMean",
   "showStats", "showLegend", "legendLayers", "showN", "secSize", "slideSize", "secOpacity", "jitter", "scale", "linthresh", "ymin", "ymax", "yticks",
-  "yticklabels", "title", "ylabel", "xlabel", "xticks", "widthMm", "heightMm", "fontPt", "zoom", "effect", "testScale"];
-const NUMERIC = new Set(["secSize", "slideSize", "secOpacity", "jitter", "linthresh", "ymin", "ymax", "widthMm", "heightMm", "fontPt", "zoom"]);
+  "yticklabels", "title", "ylabel", "xlabel", "xticks", "widthMm", "heightMm", "fontPt", "zoom", "effect", "testScale",
+  "model", "mCount", "mExposure", "mSucc", "mTrials", "mOlre", "mNodes", "modelOnPlot"];
+const NUMERIC = new Set(["secSize", "slideSize", "secOpacity", "jitter", "linthresh", "ymin", "ymax", "widthMm", "heightMm", "fontPt", "zoom", "mNodes"]);
 
 function experiments() {
   return [...new Set(ROWS.map((r) => r.experiment))].sort((a, b) => +a - +b);
@@ -658,6 +1157,14 @@ function buildControls() {
     opts.push('<option value="' + key + '">' + m.label + ", " + k + " SD" + (key === "gauss-5" ? " (counting method)" : "") + "</option>");
   }
   $("method").innerHTML = opts.join("") || '<option value="gauss-5">counting method</option>';
+  // the model's variables: counts first, then every other variable (a non-count is refused when fitted)
+  const others = [...KNOWN].filter((v) => !COUNT_VARS.includes(v));
+  const varOpts = (first) => first + '<optgroup label="counts">' + COUNT_VARS.map((v) => '<option value="' + v + '">' + v + "</option>").join("") +
+    '</optgroup><optgroup label="other variables">' + others.map((v) => '<option value="' + v + '">' + v + "</option>").join("") + "</optgroup>";
+  $("mCount").innerHTML = varOpts("");
+  $("mSucc").innerHTML = varOpts("");
+  $("mTrials").innerHTML = varOpts('<option value="' + TRIALS_SUM + '">crossed + home</option>');
+  $("mExposure").innerHTML = EXPOSURES.map(([v, d]) => '<option value="' + v + '">' + d + "</option>").join("");
   $("expBoxes").innerHTML = "<span>Experiments</span>" + experiments().map((e) =>
     '<label><input type="checkbox" data-exp="' + e + '" checked>' + e + "</label>").join("");
   const head = (t) => '<tr class="head"><td colspan="2">' + t + "</td></tr>";
@@ -743,6 +1250,11 @@ function setState(s) {
   ST = Object.assign(base, s, { sc: Object.assign(base.sc, (s && s.sc) || {}) });
   if (!METHODS.some((m) => m.ks.some((k) => m.key + "-" + k === ST.method)) && METHODS.length) ST.method = "gauss-5";
   if (!["genotype", "geno_exp"].includes(ST.group)) ST.group = "genotype";      // a stale or mistyped saved value
+  if (!(ST.model in MODELS)) ST.model = DEFAULTS.model;
+  if (!["tests", "model", "both"].includes(ST.modelOnPlot)) ST.modelOnPlot = "tests";
+  for (const k of ["mCount", "mSucc"]) if (!KNOWN.has(ST[k])) ST[k] = DEFAULTS[k];
+  if (!KNOWN.has(ST.mTrials) && ST.mTrials !== TRIALS_SUM) ST.mTrials = DEFAULTS.mTrials;
+  if (!EXPOSURES.some((e) => e[0] === ST.mExposure)) ST.mExposure = DEFAULTS.mExposure;
   applyMethod();
   writeControls();
   update();
@@ -812,6 +1324,277 @@ function comparisons(gs) {
   return out;
 }
 
+// ------------------------------------------------------------------ the mixed model
+// WT3 against GD1 with the slide as a random intercept, for each comparison: STATS.fitModel. The LMM is fitted on the
+// page (instant); the GLMMs (up to ~1 s) in a worker made from this page's STATS module, so the page stays usable,
+// and every result is kept by its data and settings (the same figure again costs nothing).
+const MODELS = {
+  none: { short: "none" },
+  lmm: { short: "LMM", long: "linear mixed model" },
+  nb: { short: "NB GLMM", long: "negative-binomial GLMM" },
+  poisson: { short: "Poisson GLMM", long: "Poisson GLMM" },
+  binomial: { short: "binomial GLMM", long: "binomial GLMM" },
+};
+const COUNT_VARS = ["crossed", "home", "region", "total", "auto_in_human_area", "human", "nb_crossed", "nb_home", "nb_region",
+  "nb_total", "nuclei", "nuclei_near_line"];
+const EXPOSURES = [["junction_mm", "junction length (mm)"], ["area_mm2", "tissue area (mm²)"], ["nuclei", "nuclei in the section"],
+  ["1", "none (per section)"]];
+const TRIALS_SUM = "crossed+home";
+const INNER_NODES = 11;                     // nodes for each section's own random effect (binomial, overdispersion)
+const MODEL_CACHE = new Map(), PENDING = new Map();
+let WORKER = null, WORKER_READY = false, NO_WORKER = false, REFRESH = 0;
+const WORKER_WAIT_MS = 1500;               // a worker silent that long (blocked for file:// pages in some browsers): fit on the page
+
+const isGlmm = (m) => m === "nb" || m === "poisson" || m === "binomial";
+const nodesSetting = () => Math.min(41, Math.max(5, Math.round(+ST.mNodes || DEFAULTS.mNodes)));
+function modelValue(r, name) {
+  if (name === "1") return 1;
+  if (name === TRIALS_SUM) return r.vars.crossed + r.vars.home;
+  return r.vars[name];
+}
+const varLabel = (name) => (name === TRIALS_SUM ? "crossed + home" : name === "1" ? "1" : name);
+
+function hashKey(s) {                       // two 32-bit FNV-1a hashes of the job's JSON, and its length
+  let a = 0x811c9dc5, b = 0x01000193;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    a = Math.imul(a ^ c, 16777619);
+    b = Math.imul(b ^ c, 2246822519) ^ (b >>> 13);
+  }
+  return (a >>> 0).toString(36) + "-" + (b >>> 0).toString(36) + "-" + s.length;
+}
+
+// The model's data for one comparison. All experiments: genotype + experiment fixed. Grouped by genotype ×
+// experiment: that experiment's sections, genotype only.
+function modelJob(c) {
+  const m = ST.model, e0 = c.a.e;
+  const rows = [], ys = [], es = [];
+  let dropped = 0;
+  if (m === "lmm") {
+    const f = ST.testScale === "log1p" ? Math.log1p : ST.testScale === "log" ? Math.log : (x) => x;
+    for (const v of c.a.sec.concat(c.b.sec)) {
+      const t = f(v.y);
+      if (Number.isFinite(t)) { rows.push(v.r); ys.push(t); } else dropped++;
+    }
+  } else {
+    const yName = m === "binomial" ? ST.mSucc : ST.mCount, eName = m === "binomial" ? ST.mTrials : ST.mExposure;
+    for (const r of LAST.rows) {
+      if ((r.genotype !== c.a.g && r.genotype !== c.b.g) || (e0 !== null && r.experiment !== e0)) continue;
+      const y = modelValue(r, yName), e = modelValue(r, eName);
+      if (!Number.isFinite(y) || !Number.isFinite(e)) { dropped++; continue; }
+      if (y < 0 || Math.abs(y - Math.round(y)) > 1e-9) return { error: yName + " is not a count (section " + r.id + ": " + g3(y) + ")" };
+      if (m === "binomial") {
+        if (Math.abs(e - Math.round(e)) > 1e-9 || y > e) return { error: varLabel(eName) + " is not a number of trials ≥ " + yName + " (section " + r.id + ")" };
+        if (!(e >= 1)) { dropped++; continue; }
+      } else if (!(e > 0)) { dropped++; continue; }
+      rows.push(r); ys.push(y); es.push(e);
+    }
+  }
+  const slides = new Set(rows.map((r) => r.slide)).size;
+  if (new Set(rows.map((r) => r.genotype)).size < 2) return { error: "needs sections of both genotypes" };
+  if (slides < 3) return { error: "needs at least 3 slides" };
+  const exps = e0 === null ? [...new Set(rows.map((r) => r.experiment))].sort((a, b) => +a - +b) : [];
+  const job = { kind: m === "lmm" ? "lmm" : "glmm", family: m, y: ys, term: 1, groups: rows.map((r) => r.slide),
+    X: rows.map((r) => [1, r.genotype === "WT3" ? 1 : 0, ...exps.slice(1).map((e) => (r.experiment === e ? 1 : 0))]) };
+  if (m === "nb" || m === "poisson") job.offset = es.map(Math.log);
+  if (m === "binomial") { job.trials = es; job.olre = !!ST.mOlre; job.innerNodes = INNER_NODES; }
+  if (job.kind === "glmm") job.nodes = nodesSetting();
+  return { job, key: hashKey(JSON.stringify(job)), sections: rows.length, slides, dropped, experimentTerm: exps.length > 1 };
+}
+
+function fitHere(job) {
+  try { return STATS.fitModel(job) || { error: "the model could not be fitted (too few sections or slides)" }; }
+  catch (err) { return { error: String((err && err.message) || err) }; }
+}
+function startWorker() {
+  if (WORKER || NO_WORKER) return WORKER;
+  try {
+    const a = PAGE_SCRIPT.indexOf("// ==== STATS BEGIN"), b = PAGE_SCRIPT.indexOf("// ==== STATS END ====");
+    if (a < 0 || b < 0) throw new Error("the STATS module was not found");
+    const src = '"use strict";\n' + PAGE_SCRIPT.slice(a, b) + "\nself.onmessage = (e) => { if (e.data === 'ping') { self.postMessage('pong'); return; } let res; try { res = STATS.fitModel(e.data.job) || " +
+      "{ error: 'the model could not be fitted (too few sections or slides)' }; } catch (err) { res = { error: String((err && err.message) || err) }; } " +
+      "res.where = 'worker'; self.postMessage({ key: e.data.key, res }); };";
+    WORKER = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+    WORKER_READY = false;
+    WORKER.onmessage = (e) => {
+      if (e.data === "pong") {                 // the worker runs: send it what is waiting
+        WORKER_READY = true;
+        for (const [k, j] of PENDING) WORKER.postMessage({ key: k, job: j });
+        return;
+      }
+      modelDone(e.data.key, e.data.res);
+    };
+    const giveUp = () => {                     // a worker that cannot run: fit on the page from now on
+      if (WORKER) WORKER.terminate();
+      WORKER = null; WORKER_READY = false; NO_WORKER = true;
+      const jobs = [...PENDING.entries()];
+      PENDING.clear();
+      jobs.forEach(([k, j]) => runModel(k, j));
+    };
+    WORKER.onerror = (e) => { if (e && e.preventDefault) e.preventDefault(); giveUp(); };
+    const w = WORKER;
+    setTimeout(() => { if (WORKER === w && !WORKER_READY) giveUp(); }, WORKER_WAIT_MS);
+    WORKER.postMessage("ping");
+  } catch (err) { WORKER = null; NO_WORKER = true; }
+  return WORKER;
+}
+function runModel(key, job) {
+  PENDING.set(key, job);
+  if (startWorker()) { if (WORKER_READY) WORKER.postMessage({ key, job }); return; }   // else sent on the worker's first answer
+  setTimeout(() => {                         // without a worker: on the page, after the screen has been drawn
+    if (!PENDING.has(key)) return;
+    const res = fitHere(job);
+    res.where = "page";
+    modelDone(key, res);
+  }, 30);
+}
+function modelDone(key, res) {
+  if (!PENDING.has(key)) return;             // settings changed meanwhile
+  PENDING.delete(key);
+  MODEL_CACHE.set(key, res);
+  if (MODEL_CACHE.size > 300) MODEL_CACHE.delete(MODEL_CACHE.keys().next().value);
+  if (!REFRESH) REFRESH = setTimeout(() => { REFRESH = 0; update(); }, 0);
+}
+// One entry per comparison: { job, key, res } (res null while fitting) or { error }.
+function modelResults(comps) {
+  if (!MODELS[ST.model] || ST.model === "none") return comps.map(() => null);
+  const specs = comps.map(modelJob);
+  const wanted = new Set(specs.filter((s) => s.key).map((s) => s.key));
+  const stale = [...PENDING.keys()].filter((k) => !wanted.has(k));
+  if (stale.length) {                        // fits for settings no longer shown: drop them, so the current ones come first
+    const keep = [...PENDING.entries()].filter(([k]) => wanted.has(k));
+    PENDING.clear();
+    if (WORKER) { WORKER.terminate(); WORKER = null; }
+    keep.forEach(([k, j]) => runModel(k, j));
+  }
+  for (const s of specs) {
+    if (!s.key) continue;
+    if (!MODEL_CACHE.has(s.key)) {
+      if (s.job.kind === "lmm") MODEL_CACHE.set(s.key, Object.assign(fitHere(s.job), { where: "page" }));
+      else if (!PENDING.has(s.key)) runModel(s.key, s.job);
+    }
+    s.res = MODEL_CACHE.get(s.key) || null;
+  }
+  return specs;
+}
+
+// the model's effect on its own scale: fold / rate ratio / odds ratio (exp β), or a difference (β)
+function modelScale() {
+  if (ST.model === "lmm") return ST.testScale === "none" ? "difference" : "fold";
+  return ST.model === "binomial" ? "odds ratio" : "rate ratio";
+}
+function modelEffectText(s, digits) {
+  const r = s && s.res;
+  if (!r || r.error) return "";
+  const sc = modelScale();
+  if (sc === "difference") {
+    const f = (v) => (v >= 0 ? "+" : "") + (digits ? v.toPrecision(digits) : g3(v));
+    return minus("WT3 − GD1 " + f(r.est) + " (" + f(r.lo) + " to " + f(r.hi) + ")");
+  }
+  const d = digits ? 3 : 2;
+  const v = (x) => Math.exp(x).toFixed(d);
+  return (sc === "fold" ? "WT3/GD1 " + v(r.est) + "×" : sc + " " + v(r.est)) + " (" + v(r.lo) + "–" + v(r.hi) + ")";
+}
+function modelPlotLines(s) {
+  if (!s) return [];
+  if (s.error) return [MODELS[ST.model].short + ": " + s.error];
+  if (!s.res) return [MODELS[ST.model].short + ": fitting…"];
+  if (s.res.error) return [MODELS[ST.model].short + ": " + s.res.error];
+  return [modelEffectText(s), MODELS[ST.model].short + " " + P(s.res.p)];
+}
+
+function syncModelRows() {
+  const m = ST.model;
+  $("rowLmm").style.display = m === "lmm" ? "" : "none";
+  $("rowCount").style.display = m === "nb" || m === "poisson" ? "" : "none";
+  $("rowShare").style.display = m === "binomial" ? "" : "none";
+  $("rowOlre").style.display = m === "binomial" ? "" : "none";
+  $("rowNodes").style.display = isGlmm(m) ? "" : "none";
+}
+
+function modelTable() {
+  if (ST.model === "none") return "";
+  const sc = modelScale();
+  const extraHead = ST.model === "lmm" ? "Residual SD" : ST.model === "nb" ? "θ (NB2)" : ST.model === "binomial" ? "τ (section)" : "–";
+  let html = "<h2>Mixed model: " + MODELS[ST.model].long + "</h2><table class='st'><tr><th>Comparison</th><th>Model</th><th>" +
+    (sc === "difference" ? "Difference WT3 − GD1" : sc === "fold" ? "Fold WT3 / GD1" : (sc === "odds ratio" ? "Odds" : "Rate") + " ratio WT3 / GD1") +
+    " (95 % CI)</th><th>P</th><th>σ slide</th><th>" + extraHead + "</th><th>Sections / slides</th><th>Converged</th><th>log-likelihood</th><th>Fit</th></tr>";
+  LAST.comps.forEach((c, i) => {
+    const s = LAST.models[i];
+    const terms = !s || !s.job ? "" : (ST.model === "lmm" ? "y′" : ST.model === "binomial" ? varLabel(ST.mSucc) + " / " + varLabel(ST.mTrials) :
+      varLabel(ST.mCount) + (ST.mExposure !== "1" ? " + offset(log " + ST.mExposure + ")" : "")) + " ~ genotype" + (s.experimentTerm ? " + experiment" : "") +
+      " + (1 | slide)" + (ST.model === "binomial" && ST.mOlre ? " + (1 | section)" : "");
+    if (!s || s.error || !s.res || s.res.error) {
+      html += "<tr><td>" + c.label + "</td><td>" + terms + "</td><td colspan='8' style='text-align:left'>" +
+        (!s ? "–" : s.error || (!s.res ? "fitting…" : s.res.error)) + "</td></tr>";
+      return;
+    }
+    const r = s.res;
+    const sigma = ST.model === "lmm" ? Math.sqrt(r.tau2) : r.sigma;
+    const extra = ST.model === "lmm" ? Math.sqrt(r.sigma2) : ST.model === "nb" ? r.theta : ST.model === "binomial" && ST.mOlre ? r.tau : NaN;
+    const conv = r.converged ? "yes" + (r.boundary || r.sigmaAtZero ? " (σ slide at 0)" : "") : "no" + (r.hessianOk === false ? " (Hessian not positive definite)" : "");
+    html += "<tr><td>" + c.label + "</td><td>" + terms + "</td><td>" + modelEffectText(s, 4).replace(/^WT3\/GD1 |^WT3 − GD1 |^rate ratio |^odds ratio /, "") +
+      "</td><td>" + Pfull(r.p) + "</td><td>" + g3(sigma) + "</td><td>" + g3(extra) + "</td><td>" + s.sections + " / " + s.slides +
+      "</td><td>" + conv + "</td><td>" + (Number.isFinite(r.llf) ? r.llf.toFixed(2) + (ST.model === "lmm" ? " (REML)" : "") : "–") +
+      "</td><td>" + r.ms + " ms" + (r.where ? ", " + r.where : "") + "</td></tr>";
+  });
+  html += "</table><p class='note'>" + modelNote() + "</p>";
+  return html;
+}
+
+function modelNote() {
+  const m = ST.model, scaleName = { none: "the values as they are", log1p: "log(1 + y)", log: "log y" }[ST.testScale];
+  const by = ST.group === "geno_exp" ? " Grouped by genotype × experiment, each experiment is fitted on its own, without the experiment term." : "";
+  if (m === "lmm") return "Linear mixed model of y′ = " + scaleName + " (y the plotted value, scale as “Slide tests on”), genotype and experiment fixed, " +
+    "slide as a random intercept; REML (the variance ratio by a 1-D search of the profiled likelihood, β by GLS). Wald z: the 95 % CI is β ± 1.96 SE and P " +
+    "from the normal; SEs from the observed information of the profiled REML likelihood, as statsmodels MixedLM (whose numbers this reproduces). " +
+    (ST.testScale === "none" ? "The effect is the difference WT3 − GD1 on the values." : "The fold is exp(β), the ratio of the geometric means of " + (ST.testScale === "log1p" ? "1 + y." : "y.")) + by;
+  const fam = m === "nb" ? "Negative binomial (NB2, Var = μ + μ²/θ), log link" : m === "poisson" ? "Poisson, log link" : "Binomial, logit link";
+  const what = m === "binomial" ? varLabel(ST.mSucc) + " out of " + varLabel(ST.mTrials) + " per section" + (ST.mOlre ? ", with a random intercept per section (overdispersion, τ)" : "")
+    : varLabel(ST.mCount) + " per section" + (ST.mExposure !== "1" ? ", offset log " + ST.mExposure : "");
+  return fam + ": " + what + "; genotype and experiment fixed, slide as a random intercept (normal on the link scale, SD σ). Maximum likelihood with adaptive " +
+    "Gauss–Hermite quadrature over each slide's effect (" + nodesSetting() + " nodes, centred on the mode and scaled by the curvature" +
+    (m === "binomial" && ST.mOlre ? "; the section's effect inside it, " + INNER_NODES + " nodes" : "") + "), maximised by BFGS; Wald 95 % CI and P from " +
+    "the numerical Hessian. The effect is exp(β), " + (m === "binomial" ? "the odds ratio" : "the rate ratio") + " WT3 / GD1. Sections where the " +
+    (m === "binomial" ? "trials are 0" : "count or exposure is missing or the exposure is 0") + " are left out." + by;
+}
+
+// Methods paragraph for the chosen model
+function modelMethods() {
+  const m = ST.model, by = ST.group === "geno_exp";
+  const within = by ? " within each experiment" : "", fixed = by ? "genotype as the fixed effect" : "genotype and experiment as fixed effects";
+  const specs = (LAST.models || []).filter((s) => s && s.res && !s.res.error);
+  const n = specs.length ? " (" + specs.map((s, i) => (by ? "experiment " + LAST.comps[LAST.models.indexOf(s)].a.e + ": " : "") + s.sections + " sections from " + s.slides + " slides").join("; ") + ")" : "";
+  if (m === "lmm") {
+    const scaleWords = { none: "the plotted value", log1p: "log(1 + y), with y the plotted value", log: "log y, with y the plotted value" }[ST.testScale];
+    return "Mixed model. WT3 and GD1 were compared" + within + " with a linear mixed model of " + scaleWords + ", with " + fixed + " and slide as a " +
+      "random intercept, fitted by restricted maximum likelihood (REML)" + n + ". The genotype effect is reported as " +
+      (ST.testScale === "none" ? "the difference WT3 − GD1" : "the fold WT3 ÷ GD1, exp(β)") + ", with its Wald 95 % confidence interval and two-sided P " +
+      "from the normal distribution (standard errors from the observed information of the REML likelihood, as in statsmodels MixedLM).";
+  }
+  const words = (v) => (v === TRIALS_SUM ? "AF488⁺ cells classed as crossed or home" : WORDS[v] || (([...SECTION_VARS, ...NOTEBOOK_VARS].find((x) => x[0] === v) || [])[2]) || v);
+  const quad = "fitted by maximum likelihood, with each slide's random effect integrated out by adaptive Gauss–Hermite quadrature (" + nodesSetting() +
+    " nodes per slide, centred on the mode of the slide's integrand and scaled by its curvature)";
+  if (m === "binomial") {
+    return "Mixed model. The number of " + words(ST.mSucc) + " out of " + words(ST.mTrials) + " in each section was modelled" + within + " with a binomial " +
+      "generalised linear mixed model (logit link) with " + fixed + ", slide as a random intercept (normal on the logit scale)" +
+      (ST.mOlre ? " and a random intercept per section (observation level) to absorb overdispersion" : "") + ", " + quad +
+      (ST.mOlre ? "; the section-level effect was integrated in the same way (" + INNER_NODES + " nodes) inside each slide's integral" : "") +
+      ", and maximised with a quasi-Newton (BFGS) method" + n + ". The genotype effect is the odds ratio WT3 ÷ GD1, exp(β), with its Wald 95 % " +
+      "confidence interval and two-sided P (standard errors from the numerical Hessian of the log-likelihood).";
+  }
+  const EXPO_WORDS = { junction_mm: ["the junction line's length (mm)", "per mm of junction line"],
+    area_mm2: ["the assembloid (tissue) area of the section (mm²)", "per mm² of assembloid"], nuclei: ["the number of segmented nuclei", "per nucleus"] };
+  const ew = EXPO_WORDS[ST.mExposure] || [words(ST.mExposure), "per unit of " + ST.mExposure];
+  const expo = ST.mExposure === "1" ? "" : ", the logarithm of " + ew[0] + " as an offset";
+  return "Mixed model. The number of " + words(ST.mCount) + " in each section was modelled" + within + " with a " +
+    (m === "nb" ? "negative-binomial generalised linear mixed model (NB2, variance μ + μ²/θ, θ estimated)" : "Poisson generalised linear mixed model") +
+    " with log link, " + fixed + expo + " and slide as a random intercept (normal on the log scale), " + quad +
+    ", and maximised with a quasi-Newton (BFGS) method" + n + ". The genotype effect is the rate ratio WT3 ÷ GD1, exp(β)" +
+    (ST.mExposure === "1" ? "" : " (" + ew[1] + ")") +
+    ", with its Wald 95 % confidence interval and two-sided P (standard errors from the numerical Hessian of the log-likelihood).";
+}
+
 // ------------------------------------------------------------------ text helpers
 const P = (p) => (p === null || p === undefined || !Number.isFinite(p) ? "–" : p < 0.001 ? "P < 0.001" : p < 0.01 ? "P = " + p.toFixed(3) : "P = " + p.toFixed(2));
 const Pfull = (p) => (p === null || p === undefined || !Number.isFinite(p) ? "–" : p < 1e-4 ? p.toExponential(2) : p.toPrecision(3));
@@ -826,10 +1609,12 @@ function effectText(c) {
 }
 
 function autoStatsText(c) {
+  const model = ST.model !== "none" && ST.modelOnPlot !== "tests" && LAST && LAST.models ? modelPlotLines(LAST.models[LAST.comps.indexOf(c)]) : [];
+  if (ST.modelOnPlot === "model" && model.length) return model.join("<br>");
   const lines = [effectText(c)];
   if (c.mwSections) lines.push("sections: MW " + P(c.mwSections.p));
   if (c.welchSlides) lines.push("slides: Welch " + P(c.welchSlides.p));
-  return lines.join("<br>");
+  return lines.concat(model).join("<br>");
 }
 
 // ------------------------------------------------------------------ y transforms
@@ -1025,7 +1810,9 @@ function update() {
     msg.textContent = e.message + (e.pos !== undefined ? " (at character " + (e.pos + 1) + ")" : "");
   }
   const res = compute();
-  LAST = { ...res, comps: comparisons(res.gs) };
+  LAST = { ...res, comps: comparisons(res.gs), models: null };
+  LAST.models = modelResults(LAST.comps);
+  syncModelRows();
   if (COMPILED) {
     const used = [...COMPILED.used];
     const n = res.values.length;
@@ -1037,6 +1824,7 @@ function update() {
   colorFields();
   updateScatter();
   updateMethods();
+  renderData();
   saveHash();
 }
 
@@ -1143,14 +1931,14 @@ function statsTable() {
       "</td><td>" + (w ? minus("t = " + w.t.toFixed(2)) + ", df = " + w.df.toFixed(1) + ", P = " + Pfull(w.p) : "–") +
       "</td><td>" + ci + "</td><td>" + (ms ? "U = " + g3(ms.U) + ", P = " + Pfull(ms.p) + " (" + ms.method + ")" : "–") + "</td></tr>";
   }
-  html += "</table><p class='note'><b>The reference test is the notebook's linear mixed model</b> (02_biology.ipynb, Table 1: genotype and experiment fixed, slide as a random intercept, REML; counts per mm on log(1 + y)). It is <b>not computed in this page</b>. " +
+  html += "</table><p class='note'><b>The reference test is the mixed model</b> (below, under Model; the notebook's Table 1 is the linear mixed model: genotype and experiment fixed, slide as a random intercept, REML; counts per mm on log(1 + y)). " +
     "The tests here are simpler checks. Mann–Whitney on sections treats every section as independent, but sections from one slide are related, so it overstates the evidence. " +
     "The slide-level tests use slides as the unit: each slide's mean of " + scaleName + " over its sections; the fold or difference with its 95 % CI comes from the Welch t on those. " +
     "The fold of means above is the ratio of the section means, not the model's fold. " +
     "Mann–Whitney: normal approximation with tie and continuity correction when both groups have more than 20; exact for smaller groups without ties; a permutation test (20,000) with ties. All two-sided.</p>" +
     "<p class='note'>Data: " + (META.bio ? "sections table of 02_biology (" + META.bio.generated + ", counting method " + META.bio["counting method"] + ")" : "no sections table") +
     "; per-method counts of the section browser (" + (META.browser || "–") + ").</p>";
-  $("stats").innerHTML = html;
+  $("stats").innerHTML = html + modelTable();
 }
 
 // ------------------------------------------------------------------ colours
@@ -1403,6 +2191,115 @@ function exportScatterCsv() {
   a.remove();
 }
 
+// ------------------------------------------------------------------ the raw data table
+// One row per section: its design, its section variables, the raw counts of the positivity method chosen, the formula's
+// value and whether it is in the plot. Shown when the Data panel is open; the CSVs hold the numbers unrounded.
+const DATA = { sort: null, dir: 1, all: false, filter: "" };
+const yesNo = (b) => (b ? "yes" : "no");
+const DATA_COLUMNS = [   // [key, header, value(r)]
+  ["id", "Section", (r) => r.id],
+  ["name", "Name", (r) => r.name],
+  ["genotype", "Genotype", (r) => r.genotype],
+  ["experiment", "Experiment", (r) => +r.experiment],
+  ["slide", "Slide", (r) => r.slide],
+  ["qc_ok", "QC ok", (r) => yesNo(r.qcOk)],
+  ["qc_status", "QC status", (r) => (r.d && r.d.review) || ""],
+  ["hand_drawn", "Region drawn by hand", (r) => yesNo(r.hand)],
+  ["uncertain", "Home side uncertain", (r) => yesNo(r.uncertain)],
+  ["junction_um", "Junction length (µm)", (r) => r.vars.junction_um],
+  ["area_mm2", "Assembloid area (mm²)", (r) => r.vars.area_mm2],
+  ["assembloid_um", "Assembloid length (µm)", (r) => r.vars.assembloid_um],
+  ["nuclei", "Nuclei", (r) => r.vars.nuclei],
+  ["human", "Human count", (r) => r.vars.human],
+  ["total", "AF488⁺ total", (r) => r.vars.total],
+  ["region", "In region", (r) => r.vars.region],
+  ["crossed", "Crossed", (r) => r.vars.crossed],
+  ["home", "Home", (r) => r.vars.home],
+  ["auto_in_human_area", "In the human's area", (r) => r.vars.auto_in_human_area],
+  ["threshold", "Threshold", (r) => r.vars.threshold],
+  ["formula", "Formula value", (r) => (COMPILED ? COMPILED.fn(r.vars) : NaN)],
+  ["in_plot", "In the plot", (r) => DATA.inPlot.get(r) || ""],
+];
+const fmtData = (v) => (typeof v !== "number" ? String(v) : !Number.isFinite(v) ? "" : Number.isInteger(v) ? String(v) : +v.toPrecision(4) + "");
+
+function dataRows() {
+  const kept = new Set(LAST.rows), plotted = new Set(LAST.values.map((v) => v.r));
+  DATA.inPlot = new Map(ROWS.map((r) => [r, plotted.has(r) ? "yes" : kept.has(r) ? "no: formula not a number" : "no: filtered out"]));
+  let rows = DATA.all ? ROWS.slice() : LAST.rows.slice();
+  const table = rows.map((r) => DATA_COLUMNS.map((c) => c[2](r)));
+  let out = table;
+  const q = DATA.filter.trim().toLowerCase();
+  if (q) out = out.filter((vals) => vals.some((v) => fmtData(v).toLowerCase().includes(q)));
+  if (DATA.sort !== null) {
+    const k = DATA.sort, d = DATA.dir;
+    out = out.slice().sort((a, b) => {
+      const x = a[k], y = b[k];
+      const nx = typeof x === "number" && Number.isFinite(x), ny = typeof y === "number" && Number.isFinite(y);
+      if (nx && ny) return (x - y) * d;
+      if (nx !== ny) return nx ? -1 : 1;             // empty values last
+      return String(x).localeCompare(String(y), undefined, { numeric: true }) * d;
+    });
+  }
+  return out;
+}
+
+function renderData() {
+  if (!$("dataBox").open || !LAST) return;
+  const rows = dataRows();
+  const head = DATA_COLUMNS.map((c, i) => "<th data-k='" + i + "' title='Click to sort'>" + c[1] + (DATA.sort === i ? (DATA.dir > 0 ? " ▲" : " ▼") : "") + "</th>").join("");
+  const body = rows.map((vals) => "<tr>" + vals.map((v) => "<td>" + fmtData(v).replace(/</g, "&lt;") + "</td>").join("") + "</tr>").join("");
+  $("dataTable").innerHTML = "<table class='st' id='dataT'><thead><tr>" + head + "</tr></thead><tbody>" + body + "</tbody></table>";
+  $("dataMsg").textContent = rows.length + " section" + (rows.length === 1 ? "" : "s") + " shown · positivity " + ST.method + " · formula " + ST.formula;
+}
+
+function csvText(header, rows) {
+  return "﻿" + [header.map(csvCell).join(",")].concat(rows.map((r) => r.map((v) => csvCell(typeof v === "number" && !Number.isFinite(v) ? "" : v)).join(","))).join("\n") + "\n";
+}
+function downloadText(text, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+// the table as shown (filters, search, sort), numbers unrounded
+function dataCsv() {
+  return csvText(DATA_COLUMNS.map((c) => c[0] === "formula" ? "formula: " + ST.formula : ["total", "region", "crossed", "home", "auto_in_human_area", "threshold"].includes(c[0]) ? c[0] + "_" + ST.method : c[0]), dataRows());
+}
+// every section × every positivity method and threshold, with every section variable and the notebook's outcomes
+function allCountsCsv() {
+  const keys = METHODS.flatMap((m) => m.ks.map((k) => m.key + "-" + k));
+  const parts = [["total", "n"], ["region", "reg"], ["crossed", "crossed"], ["home", "home"], ["threshold", "thr"]];
+  const fixed = [...SECTION_VARS, ...NOTEBOOK_VARS].map((x) => x[0]).filter((v) => !["experiment", "qc_ok", "hand_drawn", "uncertain"].includes(v));
+  const header = ["id", "name", "genotype", "experiment", "slide", "qc_status", "qc_ok", "hand_drawn", "uncertain", ...fixed,
+    ...keys.flatMap((k) => [...parts.map((p) => p[0] + "_" + k), "auto_in_human_area_" + k])];
+  const rows = ROWS.map((r) => {
+    const c = (r.d && r.d.counts) || {};
+    const h = r.h && r.h.automated ? r.h.automated : {};
+    return [r.id, r.name, r.genotype, +r.experiment, r.slide, (r.d && r.d.review) || "", +r.qcOk, +r.hand, +r.uncertain,
+      ...fixed.map((v) => r.fixed[v]),
+      ...keys.flatMap((k) => [...parts.map((p) => (c[k] ? num(c[k][p[1]]) : NaN)), h[k] !== undefined ? num(h[k]) : NaN])];
+  });
+  return csvText(header, rows);
+}
+
+function buildDataControls() {
+  $("dataBox").addEventListener("toggle", renderData);
+  $("dataAll").onchange = () => { DATA.all = $("dataAll").checked; renderData(); };
+  $("dataFilter").oninput = () => { DATA.filter = $("dataFilter").value; renderData(); };
+  $("dataTable").addEventListener("click", (ev) => {
+    const th = ev.target.closest("th");
+    if (!th) return;
+    const k = +th.dataset.k;
+    DATA.dir = DATA.sort === k ? -DATA.dir : 1;
+    DATA.sort = k;
+    renderData();
+  });
+  $("bDataCsv").onclick = () => downloadText(dataCsv(), fileStem() + "_sections.csv");
+  $("bAllCsv").onclick = () => downloadText(allCountsCsv(), "all_raw_counts.csv");
+}
+
 // ------------------------------------------------------------------ export and settings
 function fileStem() {
   return (ST.preset && ST.preset !== "custom" ? ST.preset : "figure") + "_" + ST.method + (ST.group === "geno_exp" ? "_by_experiment" : "");
@@ -1611,12 +2508,7 @@ function methodsText() {
       "had more than 20 values, exact otherwise), and at the slide level, with slides as the unit, by Welch's t-test on the slide means " +
       "of " + scaleWords + " and the Mann–Whitney U test on slide means. Two-sided P < 0.05 was taken as significant.");
   }
-  if ($("mModel").checked) {
-    out.push("Mixed model. The reference analysis of the study compared genotypes with a linear mixed model (statsmodels MixedLM, REML) " +
-      "with genotype and experiment as fixed effects and slide as a random intercept; counts per mm were modelled as log(1 + y) and " +
-      "reported as the back-transformed fold WT3 ÷ GD1 with its Wald 95 % confidence interval, and distances and shares as differences " +
-      "WT3 − GD1. (The mixed model is computed in 02_biology.ipynb, not on this page; quote its numbers for the outcomes of Table 1.)");
-  }
+  if ($("mModel").checked && ST.model !== "none") out.push(modelMethods());
   if ($("mScatter").checked && ST.sc) {
     out.push("Scatter. Each point is one " + (ST.sc.unit === "slide" ? "slide mean" : "section") + "; x = " + ST.sc.x + " and y = " +
       ST.sc.y + (describeVariables(ST.sc.x + " " + ST.sc.y).length ? ", where " + describeVariables(ST.sc.x + " " + ST.sc.y).join("; ") : "") +
@@ -1625,7 +2517,10 @@ function methodsText() {
   }
   if ($("mSoftware").checked) {
     out.push("Software. Image analysis used ARGUS, a custom napari-based pipeline (version: git commit of the analysis), with " +
-      VERSIONS + ". Code: notebooks/official_analysis (02_biology.ipynb, sides.py, figure_builder.html), notebooks/dataset/af488_masks.py.");
+      VERSIONS + ". Code: notebooks/official_analysis (02_biology.ipynb, sides.py, figure_builder.html), notebooks/dataset/af488_masks.py." +
+      ($("mModel").checked && ST.model !== "none" ? " The " + MODELS[ST.model].long + " was fitted by the figure builder's own implementation " +
+        "(JavaScript), which reproduces statsmodels MixedLM (linear mixed model) and an independent Python implementation " +
+        "(glmm.py, SciPy; generalised linear mixed models) to at least three significant digits." : ""));
   }
   return out.join("\n\n");
 }
@@ -1642,6 +2537,7 @@ function start() {
     loadRows();
     buildControls();
     buildScatterControls();
+    buildDataControls();
     let h = readHash();
     if (!h) {                         // no settings in the link: the ones this browser remembers
       try { const kept = localStorage.getItem(STORE_KEY); if (kept) h = JSON.parse(kept); } catch (e) { h = null; }
