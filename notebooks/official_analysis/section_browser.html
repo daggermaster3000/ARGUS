@@ -34,7 +34,9 @@ tbody tr { cursor: pointer; }
 tbody tr:hover { background: var(--soft); }
 tbody tr.sel { background: var(--ink); color: var(--paper); }
 #right { min-width: 0; display: flex; flex-direction: column; }
-#plots { display: grid; grid-template-columns: 1fr 1.6fr; border-bottom: 1px solid var(--light); }
+#plots { display: grid; grid-template-columns: 1fr 1.25fr 1.25fr; border-bottom: 1px solid var(--light); }
+.axes { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; margin: 2px 0 4px; }
+.axes select { font: inherit; }
 .plot { height: 270px; min-width: 0; }
 .plotbox { position: relative; min-width: 0; padding: 4px 6px 0; }
 .plotbox h2, #info h2 { font-size: 13px; margin: 4px 4px 0; font-weight: bold; }
@@ -108,6 +110,17 @@ body.gallery #gallery { display: grid; }
         <label class="opt"><input type="checkbox" id="logStrip"> log axis</label>
         <div id="p2" class="plot"></div>
       </div>
+      <div class="plotbox">
+        <h2>Size against outcome</h2>
+        <p class="note">Does the size of the assembloid or the junction drive the numbers? Sections in the filtered table; lines are least-squares fits per genotype (on the axes as drawn), ρ is Spearman's.</p>
+        <div class="axes">
+          <label>x <select id="sizeX"></select></label>
+          <label>y <select id="sizeY"></select></label>
+          <label><input type="checkbox" id="logX" checked> log x</label>
+          <label><input type="checkbox" id="logY"> log y</label>
+        </div>
+        <div id="p3" class="plot"></div>
+      </div>
     </div>
     <div id="viewerrow">
       <div id="stage">
@@ -160,6 +173,10 @@ const COLS = [
   { k: "crossed_per_mm", h: "Crossed/mm", f: 2 },
   { k: "share_crossed", h: "Share crossed", f: 2 },
   { k: "length_um", h: "Junction (µm)", f: 0 },
+  { k: "area_mm2", h: "Area (mm²)", f: 2 },
+  { k: "assembloid_um", h: "Assembloid length (µm)", f: 0 },
+  { k: "n_nuclei", h: "Nuclei", f: 0 },
+  { k: "objects_per_mm2", h: "Objects/mm²", f: 0 },
   { k: "human", h: "Human", f: 0 },
   { k: "automated_area", h: "Auto (human area)", f: 0 },
   { k: "ratio", h: "Auto ÷ human", f: 2 },
@@ -243,6 +260,7 @@ function refresh() {
   }
   body.innerHTML = "";
   body.appendChild(frag);
+  if (window.Plotly && $("p3").data !== undefined) plotSize();      // the size plot follows the filters
   $("count").textContent = VIEW.length + " of " + S.length + " sections";
   if (document.body.classList.contains("gallery")) buildGallery();
 }
@@ -321,7 +339,90 @@ function selTrace() {
   return { x: [], y: [], mode: "markers", hoverinfo: "skip", marker: { size: 18, color: "rgba(0,0,0,0)", line: { color: INK, width: 2.5 } } };
 }
 
+// ------------------------------------------------------------------ size against outcome
+const SIZE_X = {
+  area_mm2: "Assembloid area (mm²)", assembloid_um: "Assembloid length across the line (µm)",
+  length_um: "Junction length (µm)", n_nuclei: "Nuclei in the section",
+};
+const SIZE_Y = {
+  crossed_per_mm: "Crossed objects per mm of junction", n_crossed: "Crossed objects",
+  region_per_mm: "Objects in the junction region per mm", home_per_mm: "Home-side objects per mm",
+  share_crossed: "Share crossed", n_objects: "Objects, whole section",
+  objects_per_mm2: "Objects per mm² of assembloid", objects_per_1000_nuclei: "Objects per 1,000 nuclei",
+};
+
+function ranks(v) {
+  const order = v.map((x, i) => [x, i]).sort((a, b) => a[0] - b[0]), r = new Array(v.length);
+  for (let i = 0; i < order.length;) {
+    let j = i; while (j + 1 < order.length && order[j + 1][0] === order[i][0]) j++;
+    for (let k = i; k <= j; k++) r[order[k][1]] = (i + j) / 2;
+    i = j + 1;
+  }
+  return r;
+}
+function pearson(a, b) {
+  const n = a.length; if (n < 3) return NaN;
+  const ma = a.reduce((x, y) => x + y, 0) / n, mb = b.reduce((x, y) => x + y, 0) / n;
+  let sab = 0, saa = 0, sbb = 0;
+  for (let i = 0; i < n; i++) { sab += (a[i] - ma) * (b[i] - mb); saa += (a[i] - ma) ** 2; sbb += (b[i] - mb) ** 2; }
+  return sab / Math.sqrt(saa * sbb);
+}
+function spearman(a, b) { return pearson(ranks(a), ranks(b)); }
+
+// Log axes: ticks at 1, 2 and 5 of each power of ten in the data's range (plotly's own crowd the labels).
+function logTicks(values) {
+  const v = values.filter((x) => x > 0);
+  if (!v.length) return undefined;
+  const lo = Math.floor(Math.log10(Math.min(...v))), hi = Math.ceil(Math.log10(Math.max(...v)));
+  const out = [];
+  for (let e = lo; e <= hi; e++) for (const m of [1, 2, 5]) out.push(m * Math.pow(10, e));
+  return out;
+}
+
+function plotSize() {
+  const kx = $("sizeX").value, ky = $("sizeY").value, lx = $("logX").checked, ly = $("logY").checked;
+  const ok = (v, log) => v !== null && v !== undefined && isFinite(v) && (!log || v > 0);
+  const traces = [], rhos = [];
+  for (const g of ["WT3", "GD1"]) {
+    const part = VIEW.filter((s) => s.genotype === g && ok(s[kx], lx) && ok(s[ky], ly));
+    if (!part.length) continue;
+    traces.push({
+      x: part.map((s) => s[kx]), y: part.map((s) => s[ky]), customdata: part.map((s) => s.id),
+      text: part.map(hoverText), hovertemplate: "%{text}<extra></extra>", mode: "markers", name: g,
+      marker: { symbol: g === "WT3" ? "circle" : "square", size: 6, color: FACE[g], line: { color: INK, width: 0.8 } },
+    });
+    // least-squares line on the axes as drawn (log axes: on the logs)
+    const tx = part.map((s) => (lx ? Math.log10(s[kx]) : s[kx])), ty = part.map((s) => (ly ? Math.log10(s[ky]) : s[ky]));
+    const n = tx.length, mx = tx.reduce((a, b) => a + b, 0) / n, my = ty.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0, sxx = 0; for (let i = 0; i < n; i++) { sxy += (tx[i] - mx) * (ty[i] - my); sxx += (tx[i] - mx) ** 2; }
+    if (n >= 3 && sxx > 0) {
+      const slope = sxy / sxx, a = Math.min(...tx), b = Math.max(...tx);
+      const back = (v, log) => (log ? Math.pow(10, v) : v);
+      traces.push({ x: [back(a, lx), back(b, lx)], y: [back(my + slope * (a - mx), ly), back(my + slope * (b - mx), ly)],
+        mode: "lines", hoverinfo: "skip", showlegend: false, line: { color: g === "WT3" ? INK : MID, width: 2, dash: g === "WT3" ? "solid" : "dash" } });
+    }
+    rhos.push(g + " ρ = " + fmt(spearman(part.map((s) => s[kx]), part.map((s) => s[ky])), 2) + " (n = " + n + ")");
+  }
+  traces.push(selTrace());
+  Plotly.newPlot("p3", traces, {
+    ...PLOT_LAYOUT, margin: { l: 56, r: 12, t: 26, b: 48 }, showlegend: false,
+    title: { text: rhos.join("   ·   "), font: { size: 11 }, x: 0.02, xanchor: "left", y: 0.98 },
+    xaxis: { ...AXIS, type: lx ? "log" : "linear", title: { text: SIZE_X[kx] },
+             tickvals: lx ? logTicks(VIEW.map((s) => s[kx])) : undefined },
+    yaxis: { ...AXIS, type: ly ? "log" : "linear", title: { text: SIZE_Y[ky] },
+             tickvals: ly ? logTicks(VIEW.map((s) => s[ky])) : undefined },
+  }, { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
+  $("p3").on("plotly_click", (ev) => { const id = ev.points[0].customdata; if (id) open(id); });
+  if (CUR) markPlots(CUR);
+}
+
 function markPlots(s) {
+  const p3 = $("p3");
+  if (p3 && p3.data) {
+    const kx = $("sizeX").value, ky = $("sizeY").value;
+    const on = s[kx] !== null && s[kx] !== undefined && s[ky] !== null && s[ky] !== undefined;
+    Plotly.restyle(p3, { x: [on ? [s[kx]] : []], y: [on ? [s[ky]] : []] }, [p3.data.length - 1]);
+  }
   const p1 = $("p1"), p2 = $("p2");
   if (p1 && p1.data) {
     const on = s.human !== null;
@@ -410,7 +511,8 @@ function info(s) {
   let html = '<div class="name">' + s.name + "</div>" +
     '<div style="color:' + DARK + '">' + (i >= 0 ? (i + 1) + " of " + VIEW.length + " in the table" : "not in the filtered table") + "</div>";
   html += "<h2>Section</h2><dl>" + row("Genotype", s.genotype) + row("Experiment", s.experiment) + row("Slide", s.slide) +
-    row("Junction length", fmt(s.length_um, 0) + " µm") + row("Region drawn", fmt(s.region_by)) + row("QC", fmt(s.qc)) +
+    row("Junction length", fmt(s.length_um, 0) + " µm") + row("Assembloid area", fmt(s.area_mm2, 2) + " mm²") +
+    row("Assembloid length", fmt(s.assembloid_um, 0) + " µm") + row("Nuclei", fmt(s.n_nuclei, 0)) + row("Region drawn", fmt(s.region_by)) + row("QC", fmt(s.qc)) +
     row("Review", fmt(s.review) + (s.decision ? " (" + s.decision + ")" : "")) + row("Pixel", fmt(s.um_per_px, 2) + " µm") + "</dl>";
   html += "<h2>Automated (AF488 mask objects)</h2><dl>" + row("Objects, whole section", s.n_objects) + row("In junction region", s.n_region) +
     row("Crossed (2–300 µm past)", s.n_crossed) + row("Home (2–300 µm before)", s.n_home) + row("Crossed per mm", fmt(s.crossed_per_mm, 2)) +
@@ -531,9 +633,14 @@ function init(d) {
   $("mViewer").onclick = () => setMode(false);
   $("mGallery").onclick = () => setMode(true);
   $("logStrip").onchange = () => Plotly.relayout("p2", { "yaxis.type": $("logStrip").checked ? "log" : "linear" });
+  for (const [id, labels, first] of [["sizeX", SIZE_X, "area_mm2"], ["sizeY", SIZE_Y, "crossed_per_mm"]]) {
+    $(id).innerHTML = Object.entries(labels).map(([k, h]) => '<option value="' + k + '">' + h + "</option>").join("");
+    $(id).value = first;
+  }
+  for (const id of ["sizeX", "sizeY", "logX", "logY"]) $(id).onchange = () => window.Plotly && plotSize();
   setupStage();
   refresh();
-  if (window.Plotly) { plotHuman(); plotStrip(); }
+  if (window.Plotly) { plotHuman(); plotStrip(); plotSize(); }
   else { $("p1").textContent = "The plots need plotly from cdnjs (no internet connection?)."; }
   const start = location.hash.slice(1);
   open(BYID[start] ? start : (VIEW[0] && VIEW[0].id));

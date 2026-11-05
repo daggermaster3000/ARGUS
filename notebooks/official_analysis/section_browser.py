@@ -194,13 +194,18 @@ def section_table() -> pd.DataFrame:
     for n in names:
         info = json.loads((RUN / "cells" / f"{n}.json").read_text(encoding="utf-8"))
         rows.append({"name": n, "length_um": info.get("junction_length_um"), "status": info.get("status"),
-                     "region_by": info.get("region_by")})
+                     "region_by": info.get("region_by"), "n_nuclei": info.get("n_cells_section")})
     table = pd.DataFrame(rows).merge(design[["name", "Genotype", "Experiment", "slide"]], on="name")
     counts = pd.read_excel(RUN / "counts.xlsx", sheet_name="Counts")
     counts = counts[counts["Channel"] == CHANNEL].drop_duplicates("Sample").set_index("Sample")
     for column, key in (("Region drawn by", "region_drawn_by"), ("QC", "qc"), ("Review status", "review"),
                         ("Review decision", "decision")):
         table[key] = table["name"].map(counts[column]).where(lambda s: s.notna(), None)
+    # Size of the assembloid: its tissue area (tissue_area.py) and its length across the line (dataset/04).
+    area = pd.read_csv(OUT / "section_tissue_area.csv").set_index("name")["tissue area (mm²)"]
+    length = pd.read_csv(OUT / "section_scales.csv").set_index("name")["assembloid length (µm)"]
+    table["area_mm2"] = table["name"].map(area)
+    table["assembloid_um"] = table["name"].map(length)
     return table
 
 
@@ -268,6 +273,11 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
             "n_objects": int(len(k)), "n_region": int(reg.sum()), "n_crossed": crossed, "n_home": home,
             "crossed_per_mm": crossed / length_mm if length_mm > 0 else None,
             "share_crossed": crossed / (crossed + home) if crossed + home else None,
+            "region_per_mm": int(reg.sum()) / length_mm if length_mm > 0 else None,
+            "home_per_mm": home / length_mm if length_mm > 0 else None,
+            "area_mm2": s["area_mm2"], "assembloid_um": s["assembloid_um"], "n_nuclei": s["n_nuclei"],
+            "objects_per_mm2": len(k) / s["area_mm2"] if s["area_mm2"] and s["area_mm2"] > 0 else None,
+            "objects_per_1000_nuclei": 1000 * len(k) / s["n_nuclei"] if s["n_nuclei"] else None,
             "region_by": s["region_drawn_by"] or s["region_by"], "qc": s["qc"], "review": s["review"],
             "decision": s["decision"], "status": s["status"], "humans": [],
         }
