@@ -182,6 +182,57 @@ def run_one(name: str, out: str) -> str:
     return f"{sid}: {part['seconds']:.1f} s (reading {read_s:.1f} s), {len(objects)} objects"
 
 
+RED_HINT = "555"                  #: the second label's channel (AF555), shown in red
+
+
+def red_file(out: Path, name: str) -> Path:
+    return out / "parts" / f"{short(name)}_red.json"
+
+
+def run_red(name: str, out: str) -> str:
+    """The AF555 picture of one section (red on black, same grid as the AF488 one) → img/<id>_r.jpg."""
+    from PIL import Image
+
+    import classical_vs_cellpose as cv
+    from microscopy_viewer import junction as jn
+    from microscopy_viewer import junction_analysis as ja
+    from microscopy_viewer import loaders
+
+    logging.getLogger("tifffile").setLevel(logging.ERROR)
+    cv.below_normal_priority()
+    out = Path(out)
+    started = time.perf_counter()
+    info = json.loads((RUN / "cells" / f"{name}.json").read_text(encoding="utf-8"))
+    path = Path(info["file"])
+    specs = loaders.load_path(path)
+    try:
+        names = [str(spec.channel_name or spec.name) for spec in specs]
+        red_index = next(i for i, n in enumerate(names) if RED_HINT in n)
+        nuclear_index = jn.pick_channel(names, "", jn.NUCLEAR_HINTS)
+        voxel = float(specs[0].scale[-1])
+        first = specs[0].data[0] if specs[0].multiscale else specs[0].data
+        whole = (slice(0, int(first.shape[-2])), slice(0, int(first.shape[-1])))
+        red = ja._plane(specs[red_index], whole).astype(np.float32)
+        nuclear = ja._plane(specs[nuclear_index], whole)
+    finally:
+        loaders.release(path)
+    f = max(1, int(round(TARGET_UM / voxel)))          # the same grid as the AF488 picture
+    picture = block_mean(red, f)
+    del red
+    tissue = small_tissue(block_mean(nuclear, f))
+    del nuclear
+    lo, hi = np.percentile(picture[tissue] if tissue.any() else picture, DISPLAY_PCT)
+    grey = np.clip((picture - lo) / max(hi - lo, 1e-9), 0, 1)
+    rgb = np.zeros((*grey.shape, 3), np.uint8)
+    rgb[..., 0] = np.round(grey * 255).astype(np.uint8)
+    sid = short(name)
+    Image.fromarray(rgb).save(out / "img" / f"{sid}_r.jpg", quality=JPEG_QUALITY)
+    red_file(out, name).write_text(json.dumps({"version": VERSION, "channel": names[red_index],
+                                               "display": [round(float(lo), 1), round(float(hi), 1)]}),
+                                   encoding="utf-8")
+    return f"{sid} (AF555): {time.perf_counter() - started:.1f} s"
+
+
 def section_table() -> pd.DataFrame:
     """The run's sections in the study, with design, junction length and the run's QC columns."""
     design = pd.read_csv(DESIGN_CSV)
@@ -265,6 +316,7 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
         reg = np.asarray(part["objects"]["reg"], int)
         length_mm = float(s["length_um"]) / 1000 if pd.notna(s["length_um"]) else np.nan
         crossed, home = int((k == 1).sum()), int((k == 2).sum())
+        red = json.loads(red_file(out, s["name"]).read_text(encoding="utf-8")) if red_file(out, s["name"]).exists() else None
         entry = {
             **{key: part[key] for key in ("id", "name", "um_per_px", "width", "height", "display", "line", "region",
                                           "objects")},
@@ -280,6 +332,7 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
             "objects_per_1000_nuclei": 1000 * len(k) / s["n_nuclei"] if s["n_nuclei"] else None,
             "region_by": s["region_drawn_by"] or s["region_by"], "qc": s["qc"], "review": s["review"],
             "decision": s["decision"], "status": s["status"], "humans": [],
+            "red": None if red is None else {"channel": red["channel"], "display": red["display"]},
         }
         for annotator, h in humans.get(s["name"], {}).items():
             dots_um, inside = h["_dots"], h["_in"]
@@ -322,6 +375,22 @@ def main(argv: list[str]) -> int:
                 elapsed = time.perf_counter() - started
                 print(f"[{index}/{len(todo)}] {line} | {elapsed / 60:.1f} min, "
                       f"~{elapsed / index * (len(todo) - index) / 60:.0f} min left", flush=True)
+    red_todo = [n for n in table["name"] if not red_file(out, n).exists() or not (out / "img" / f"{short(n)}_r.jpg").exists()]
+    if argv:
+        red_todo = red_todo[: int(argv[0])]
+    if red_todo:
+        print(f"AF555 pictures: {len(red_todo)} to do", flush=True)
+        started = time.perf_counter()
+        with ProcessPoolExecutor(WORKERS) as pool:
+            futures = {pool.submit(run_red, n, str(out)): n for n in red_todo}
+            for index, future in enumerate(as_completed(futures), start=1):
+                try:
+                    line = future.result()
+                except Exception as exc:
+                    line = f"{short(futures[future])} (AF555): FAILED {exc!r}"
+                if index % 25 == 0 or index == len(red_todo) or "FAILED" in line:
+                    elapsed = time.perf_counter() - started
+                    print(f"[{index}/{len(red_todo)}] {line} | {elapsed / 60:.1f} min", flush=True)
     n = assemble(out, table)
     print(f"written {out / 'data.json'}: {n} sections", flush=True)
     return 0
