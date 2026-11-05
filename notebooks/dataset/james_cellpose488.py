@@ -85,13 +85,16 @@ def tiles_of(tissue: np.ndarray) -> list[tuple[slice, slice]]:
     return [t for t in tiles if float(tissue[t][::8, ::8].mean()) >= ja.TILE_MIN_TISSUE]
 
 
-def segment_tiled(image: np.ndarray, tiles: list[tuple[slice, slice]], voxel: float) -> np.ndarray:
+def segment_tiled(image: np.ndarray, tiles: list[tuple[slice, slice]], voxel: float,
+                  settings: sg.SegmentationSettings | None = None) -> np.ndarray:
     """Cellpose over *tiles* of *image*, pasted into one label map of the whole plane.
 
     Each tile is segmented with :data:`ja.TILE_OVERLAP_PX` of its neighbours and keeps
     the objects whose centre is in the tile itself; an object is pasted only where
-    no earlier object lies, so labels never overlap.
+    no earlier object lies, so labels never overlap. *settings* default to
+    :data:`SETTINGS` (``cellpose488_retrain.py`` hands over its trained models).
     """
+    settings = settings or SETTINGS
     height, width = image.shape
     out = np.zeros((height, width), dtype=np.int32)
     found = 0
@@ -100,7 +103,7 @@ def segment_tiled(image: np.ndarray, tiles: list[tuple[slice, slice]], voxel: fl
         window = (slice(max(tile[0].start - pad, 0), min(tile[0].stop + pad, height)),
                   slice(max(tile[1].start - pad, 0), min(tile[1].stop + pad, width)))
         # A copy: Cellpose normalises its input in place, and the tiles overlap.
-        masks = sg.segment_volume(np.array(image[window]), (voxel, voxel), settings=SETTINGS).masks
+        masks = sg.segment_volume(np.array(image[window]), (voxel, voxel), settings=settings).masks
         ids = np.unique(masks[masks > 0])
         if not ids.size:
             continue
