@@ -15,6 +15,10 @@ header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; p
 header h1 { font-size: 16px; margin: 0; font-weight: bold; }
 header .sub { color: var(--dark); }
 header .modes { margin-left: auto; display: flex; gap: 4px; }
+header .method { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; }
+header .method label { display: inline-flex; gap: 4px; align-items: baseline; }
+#maskStatus { position: absolute; right: 12px; bottom: 12px; color: #fff; font-size: 12px; background: rgba(0,0,0,.6); padding: 2px 6px; pointer-events: none; }
+#maskStatus:empty { display: none; }
 button, select, input[type=search] { font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--ink); padding: 3px 8px; border-radius: 0; }
 button.on { background: var(--ink); color: var(--paper); }
 button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
@@ -82,6 +86,10 @@ body.gallery #gallery { display: grid; }
 <header>
   <h1>Section browser</h1>
   <span class="sub" id="subtitle">AF488 and what the counting method labelled, every analysed section</span>
+  <span class="method">
+    <label title="How a cell is called AF488-positive. The mask methods outline bright AF488 in the image itself; the per-nucleus rules call each segmented cell from its mean AF488.">Positivity <select id="mMethod"></select></label>
+    <label title="Median + k robust SD (1.4826 × MAD): of the background-subtracted AF488 inside the tissue for the masks, of the junction region's cells for the per-nucleus rules. Higher: fewer, brighter cells.">Threshold <select id="mK"></select></label>
+  </span>
   <span class="modes"><button id="mViewer" class="on">Viewer</button><button id="mGallery">Gallery</button></span>
 </header>
 <div id="err"></div>
@@ -105,7 +113,7 @@ body.gallery #gallery { display: grid; }
         <div id="p1" class="plot"></div>
       </div>
       <div class="plotbox">
-        <h2>Crossed AF488 mask objects per mm of junction</h2>
+        <h2 id="stripTitle">Crossed AF488⁺ objects per mm of junction</h2>
         <p class="note">One point per section; the line is the median. Click a point to open the section.</p>
         <label class="opt"><input type="checkbox" id="logStrip"> log axis</label>
         <div id="p2" class="plot"></div>
@@ -129,19 +137,20 @@ body.gallery #gallery { display: grid; }
           <image id="imgR" x="0" y="0" style="mix-blend-mode: screen"></image>
           <g id="gRegion" fill="none" stroke="#d9d9d9" stroke-width="1.5" stroke-dasharray="5 4"></g>
           <g id="gLine" fill="none" stroke="#ffffff" stroke-width="2"></g>
-          <g id="gObjects" fill="none" stroke-width="1.3"></g>
+          <g id="gObjects" fill="#ffffff" fill-opacity="0" stroke-width="1.2" stroke-linejoin="round"></g>
           <g id="gHumans" fill="none" stroke="#ffffff" stroke-width="1.3"></g>
         </svg>
         <div id="toggles">
           <label><input type="checkbox" id="tLine" checked> junction line</label>
           <label><input type="checkbox" id="tRegion" checked> junction region</label>
-          <label><input type="checkbox" id="tObjects" checked> automated objects</label>
+          <label><input type="checkbox" id="tObjects" checked> automated outlines</label>
           <label><input type="checkbox" id="tHumans" checked> human dots</label>
           <label><input type="checkbox" id="tImage" checked> image</label>
           <label>channel <select id="tChannel"><option value="g">AF488 (green)</option><option value="r">AF555 (red)</option><option value="rg">both</option></select></label>
         </div>
         <div id="nav"><button id="prev" title="previous (left arrow)">&larr;</button><button id="fit" title="fit (0)">fit</button><button id="next" title="next (right arrow)">&rarr;</button></div>
         <div id="scalebar"><div></div><span></span></div>
+        <div id="maskStatus"></div>
       </div>
       <aside id="info"></aside>
     </div>
@@ -162,13 +171,14 @@ const $ = (id) => document.getElementById(id);
 let DATA = null, S = [], BYID = {}, VIEW = [], CUR = null;
 let sortKey = "crossed_per_mm", sortDir = -1;
 let vb = { x: 0, y: 0, w: 1, h: 1 };
+let METHOD = null, KEY = null;            // the positivity method shown ({key, label, kind, ks}) and "<method>-<k>"
 
 // Table columns: key, header, how to show, text or number
 const COLS = [
   { k: "id", h: "Section", txt: true },
   { k: "genotype", h: "Gt", txt: true },
   { k: "experiment", h: "Exp", txt: true },
-  { k: "n_objects", h: "Objects", f: 0 },
+  { k: "n_objects", h: "AF488⁺", f: 0 },
   { k: "n_region", h: "In region", f: 0 },
   { k: "n_crossed", h: "Crossed", f: 0 },
   { k: "n_home", h: "Home", f: 0 },
@@ -178,7 +188,7 @@ const COLS = [
   { k: "area_mm2", h: "Area (mm²)", f: 2 },
   { k: "assembloid_um", h: "Assembloid length (µm)", f: 0 },
   { k: "n_nuclei", h: "Nuclei", f: 0 },
-  { k: "objects_per_mm2", h: "Objects/mm²", f: 0 },
+  { k: "objects_per_mm2", h: "AF488⁺/mm²", f: 0 },
   { k: "human", h: "Human", f: 0 },
   { k: "automated_area", h: "Auto (human area)", f: 0 },
   { k: "ratio", h: "Auto ÷ human", f: 2 },
@@ -204,11 +214,58 @@ function prepare(d) {
     // one human per section (none is counted by both); the first if there were two
     const h = s.humans && s.humans.length ? s.humans[0] : null;
     s.human = h ? h.human : null;
-    s.automated_area = h ? h.automated : null;
-    s.ratio = h ? h.ratio : null;
     s.annotator = h ? h.label : null;
     s.qc = s.qc || "–";
   }
+}
+
+// ------------------------------------------------------------------ positivity method
+const noun = () => (METHOD && METHOD.kind === "cell" ? "cells" : "objects");
+const methodText = () => METHOD.label + ", " + KEY.split("-")[1] + " SD";
+const perMm = (v, s) => (v !== null && v !== undefined && s.length_um > 0 ? v / (s.length_um / 1000) : null);
+
+// Copy the chosen method-threshold's numbers into each section's own fields (what the table and plots read).
+function applyNumbers() {
+  for (const s of S) {
+    const c = (s.counts && s.counts[KEY]) || {};
+    const v = (x) => (x === undefined ? null : x);
+    s.n_objects = v(c.n); s.n_region = v(c.reg); s.n_crossed = v(c.crossed); s.n_home = v(c.home); s.thr = v(c.thr);
+    s.crossed_per_mm = perMm(s.n_crossed, s);
+    s.region_per_mm = perMm(s.n_region, s);
+    s.home_per_mm = perMm(s.n_home, s);
+    s.share_crossed = s.n_crossed !== null && s.n_home !== null && s.n_crossed + s.n_home > 0 ? s.n_crossed / (s.n_crossed + s.n_home) : null;
+    s.objects_per_mm2 = s.n_objects !== null && s.area_mm2 > 0 ? s.n_objects / s.area_mm2 : null;
+    s.objects_per_1000_nuclei = s.n_objects !== null && s.n_nuclei > 0 ? 1000 * s.n_objects / s.n_nuclei : null;
+    const h = s.humans && s.humans.length ? s.humans[0] : null;
+    s.automated_area = h && h.automated ? v(h.automated[KEY]) : null;
+    s.ratio = s.automated_area !== null && s.human ? s.automated_area / s.human : null;
+  }
+}
+
+function fillMethodSelects() {
+  $("mMethod").innerHTML = DATA.methods.map((m) => '<option value="' + m.key + '">' + m.label + "</option>").join("");
+  $("mMethod").value = METHOD.key;
+  $("mK").innerHTML = METHOD.ks.map((k) => '<option value="' + k + '">' + k + " SD" + (METHOD.key + "-" + k === DATA.default ? " (counting method)" : "") +
+    (METHOD.key === "cellmf" && k === 7 ? " (the run's rule)" : "") + "</option>").join("");
+  $("mK").value = KEY.split("-")[1];
+}
+
+function setMethod(key, redraw) {
+  const [m, k] = key.split("-");
+  METHOD = DATA.methods.find((x) => x.key === m) || DATA.methods[0];
+  const kk = METHOD.ks.map(String).includes(k) ? k : String(METHOD.default);
+  KEY = METHOD.key + "-" + kk;
+  fillMethodSelects();
+  applyNumbers();
+  $("subtitle").textContent = S.length + " sections · " + methodText() + " · crossed = past the junction line (extended past its ends), home = not crossed · built " + DATA.generated;
+  $("stripTitle").textContent = "Crossed AF488⁺ " + noun() + " per mm of junction";
+  const keep = $("sizeY").value;
+  $("sizeY").innerHTML = Object.entries(SIZE_Y).map(([k2, h]) => '<option value="' + k2 + '">' + h() + "</option>").join("");
+  $("sizeY").value = keep || "crossed_per_mm";
+  if (!redraw) return;
+  refresh();
+  if (window.Plotly) { plotHuman(); plotStrip(); plotSize(); }
+  if (CUR) { drawObjects(CUR); info(CUR); markPlots(CUR); }
 }
 
 // ------------------------------------------------------------------ table and filters
@@ -277,13 +334,13 @@ const AXIS = { showline: true, linecolor: INK, linewidth: 1, ticks: "outside", t
 
 function hoverText(s) {
   return "<b>" + s.id + "</b> (" + s.genotype + ", exp " + s.experiment + ")<br>" +
-    "objects " + s.n_objects + ", in region " + s.n_region + "<br>crossed " + s.n_crossed + " (" + fmt(s.crossed_per_mm, 2) + "/mm), home " + s.n_home +
+    "AF488⁺ " + noun() + " " + fmt(s.n_objects) + ", in region " + fmt(s.n_region) + "<br>crossed " + fmt(s.n_crossed) + " (" + fmt(s.crossed_per_mm, 2) + "/mm), home " + fmt(s.n_home) +
     (s.human !== null ? "<br>" + s.annotator + ": human " + s.human + ", automated " + s.automated_area + " (×" + fmt(s.ratio, 2) + ")" : "");
 }
 
 function plotHuman() {
   const traces = [];
-  const counted = S.filter((s) => s.human !== null);
+  const counted = S.filter((s) => s.human !== null && s.automated_area !== null);
   const vals = counted.flatMap((s) => [Math.max(s.human, 0.5), Math.max(s.automated_area, 0.5)]);
   const lo = Math.pow(10, Math.floor(Math.log10(Math.min(...vals, 10)) * 2) / 2), hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...vals, 10)) * 4) / 4);
   traces.push({ x: [lo, hi], y: [lo, hi], mode: "lines", line: { color: MID, dash: "dash", width: 1 }, hoverinfo: "skip" });
@@ -303,7 +360,7 @@ function plotHuman() {
   Plotly.newPlot("p1", traces, {
     ...PLOT_LAYOUT,
     xaxis: { ...AXIS, type: "log", range: [Math.log10(lo), Math.log10(hi)], tickvals: ticks, title: { text: "Human count (AF488⁺ cells)" } },
-    yaxis: { ...AXIS, type: "log", range: [Math.log10(lo), Math.log10(hi)], tickvals: ticks, title: { text: "Automated count (objects)" } },
+    yaxis: { ...AXIS, type: "log", range: [Math.log10(lo), Math.log10(hi)], tickvals: ticks, title: { text: "Automated count (" + noun() + ")" } },
   }, { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
   $("p1").on("plotly_click", (ev) => { const id = ev.points[0].customdata; if (id) open(id); });
 }
@@ -332,7 +389,7 @@ function plotStrip() {
   Plotly.newPlot("p2", traces, {
     ...PLOT_LAYOUT, margin: { l: 56, r: 12, t: 8, b: 56 },
     xaxis: { ...AXIS, tickvals: STRIP_GROUPS.map((_, i) => i), ticktext: STRIP_GROUPS.map(([g, e]) => g + "<br>exp " + e), range: [-0.6, STRIP_GROUPS.length - 0.4] },
-    yaxis: { ...AXIS, type: $("logStrip").checked ? "log" : "linear", title: { text: "Crossed objects per mm" } },
+    yaxis: { ...AXIS, type: $("logStrip").checked ? "log" : "linear", title: { text: "Crossed " + noun() + " per mm" } },
   }, { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
   $("p2").on("plotly_click", (ev) => { const id = ev.points[0].customdata; if (id) open(id); });
 }
@@ -346,11 +403,12 @@ const SIZE_X = {
   area_mm2: "Assembloid area (mm²)", assembloid_um: "Assembloid length across the line (µm)",
   length_um: "Junction length (µm)", n_nuclei: "Nuclei in the section",
 };
+// y options: labels follow the method's noun (objects or cells)
 const SIZE_Y = {
-  crossed_per_mm: "Crossed objects per mm of junction", n_crossed: "Crossed objects",
-  region_per_mm: "Objects in the junction region per mm", home_per_mm: "Home-side objects per mm",
-  share_crossed: "Share crossed", n_objects: "Objects, whole section",
-  objects_per_mm2: "Objects per mm² of assembloid", objects_per_1000_nuclei: "Objects per 1,000 nuclei",
+  crossed_per_mm: () => "Crossed AF488⁺ " + noun() + " per mm of junction", n_crossed: () => "Crossed AF488⁺ " + noun(),
+  region_per_mm: () => "AF488⁺ " + noun() + " in the junction region per mm", home_per_mm: () => "Home-side AF488⁺ " + noun() + " per mm",
+  share_crossed: () => "Share crossed", n_objects: () => "AF488⁺ " + noun() + ", whole section",
+  objects_per_mm2: () => "AF488⁺ " + noun() + " per mm² of assembloid", objects_per_1000_nuclei: () => "AF488⁺ " + noun() + " per 1,000 nuclei",
 };
 
 function ranks(v) {
@@ -411,7 +469,7 @@ function plotSize() {
     title: { text: rhos.join("   ·   "), font: { size: 11 }, x: 0.02, xanchor: "left", y: 0.98 },
     xaxis: { ...AXIS, type: lx ? "log" : "linear", title: { text: SIZE_X[kx] },
              tickvals: lx ? logTicks(VIEW.map((s) => s[kx])) : undefined },
-    yaxis: { ...AXIS, type: ly ? "log" : "linear", title: { text: SIZE_Y[ky] },
+    yaxis: { ...AXIS, type: ly ? "log" : "linear", title: { text: SIZE_Y[ky]() },
              tickvals: ly ? logTicks(VIEW.map((s) => s[ky])) : undefined },
   }, { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
   $("p3").on("plotly_click", (ev) => { const id = ev.points[0].customdata; if (id) open(id); });
@@ -473,20 +531,7 @@ function draw(s) {
   for (const g of [gL, gR, gO, gH]) g.innerHTML = "";
   if (s.line && s.line.length) gL.appendChild(el("polyline", { points: s.line.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
   for (const c of s.region || []) gR.appendChild(el("polygon", { points: c.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
-  const o = s.objects, px = s.um_per_px;
-  const KIND = [{ c: MID, n: "other" }, { c: MAGENTA, n: "crossed" }, { c: "#ffffff", n: "home" }];
-  const order = o.k.map((k, i) => i).sort((a, b) => (o.k[a] === 0 ? 0 : 1) - (o.k[b] === 0 ? 0 : 1));   // grey first, underneath
-  const frag = document.createDocumentFragment();
-  for (const i of order) {
-    const k = o.k[i];
-    const c = el("circle", { cx: o.x[i], cy: o.y[i], r: Math.max(o.r[i] + 2, 3).toFixed(2), stroke: KIND[k].c, "vector-effect": "non-scaling-stroke" });
-    const t = el("title", {});
-    t.textContent = "automated object, " + KIND[k].n + (o.away[i] !== null ? ", " + o.away[i].toFixed(0) + " µm from the line (+ past it)" : "") +
-      ", area " + (Math.PI * Math.pow(o.r[i] * px, 2)).toFixed(0) + " µm²" + (o.reg[i] ? ", in the junction region" : "");
-    c.appendChild(t);
-    frag.appendChild(c);
-  }
-  gO.appendChild(frag);
+  drawObjects(s);
   const arm = 4;
   for (const h of s.humans || []) {
     const d = h.dots;
@@ -499,6 +544,59 @@ function draw(s) {
     if (pathOut) gH.appendChild(el("path", { d: pathOut, opacity: 0.45, "vector-effect": "non-scaling-stroke" }));
   }
   applyToggles();
+}
+
+// The outlines of one section and method-threshold: parts/masks/<id>__<key>.js, which calls
+// window.MASKS_LOADED(id, key, data). A <script> tag, not fetch(), so the page works from file:// too.
+const MASKS = {}, WAITING = {};
+window.MASKS_LOADED = (id, key, d) => { MASKS[id + "__" + key] = d; };
+function loadMasks(id, key) {
+  const k = id + "__" + key;
+  if (MASKS[k]) return Promise.resolve(MASKS[k]);
+  if (WAITING[k]) return WAITING[k];
+  WAITING[k] = new Promise((resolve, reject) => {
+    const tag = document.createElement("script");
+    tag.src = "parts/masks/" + encodeURIComponent(k) + ".js";
+    tag.onload = () => { tag.remove(); delete WAITING[k]; MASKS[k] ? resolve(MASKS[k]) : reject(new Error("empty")); };
+    tag.onerror = () => { tag.remove(); delete WAITING[k]; reject(new Error("missing")); };
+    document.head.appendChild(tag);
+  });
+  return WAITING[k];
+}
+
+const SIDE = { 1: { c: MAGENTA, n: "crossed" }, 0: { c: "#ffffff", n: "home" }, "-1": { c: MID, n: "no junction line" } };
+function drawObjects(s) {
+  const gO = $("gObjects"), key = KEY;
+  gO.innerHTML = "";
+  $("maskStatus").textContent = "outlines loading…";
+  loadMasks(s.id, key).then((d) => {
+    if (CUR !== s || KEY !== key) return;          // another section or method was chosen meanwhile
+    const frag = document.createDocumentFragment();
+    const what = METHOD.kind === "cell" ? "AF488⁺ cell (grown region)" : "AF488⁺ object";
+    // home first, crossed on top
+    const order = d.side.map((_, i) => i).sort((a, b) => d.side[a] - d.side[b]);
+    for (const i of order) {
+      let path = "";
+      for (const r of d.rings[i]) {
+        if (r.length < 2) continue;
+        path += "M" + r[0] + " " + r[1];
+        for (let j = 2; j < r.length; j += 2) path += "L" + r[j] + " " + r[j + 1];
+        path += "Z";
+      }
+      if (!path) continue;
+      const side = SIDE[d.side[i]] || SIDE["-1"];
+      const p = el("path", { d: path, stroke: side.c, "vector-effect": "non-scaling-stroke" });
+      const t = el("title", {});
+      t.textContent = what + ", " + side.n + (d.away[i] !== null ? ", " + d.away[i].toFixed(0) + " µm from the line (+ past it)" : "") +
+        ", area " + d.area[i] + " µm²" + (d.reg[i] ? ", in the junction region" : "");
+      p.appendChild(t);
+      frag.appendChild(p);
+    }
+    gO.appendChild(frag);
+    $("maskStatus").textContent = "";
+  }).catch(() => {
+    if (CUR === s && KEY === key) $("maskStatus").textContent = "no outlines for this section and method";
+  });
 }
 
 function applyToggles() {
@@ -521,24 +619,29 @@ function info(s) {
     row("Junction length", fmt(s.length_um, 0) + " µm") + row("Assembloid area", fmt(s.area_mm2, 2) + " mm²") +
     row("Assembloid length", fmt(s.assembloid_um, 0) + " µm") + row("Nuclei", fmt(s.n_nuclei, 0)) + row("Region drawn", fmt(s.region_by)) + row("QC", fmt(s.qc)) +
     row("Review", fmt(s.review) + (s.decision ? " (" + s.decision + ")" : "")) + row("Pixel", fmt(s.um_per_px, 2) + " µm") + "</dl>";
-  html += "<h2>Automated (AF488 mask objects)</h2><dl>" + row("Objects, whole section", s.n_objects) + row("In junction region", s.n_region) +
-    row("Crossed (2–300 µm past)", s.n_crossed) + row("Home (2–300 µm before)", s.n_home) + row("Crossed per mm", fmt(s.crossed_per_mm, 2)) +
-    row("Share crossed", fmt(s.share_crossed, 2)) + "</dl>";
+  const n = noun();
+  html += '<h2>Automated</h2><div style="color:' + DARK + '">' + methodText() + "</div><dl>" + row("AF488⁺ " + n + ", whole section", fmt(s.n_objects)) +
+    row("In junction region", fmt(s.n_region)) +
+    row("Crossed (past the line)", fmt(s.n_crossed)) + row("Home (not crossed)", fmt(s.n_home)) + row("Crossed per mm", fmt(s.crossed_per_mm, 2)) +
+    row("Share crossed", fmt(s.share_crossed, 2)) + row("Threshold", fmt(s.thr, 1)) + "</dl>";
   for (const h of s.humans || []) {
+    const auto = h.automated ? h.automated[KEY] : null;
     html += "<h2>" + h.label.charAt(0).toUpperCase() + h.label.slice(1) + "</h2><dl>" + row("Counted area", '<span style="white-space:normal">' + h.area + "</span>") +
-      row("Human count", h.human) + row("Automated, same area", h.automated) + row("Automated ÷ human", fmt(h.ratio, 2)) +
+      row("Human count", h.human) + row("Automated, same area", fmt(auto)) + row("Automated ÷ human", fmt(auto !== null && auto !== undefined && h.human ? auto / h.human : null, 2)) +
       row("Dots shown", h.dots.x.length) + "</dl>";
   }
+  const blob = (c) => '<path d="M4 9C4 5 7 3 10 4S15 7 14 11 9 15 6 13 4 11 4 9Z" fill="none" stroke="' + c + '" stroke-width="1.5"/>';
+  const one = METHOD.kind === "cell" ? "AF488⁺ cell (its grown region)" : "AF488⁺ object (mask outline)";
   html += '<h2>Overlays</h2><div id="legend">' +
-    legendItem('<circle cx="9" cy="9" r="5" fill="none" stroke="#ffffff" stroke-width="1.5"/>', "object at home (2–300 µm before the line)") +
-    legendItem('<circle cx="9" cy="9" r="5" fill="none" stroke="' + MAGENTA + '" stroke-width="1.5"/>', "object crossed (2–300 µm past the line)") +
-    legendItem('<circle cx="9" cy="9" r="5" fill="none" stroke="' + MID + '" stroke-width="1.5"/>', "other object (farther, or past the line\'s ends)") +
+    legendItem(blob("#ffffff"), one + " at home: not past the junction line") +
+    legendItem(blob(MAGENTA), one + " crossed: past the junction line, extended straight past its ends") +
     legendItem('<path d="M5 9h8M9 5v8" stroke="#ffffff" stroke-width="1.5"/>', "human dot (faint: outside the counted area)") +
     legendItem('<path d="M2 14L16 4" stroke="#ffffff" stroke-width="2"/>', "junction line") +
     legendItem('<rect x="3" y="4" width="12" height="10" fill="none" stroke="#d9d9d9" stroke-dasharray="3 2" stroke-width="1.5"/>', "junction region") +
     '<div style="color:' + DARK + ';margin-top:6px">AF488 (green), brightest plane over z, display ' + s.display[0] + "–" + s.display[1] +
     (s.red ? "; " + s.red.channel + " (red), display " + s.red.display[0] + "–" + s.red.display[1] : "; no AF555 picture") +
-    " (tissue 1st–99.7th percentile). Wheel to zoom, drag to pan, ←/→ previous/next, 0 to fit.</div></div>";
+    " (tissue 1st–99.7th percentile). Home is the side of the line holding more of the Gaussian 5 SD mask's area, the same side for every method; " +
+    n + " are placed by their centroid. Wheel to zoom, drag to pan, ←/→ previous/next, 0 to fit.</div></div>";
   $("info").innerHTML = html;
 }
 
@@ -631,8 +734,6 @@ function setMode(gallery) {
 // ------------------------------------------------------------------ start
 function init(d) {
   prepare(d);
-  $("subtitle").textContent = S.length + " sections · AF488 mask objects (" + d.method + "), crossed = beside the line, " +
-    d.gap_um + "–" + d.near_um + " µm past it · built " + d.generated;
   fillSelect("fGeno", ["WT3", "GD1"].filter((g) => S.some((s) => s.genotype === g)));
   fillSelect("fExp", [...new Set(S.map((s) => s.experiment))].sort());
   fillSelect("fQc", [...new Set(S.map((s) => s.qc))].sort());
@@ -641,11 +742,15 @@ function init(d) {
   $("mViewer").onclick = () => setMode(false);
   $("mGallery").onclick = () => setMode(true);
   $("logStrip").onchange = () => Plotly.relayout("p2", { "yaxis.type": $("logStrip").checked ? "log" : "linear" });
-  for (const [id, labels, first] of [["sizeX", SIZE_X, "area_mm2"], ["sizeY", SIZE_Y, "crossed_per_mm"]]) {
-    $(id).innerHTML = Object.entries(labels).map(([k, h]) => '<option value="' + k + '">' + h + "</option>").join("");
-    $(id).value = first;
-  }
+  $("sizeX").innerHTML = Object.entries(SIZE_X).map(([k, h]) => '<option value="' + k + '">' + h + "</option>").join("");
+  $("sizeX").value = "area_mm2";
   for (const id of ["sizeX", "sizeY", "logX", "logY"]) $(id).onchange = () => window.Plotly && plotSize();
+  // the method: ?m=<method>-<k> in the address, or the counting method
+  let start_m = null;
+  try { start_m = new URLSearchParams(location.search).get("m"); } catch (e) { /* no query */ }
+  setMethod(start_m || d.default, false);
+  $("mMethod").onchange = () => setMethod($("mMethod").value + "-" + $("mK").value, true);
+  $("mK").onchange = () => setMethod(METHOD.key + "-" + $("mK").value, true);
   setupStage();
   refresh();
   if (window.Plotly) { plotHuman(); plotStrip(); plotSize(); }
