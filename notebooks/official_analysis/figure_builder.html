@@ -1953,6 +1953,16 @@ function minorLog(ax) {
   const dd = decades(lo, hi);
   if (!dd || dd.d1 - dd.d0 > 60) return null;
   const gaps = major.slice(1).map((v, i) => v / major[i]);
+  // majors close together (1-2-5, 0.5-1-2): each gap cut in round linear steps (0.6 0.7 … between 0.5 and 1, 1.2 1.4 …
+  // between 1 and 2), and the same step past the ends
+  if (gaps.length && STATS.median(gaps) <= 2.6) {
+    const out = [], cutGap = (a, b, step) => { for (let v = a + step; v < b - step * 1e-6; v += step) out.push(+v.toPrecision(10)); };
+    for (let i = 1; i < major.length; i++) cutGap(major[i - 1], major[i], niceStep(major[i] - major[i - 1], 4));
+    const s0 = niceStep(major[1] - major[0], 4), s1 = niceStep(major[major.length - 1] - major[major.length - 2], 4);
+    for (let v = major[0] - s0, k = 0; v >= lo * 0.9999 && v > 0 && k < 40; v -= s0, k++) out.push(+v.toPrecision(10));
+    for (let v = major[major.length - 1] + s1, k = 0; v <= hi * 1.0001 && k < 40; v += s1, k++) out.push(+v.toPrecision(10));
+    return out.filter((v) => v >= lo * 0.9999 && v <= hi * 1.0001);
+  }
   const sparse = gaps.length && STATS.median(gaps) > 10.5;           // majors every few decades: minor at the others
   const lm = major.map(Math.log10), out = [];
   for (let d = dd.d0; d <= dd.d1; d++) for (const k of sparse ? [1] : [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
@@ -3233,14 +3243,36 @@ function humanEntries() {
   return out.filter((e) => annotatorOn(e.ann));
 }
 
+// Every agreement number of a set of sections, in one place. D = ln(automated ÷ human), A = ln(geometric mean of the two
+// counts); a zero count is taken as 0.5. Ratios are kept on the ln scale (bias, limits, geometric means) and shown as exp.
+//   ccc, cccRaw   Lin's CCC on log10 counts and on counts;       rho   Spearman ρ, human against automated
+//   bias          mean D;  lo / hi  bias ∓ 1.96 SD (the unadjusted limits of agreement)
+//   slope, intercept   D = intercept + slope·A by least squares;   sdRes  the residual SD (n − 2 df)
+//   gm_<genotype> mean D of the genotype's sections (its geometric-mean ratio)
+function ols(x, y) {
+  const n = x.length, mx = STATS.mean(x), my = STATS.mean(y);
+  let sxx = 0, sxy = 0;
+  for (let i = 0; i < n; i++) { sxx += (x[i] - mx) ** 2; sxy += (x[i] - mx) * (y[i] - my); }
+  const b1 = sxx > 0 ? sxy / sxx : NaN, b0 = my - b1 * mx;
+  const res = x.map((v, i) => y[i] - b0 - b1 * v);
+  return { b0, b1, sdRes: n > 2 ? Math.sqrt(res.reduce((a, r) => a + r * r, 0) / (n - 2)) : NaN };
+}
 function agreementNumbers(rows) {
   const h = rows.map((e) => e.human), m = rows.map((e) => e.auto);
-  const lr = rows.map((e) => Math.log2(Math.max(e.auto, 0.5) / Math.max(e.human, 0.5)));     // a zero count is taken as 0.5
-  const bias = STATS.mean(lr), sd = rows.length > 1 ? Math.sqrt(STATS.variance(lr)) : NaN;
-  const rho = STATS.spearman(h, m);
-  return { ccc: STATS.linCcc(h.map(Math.log10), m.map((v) => Math.log10(Math.max(v, 0.5)))), cccRaw: STATS.linCcc(h, m),
-    bias, lo: bias - 1.96 * sd, hi: bias + 1.96 * sd, rho: rho ? rho.rho : NaN };
+  const D = rows.map((e) => Math.log(Math.max(e.auto, 0.5) / Math.max(e.human, 0.5)));
+  const A = rows.map((e) => 0.5 * Math.log(Math.max(e.human, 0.5) * Math.max(e.auto, 0.5)));
+  const bias = STATS.mean(D), sd = rows.length > 1 ? Math.sqrt(STATS.variance(D)) : NaN;
+  const rho = STATS.spearman(h, m), f = ols(A, D);
+  const out = { ccc: STATS.linCcc(h.map(Math.log10), m.map((v) => Math.log10(Math.max(v, 0.5)))), cccRaw: STATS.linCcc(h, m),
+    rho: rho ? rho.rho : NaN, bias, lo: bias - 1.96 * sd, hi: bias + 1.96 * sd, slope: f.b1, intercept: f.b0, sdRes: f.sdRes };
+  for (const g of GENOTYPES) {
+    const d = D.filter((v, i) => rows[i].r.genotype === g);
+    out["gm_" + g] = d.length ? STATS.mean(d) : NaN;
+  }
+  return out;
 }
+// The numbers with 95 % CIs: percentiles of HV_BOOT bootstrap resamples of sections (one seeded stream; within each
+// annotator when both are in). Each entry is [estimate, low, high].
 function withCi(rows) {
   if (rows.length < 3) return null;
   const point = agreementNumbers(rows), next = STATS.rng(HV_SEED);
@@ -3254,56 +3286,22 @@ function withCi(rows) {
   const ci = {};
   for (const k of Object.keys(point)) {
     const s = Float64Array.from(draws[k]).sort();
-    ci[k] = [point[k], STATS.quantileSorted(s, 0.025), STATS.quantileSorted(s, 0.975)];
+    ci[k] = [point[k], s.length ? STATS.quantileSorted(s, 0.025) : NaN, s.length ? STATS.quantileSorted(s, 0.975) : NaN];
   }
+  ci.fold = ci.sdRes.map((v) => Math.exp(1.96 * v));      // regression-based limits: fitted ratio ×/÷ fold
   ci.n = rows.length;
+  ci.nBy = Object.fromEntries(GENOTYPES.map((g) => [g, rows.filter((e) => e.r.genotype === g).length]));
+  const A = rows.map((e) => 0.5 * Math.log(Math.max(e.human, 0.5) * Math.max(e.auto, 0.5)));
+  ci.aRange = [Math.min(...A), Math.max(...A)];
   ci.medianRatio = STATS.median(rows.map((e) => e.auto / e.human));
+  ci.anyZero = rows.some((e) => e.human === 0 || e.auto === 0);
   return ci;
 }
-
-// Bland–Altman with the difference regressed on the size (Bland & Altman 1999, section 5.2), on natural logs:
-// D = ln(automated ÷ human), A = ln(geometric mean of the two counts). D = b0 + b1·A by least squares (the slope's 95 % CI
-// from t with n − 2 df); the absolute residuals |r| = c0 + c1·A by least squares; 95 % limits D̂ ± 1.96·√(π/2)·(c0 + c1·A).
-// Also the usual constant numbers: bias = mean D (95 % CI from t, n − 1 df) and limits bias ± 1.96 SD (95 % CI ± t·√(3 SD²/n)).
-// A zero count is taken as 0.5, as everywhere on the page.
-function ols(x, y) {
-  const n = x.length, mx = STATS.mean(x), my = STATS.mean(y);
-  let sxx = 0, sxy = 0;
-  for (let i = 0; i < n; i++) { sxx += (x[i] - mx) ** 2; sxy += (x[i] - mx) * (y[i] - my); }
-  const b1 = sxx > 0 ? sxy / sxx : 0, b0 = my - b1 * mx;
-  const res = x.map((v, i) => y[i] - b0 - b1 * v);
-  const s2 = res.reduce((a, r) => a + r * r, 0) / Math.max(n - 2, 1);
-  return { b0, b1, se1: sxx > 0 ? Math.sqrt(s2 / sxx) : NaN, res };
-}
-function baRegression(rows) {
-  const n = rows.length;
-  if (n < 4) return null;
-  const A = rows.map((e) => 0.5 * Math.log(Math.max(e.human, 0.5) * Math.max(e.auto, 0.5)));
-  const D = rows.map((e) => Math.log(Math.max(e.auto, 0.5) / Math.max(e.human, 0.5)));
-  const f = ols(A, D), g = ols(A, f.res.map(Math.abs));
-  const t2 = STATS.tQuantile(0.975, n - 2), t1 = STATS.tQuantile(0.975, n - 1);
-  const md = STATS.mean(D), sd = Math.sqrt(STATS.variance(D));
-  const tSlope = f.b1 / f.se1;
-  return {
-    n, b0: f.b0, c0: g.b0, c1: g.b1, aRange: [Math.min(...A), Math.max(...A)],
-    slope: [f.b1, f.b1 - t2 * f.se1, f.b1 + t2 * f.se1], pSlope: STATS.tTwoSided(tSlope, n - 2),
-    bias: [md, md - t1 * sd / Math.sqrt(n), md + t1 * sd / Math.sqrt(n)],
-    lo: [md - 1.96 * sd, md - 1.96 * sd - t1 * sd * Math.sqrt(3 / n), md - 1.96 * sd + t1 * sd * Math.sqrt(3 / n)],
-    hi: [md + 1.96 * sd, md + 1.96 * sd - t1 * sd * Math.sqrt(3 / n), md + 1.96 * sd + t1 * sd * Math.sqrt(3 / n)],
-  };
-}
-// the regression and its limits at A = ln(geometric mean), as ratios
-function baLines(R, a) {
-  const d = R.b0 + R.slope[0] * a, w = 1.96 * Math.sqrt(Math.PI / 2) * Math.max(0, R.c0 + R.c1 * a);
-  return [Math.exp(d - w), Math.exp(d), Math.exp(d + w)];
-}
-// geometric-mean ratio automated ÷ human per genotype: exp(mean ln ratio)
-function gmRatios(rows) {
-  return Object.fromEntries(GENOTYPES.map((g) => {
-    const d = rows.filter((e) => e.r.genotype === g).map((e) => Math.log(Math.max(e.auto, 0.5) / Math.max(e.human, 0.5)));
-    return [g, { n: d.length, ratio: d.length ? Math.exp(STATS.mean(d)) : NaN }];
-  }));
-}
+// number formats for the panel: a ratio from ln, with its CI; a plain value with its CI
+const fmtRatio = (v, d = 2) => (v && Number.isFinite(v[0]) ? Math.exp(v[0]).toFixed(d) + " (" + Math.exp(v[1]).toFixed(d) + "–" + Math.exp(v[2]).toFixed(d) + ")" : "–");
+const fmtCi = (v, d = 2) => (v && Number.isFinite(v[0]) ? minus(v[0].toFixed(d) + (v[1] < 0 || v[2] < 0 ? " (" + v[1].toFixed(d) + " to " + v[2].toFixed(d) + ")"
+  : " (" + v[1].toFixed(d) + "–" + v[2].toFixed(d) + ")")) : "–");
+const pooledAgreement = () => (HV && HV.sets[0] ? HV.sets[0].a : null);     // the annotators chosen, together
 
 // The ratio automated ÷ human by group, on ln(ratio): the sections, the slides (mean of a slide's ln ratios) and
 // each group's geometric mean of slide means with its 95 % CI (one-sample t against ln 1 = 0).
@@ -3383,10 +3381,9 @@ function computeHuman() {
     return { ...e, human: num(e.h.human), auto, ratio: auto / e.h.human, log2: Math.log2(Math.max(auto, 0.5) / Math.max(e.h.human, 0.5)) };
   }).filter((e) => Number.isFinite(e.auto) && Number.isFinite(e.human));
   // pooled = the annotators chosen; with one annotator only its own row
-  const sets = [...(ST.annotators.length > 1 ? [["pooled", rows]] : []), ...ST.annotators.map((a) => ["human annotator " + a, rows.filter((e) => e.ann === a)])];
+  const sets = [...(ST.annotators.length > 1 ? [["both annotators", rows]] : []), ...ST.annotators.map((a) => ["annotator " + a, rows.filter((e) => e.ann === a)])];
   const groups = hvGroupsOf(rows, ST.hv.group);
-  return { rows, sets: sets.map(([name, rs]) => ({ name, rows: rs, a: withCi(rs) })), ba: baRegression(rows), gm: gmRatios(rows),
-    groups, comps: hvComparisons(groups, ST.hv.group) };
+  return { rows, sets: sets.map(([name, rs]) => ({ name, rows: rs, a: withCi(rs) })), groups, comps: hvComparisons(groups, ST.hv.group) };
 }
 
 // Ratio by group: sections (small, jittered), slide means (large) and the geometric mean of the slide means with its
@@ -3480,7 +3477,7 @@ function humanGroupsFigure(z) {
 function humanFigure(z) {
   if (ST.hv.plot === "groups") return humanGroupsFigure(z);
   const hv = ST.hv, fs = ST.fontPt * z, W = hv.widthMm * PT_PER_MM * z, H = hv.heightMm * PT_PER_MM * z, C = COLORS();
-  const ba = hv.plot === "ba", rows = HV.rows, pooled = HV.sets[0].a;       // pooled over the annotators chosen
+  const ba = hv.plot === "ba", rows = HV.rows, pooled = pooledAgreement();       // the annotators chosen, together
   const name = (k, d) => (hv.legendNames[k] !== undefined ? hv.legendNames[k] : d);
   const traces = [], shapes = [], annotations = [];
   const fx = (e) => (ba ? Math.sqrt(Math.max(e.human, 0.5) * Math.max(e.auto, 0.5)) : Math.max(e.human, 0.5));
@@ -3514,7 +3511,7 @@ function humanFigure(z) {
   if (ba && !hv.legendPos) Object.assign(layout.legend, { x: 0.02, y: 0.98, xanchor: "left", yanchor: "top", bgcolor: "rgba(255,255,255,0.85)" });
   layout.margin = { l: 10 * z, r: 6 * z + (legendRight ? 44 + Math.max(0, ...entries.map((t) => t.length)) * fs * 0.55 : 0), t: top + 4 * z, b: 10 * z, pad: 0 };
   layout.xaxis = { ...axb, type: "log", range: [Math.log10(r0), Math.log10(r1)], title: { text: toHtml(hv.xlabel || (ba ? "Geometric mean of the two counts" : "Human count (AF488⁺ cells)")) },
-    ...humanTicks(r0, r1), constrain: "domain" };
+    ...humanTicks(r0, r1, ba ? [1, 2, 5] : [1, 3]), constrain: "domain" };
   if (ba) {
     // ratio on a log axis, 0.4–2.5 (wider only if a section falls outside); 1 thin and dotted
     const ratios = ys.map((v) => Math.pow(2, v));
@@ -3523,9 +3520,10 @@ function humanFigure(z) {
     layout.yaxis = { ...axb, type: "log", range: [Math.log10(y0), Math.log10(y1)], tickmode: "array", tickvals: ticks, ticktext: ticks.map(String),
       title: { text: toHtml(hv.ylabel || "Ratio, automated / human count"), standoff: 4 * z } };
     const lines = [{ type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip", x: [r0, r1], y: [1, 1], line: { color: MID, width: 0.5 * z, dash: "dot" } }];
-    const R = HV.ba;
-    if (R) {                     // the regression and its limits over the sections' range of geometric means
-      const as = Array.from({ length: 61 }, (_, i) => R.aRange[0] + (R.aRange[1] - R.aRange[0]) * i / 60), gm = as.map(Math.exp), at = as.map((a) => baLines(R, a));
+    const R = pooled;
+    if (R && Number.isFinite(R.slope[0])) {     // the regression and its limits (fitted ×/÷ fold) over the sections' geometric means
+      const F = R.fold[0], as = Array.from({ length: 61 }, (_, i) => R.aRange[0] + (R.aRange[1] - R.aRange[0]) * i / 60), gm = as.map(Math.exp);
+      const at = as.map((a) => { const f = Math.exp(R.intercept[0] + R.slope[0] * a); return [f / F, f, f * F]; });
       const hover = (k, what) => ({ customdata: gm.map((g, i) => [g3(g), at[i][k].toFixed(2)]), hovertemplate: what + " at %{customdata[0]}: %{customdata[1]}×<extra></extra>" });
       lines.push({ type: "scatter", mode: "lines", showlegend: false, x: gm, y: at.map((v) => v[1]), line: { color: C.fit, width: 0.9 * z }, ...hover(1, "regression") },
         { type: "scatter", mode: "lines", showlegend: false, x: gm, y: at.map((v) => v[0]), line: { color: C.fit, width: 0.9 * z, dash: "dash" }, ...hover(0, "lower 95 % limit") },
@@ -3555,21 +3553,16 @@ function hvAutoStats() {
   const pooled = HV && HV.sets[0] && HV.sets[0].a;
   if (!pooled) return "";
   if (ST.hv.plot === "groups") return "";
-  if (ST.hv.plot === "ba") {
-    const R = HV.ba;
-    if (!R) return "n = " + HV.rows.length + " (too few sections for the regression)";
-    const x = (v) => Math.exp(v).toFixed(2), ci = (v) => x(v[0]) + "× (" + x(v[1]) + "–" + x(v[2]) + ")";
-    return "Bias " + ci(R.bias) + "<br>95 % limits of agreement " + ci(R.lo) + " to " + ci(R.hi) + "<br>Slope " +
-      minus(R.slope[0].toFixed(2) + " (" + R.slope[1].toFixed(2) + " to " + R.slope[2].toFixed(2) + ")") + "<br>n = " + R.n;
-  }
+  if (ST.hv.plot === "ba") return "slope, log ratio on log mean = " + fmtCi(pooled.slope) + "<br>n = " + pooled.n;
   return "CCC = " + pooled.ccc[0].toFixed(2) + "<br>(95 % CI " + pooled.ccc[1].toFixed(2) + "–" + pooled.ccc[2].toFixed(2) + ")";
 }
 
-// log ticks 1-3-10 per decade (1-2-5 crowds a small square plot), as plain numbers, horizontal
-function humanTicks(lo, hi) {
+// log ticks 1-3-10 per decade (1-2-5 crowds a small square plot; the Bland–Altman x axis spans less and takes 1-2-5),
+// as plain numbers, horizontal
+function humanTicks(lo, hi, steps = [1, 3]) {
   const t = [], dd = decades(lo, hi);
   if (!dd) return {};
-  for (let d = dd.d0; d <= dd.d1; d += dd.every) for (const k of [1, 3]) { const v = k * Math.pow(10, d); if (v >= lo * 0.999 && v <= hi * 1.001) t.push(v); }
+  for (let d = dd.d0; d <= dd.d1; d += dd.every) for (const k of steps) { const v = k * Math.pow(10, d); if (v >= lo * 0.999 && v <= hi * 1.001) t.push(v); }
   return { tickmode: "array", tickvals: t, ticktext: t.map(fmtTick), tickangle: 0 };
 }
 
@@ -3579,11 +3572,13 @@ function updateHuman() {
   const key = ST.method + "|" + ST.annotators + "|" + ST.hv.group + "|" + ST.hv.filters + "|" + (ST.hv.filters ? JSON.stringify([ST.exps, ST.qcOnly, ST.noUncertain, ST.humanOnly, ST.region]) : "");
   if (key !== HV_KEY || !HV) {
     HV = computeHuman(); HV_KEY = key;
-    console.log("Geometric-mean ratio, automated / human (" + ST.method + ", " + annotatorWords() + "): " +
-      GENOTYPES.map((g) => g + " " + (Number.isFinite(HV.gm[g].ratio) ? HV.gm[g].ratio.toFixed(3) : "–") + " (n = " + HV.gm[g].n + ")").join(", "));
+    const a = pooledAgreement();
+    if (a) console.log("Geometric-mean ratio, automated / human (" + ST.method + ", " + annotatorWords() + "; 95 % CI, " + HV_BOOT + " bootstrap resamples): " +
+      GENOTYPES.map((g) => g + " " + fmtRatio(a["gm_" + g], 3) + ", n = " + a.nBy[g]).join("; "));
   }
   const meth = METHODS.find((m) => ST.method.startsWith(m.key + "-")), k = ST.method.split("-")[1];
-  $("hvMethod").textContent = (meth ? meth.label + ", " + k + " SD" : ST.method) + (ST.method === "gauss-5" ? " (the counting method)" : "") +
+  $("humanBox").querySelector("h2").textContent = { scatter: "Human against automated counts", ba: "Bland–Altman (ratio)", groups: "Ratio automated / human by group" }[ST.hv.plot];
+  $("hvMethod").textContent = (meth ? meth.label + ", " + k + " SD" : ST.method) +
     " · " + annotatorWords() + " · " + HV.rows.length + " human-counted section" + (HV.rows.length === 1 ? "" : "s") + (ST.hv.filters ? " (the page's filters applied)" : "");
   if (!HV.rows.length) { $("hvStats").innerHTML = "<p class='note'>" + (ST.annotators.length ? "No human-counted section." : "No human annotator is ticked.") + "</p>"; $("hvTable").innerHTML = ""; Plotly.purge("plot4"); DRAWN4 = false; return; }
   if (editStale(ST.hv.statsText, hvAutoStats(), false)) ST.hv.statsText = null;
@@ -3601,23 +3596,35 @@ function updateHuman() {
       if (id) window.open("section_browser.html#" + encodeURIComponent(id), "_blank");
     });
   }
-  const ci = (v, ratio) => {
-    if (!v) return "–";
-    const f = (x) => (ratio ? Math.pow(2, x) : x).toFixed(2);
-    return f(v[0]) + " (" + f(v[1]) + "–" + f(v[2]) + ")";
-  };
-  let html = "<table class='st'><tr><th>Sections</th><th>n</th><th>Lin's CCC, log counts</th><th>Lin's CCC, counts</th><th>Bias, automated ÷ human (×)</th>" +
-    "<th>95 % LoA, lower (×)</th><th>95 % LoA, upper (×)</th><th>Spearman ρ</th><th>Median ratio</th></tr>";
-  for (const s of HV.sets) {
-    const a = s.a;
-    html += "<tr><td>" + s.name + "</td><td>" + s.rows.length + "</td>" + (a ? "<td>" + ci(a.ccc) + "</td><td>" + ci(a.cccRaw) + "</td><td>" + ci(a.bias, true) + "</td><td>" +
-      ci(a.lo, true) + "</td><td>" + ci(a.hi, true) + "</td><td>" + ci(a.rho) + "</td><td>" + a.medianRatio.toFixed(2) + "</td>" : "<td colspan='8'>too few sections</td>") + "</tr>";
+  const showAll = ST.hv.plot !== "groups";
+  let html = "";
+  if (showAll) {
+    html += "<table class='st'><tr><th>Annotator</th><th>n</th><th>Lin's CCC, log counts</th><th>Lin's CCC, counts</th><th>Bias, automated / human (×)</th>" +
+      "<th>Slope, log ratio on log mean</th><th>95 % LoA, regression-based (fitted ratio ×/÷)</th><th>Unadjusted 95 % LoA (×)</th>" +
+      "<th>Spearman ρ (human vs automated)</th><th>Median ratio</th></tr>";
+    for (const st of HV.sets) {
+      const a = st.a;
+      html += "<tr><td>" + st.name + "</td><td>" + st.rows.length + "</td>" + (a ? "<td>" + fmtCi(a.ccc) + "</td><td>" + fmtCi(a.cccRaw) + "</td><td>" + fmtRatio(a.bias) +
+        "</td><td>" + fmtCi(a.slope) + "</td><td>×/÷ " + fmtCi(a.fold) + "</td><td>" + fmtRatio(a.lo) + " to " + fmtRatio(a.hi) + "</td><td>" + fmtCi(a.rho) +
+        "</td><td>" + a.medianRatio.toFixed(2) + "</td>" : "<td colspan='8'>too few sections</td>") + "</tr>";
+    }
+    html += "</table>";
+    const a = pooledAgreement();
+    if (a) {
+      html += "<table class='st'><tr><th>Genotype</th><th>n</th><th>Geometric-mean ratio, automated / human (95 % CI)</th></tr>" +
+        GENOTYPES.map((g) => "<tr><td>" + g + "</td><td>" + a.nBy[g] + "</td><td>" + fmtRatio(a["gm_" + g]) + "</td></tr>").join("") + "</table>";
+      const dbl = Math.pow(2, a.slope[0]);
+      html += "<p class='note'>Agreement of the automated with the human count of AF488⁺ cells per section (" + annotatorWords() + "). Lin's concordance correlation " +
+        "coefficient on log₁₀ counts (1 only when every section lies on the identity line) and on counts; Spearman ρ between the human and the automated counts. " +
+        "Bland–Altman analysis on the ratio automated / human: bias, the geometric mean of the ratios; slope, the least-squares slope of ln(ratio) on ln(geometric mean " +
+        "of the two counts): the ratio changes by ×2<sup>slope</sup> per doubling of the count (here ×" + dbl.toFixed(2) + ", " + (dbl >= 1 ? "+" : "−") +
+        Math.abs((dbl - 1) * 100).toFixed(0) + " %). Regression-based 95 % limits of agreement: the fitted ratio ×/÷ exp(1.96 × residual SD of the regression) " +
+        "(Bland &amp; Altman, 1999); unadjusted limits: bias ×/÷ exp(1.96 × SD of ln ratio). Geometric-mean ratio per genotype: the geometric mean of its sections' " +
+        "ratios. 95 % CIs: percentiles of " + HV_BOOT.toLocaleString("en-US") + " bootstrap resamples of sections" + (ST.annotators.length > 1 ? ", stratified by annotator" : "") +
+        "; the plot and the tables use the same resamples." + (a.anyZero ? " A zero count was taken as 0.5." : "") + "</p>";
+    }
   }
-  html += "</table><p class='note'>Lin's concordance correlation coefficient on log₁₀ counts (1 only when every section lies on the identity line) and on the counts; " +
-    "Bland–Altman on log₂(automated ÷ human): bias = mean, 95 % limits of agreement = bias ± 1.96 SD, back-transformed to ratios; a zero count is taken as 0.5. " +
-    "95 % CIs: percentiles of " + HV_BOOT.toLocaleString("en-US") + " bootstrap resamples of sections (seeded; within each annotator for the pooled row), as 01_validation. " +
-    "The point estimates reproduce the notebook's for the counting method; the CIs differ slightly because the random draws differ.</p>";
-  if (HV.groups.length) {
+  if (HV.groups.length && ST.hv.plot === "groups") {
     const x = (v) => (Number.isFinite(v) ? Math.exp(v).toFixed(2) + "×" : "–");
     html += "<h2>Ratio by group (" + annotatorWords() + "; slides as the unit)</h2><table class='st'><tr><th>Group</th><th>Sections</th><th>Slides</th>" +
       "<th>Geometric mean of slide means (95 % CI)</th><th>P (ratio = 1, one-sample t on slides)</th><th>Geometric mean of sections</th></tr>";
@@ -3648,25 +3655,11 @@ function updateHuman() {
         html += "</table>";
       }
     }
-    html += "<p class='note'>Ratio = automated ÷ human count of a section (a zero count taken as 0.5), analysed as ln(ratio). A slide's value is the mean of its sections' ln(ratio) " +
+    html += "<p class='note'>Ratio = automated ÷ human count of a section" + (HV.rows.some((e) => e.human === 0 || e.auto === 0) ? " (a zero count taken as 0.5)" : "") + ", analysed as ln(ratio). A slide's value is the mean of its sections' ln(ratio) " +
       "(their geometric mean as a ratio); a group's is the mean of its slide means with a t-based 95 % CI, back-transformed. WT3 against GD1: Welch t and Mann–Whitney on the slide " +
       "means, Mann–Whitney on sections (overstates the evidence: sections of a slide are related), and a linear mixed model of ln(ratio) on the sections with genotype" +
       (ST.hv.group === "genotype" ? " and experiment" : "") + " fixed" + (ST.annotators.length > 1 ? ", annotator fixed (the annotators counted different areas)" : "") +
-      " and slide as a random intercept (REML, Wald CI and P, as the dot plot's LMM). Experiments: one-way ANOVA F test on the slide means. With few slides per group these tests have little power.</p>";
-  }
-  const R = HV.ba;
-  if (R) {
-    const x = (v) => Math.exp(v).toFixed(2) + "×", ci = (v) => x(v[0]) + " (" + x(v[1]) + "–" + x(v[2]) + ")";
-    html += "<h2>Bland–Altman as on the plot (" + annotatorWords() + ")</h2><table class='st'><tr><th>n</th><th>Bias (95 % CI)</th><th>95 % LoA, lower (95 % CI)</th>" +
-      "<th>95 % LoA, upper (95 % CI)</th><th>Slope of log ratio on log geometric mean (95 % CI)</th><th>P (slope)</th><th>Limits' half-width</th>" +
-      GENOTYPES.map((g) => "<th>Geometric-mean ratio, " + g + "</th>").join("") + "</tr><tr><td>" + R.n + "</td><td>" + ci(R.bias) + "</td><td>" + ci(R.lo) + "</td><td>" + ci(R.hi) +
-      "</td><td>" + minus(R.slope[0].toFixed(3) + " (" + R.slope[1].toFixed(3) + " to " + R.slope[2].toFixed(3) + ")") + "</td><td>" + Pfull(R.pSlope) + "</td><td>" +
-      "1.96·√(π/2)·(" + minus(R.c0.toFixed(3)) + (R.c1 < 0 ? " − " : " + ") + Math.abs(R.c1).toFixed(3) + "·ln GM)</td>" +
-      GENOTYPES.map((g) => "<td>" + (Number.isFinite(HV.gm[g].ratio) ? HV.gm[g].ratio.toFixed(3) + " (n = " + HV.gm[g].n + ")" : "–") + "</td>").join("") + "</tr></table>" +
-      "<p class='note'>The Bland–Altman plot regresses ln(automated ÷ human) on ln(geometric mean of the two counts) by least squares (line; slope with its t-based 95 % CI, " +
-      "n − 2 df); its 95 % limits follow the regression of the absolute residuals on ln(geometric mean): regression ± 1.96·√(π/2)·(c₀ + c₁·ln GM) (Bland &amp; Altman 1999). " +
-      "Bias, mean of ln ratio with its t-based 95 % CI; limits of agreement, bias ± 1.96 SD with 95 % CI ± t·√(3 SD²/n). These CIs are the usual formulas, not the " +
-      "bootstrap of the table above, so they differ slightly from it.</p>";
+      " and slide as a random intercept (REML, Wald CI and P). Experiments: one-way ANOVA F test on the slide means. With few slides per group these tests have little power.</p>";
   }
   $("hvStats").innerHTML = html;
   const head = ["", "Section", "Genotype", "Experiment", "Annotator", "Counted area", "Human", "Automated", "Automated ÷ human", "log₂ ratio"];
@@ -3700,12 +3693,10 @@ function humanMethods() {
   return "Agreement with human counts. " + (two ? "Two investigators" : "An investigator") + " counted AF488⁺ cells by hand, one point per labelled cell on the AF488 image " +
     "(maximum over z): " + ST.annotators.map((a) => area[a]).join("; ") + ". The automated count (" + (meth ? methodPhrase(meth, k) : ST.method) +
     ") was taken in the same area of the same sections. Agreement was summarised by Lin's concordance correlation coefficient on log₁₀ counts, " +
-    "Bland–Altman analysis of log₂(automated ÷ human) (bias and 95 % limits of agreement, bias ± 1.96 SD, back-transformed to ratios) and " +
-    "Spearman's ρ, with 95 % confidence intervals from " + HV_BOOT.toLocaleString("en-US") + " bootstrap resamples of sections" + (two ? " (stratified by annotator when pooled)." : ".") +
-    (ST.hv.plot === "ba" ? " In the Bland–Altman plot, ln(automated ÷ human) was regressed on ln(geometric mean of the two counts) by least squares, and the 95 % limits of agreement " +
-      "were derived from the regression of the absolute residuals on ln(geometric mean), as regression ± 1.96·√(π/2)·(c₀ + c₁·ln GM) (Bland and Altman, 1999); the slope is given " +
-      "with its t-based 95 % CI, the bias (mean log ratio) with its t-based 95 % CI and the constant limits of agreement (bias ± 1.96 SD) with 95 % CIs from their approximate " +
-      "standard error √(3 SD²/n)." : "") +
+    "Bland–Altman analysis of the ratio automated / human on the log scale (bias, the geometric mean of the ratios; ln(ratio) regressed on ln(geometric mean of the two " +
+    "counts) by least squares, with regression-based 95 % limits of agreement, the fitted ratio ×/÷ exp(1.96 × residual SD) (Bland and Altman, 1999), and unadjusted " +
+    "limits, the bias ×/÷ exp(1.96 × SD of ln ratio)) and Spearman's ρ. All 95 % confidence intervals are percentiles of " + HV_BOOT.toLocaleString("en-US") +
+    " bootstrap resamples of sections" + (two ? ", stratified by annotator." : ".") +
     (ST.hv.plot === "groups" ? " The ratio automated ÷ human was compared " + (ST.hv.group === "experiment" ? "between experiments by a one-way ANOVA on slide means of ln(ratio)"
       : "between WT3 and GD1" + (ST.hv.group === "geno_exp" ? " within each experiment" : "") + " with slides as the unit: Welch's t-test and the Mann–Whitney U test on slide means " +
         "of ln(ratio) (each slide's mean over its sections), and a linear mixed model of ln(ratio) with genotype" + (ST.hv.group === "genotype" ? " and experiment" : "") +
