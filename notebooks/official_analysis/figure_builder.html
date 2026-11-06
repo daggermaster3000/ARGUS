@@ -244,7 +244,9 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
     <div class="row"><label><input type="checkbox" id="hvOn">show the human against automated panel</label></div>
     <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>human annotator 1</label><label><input type="checkbox" data-ann="2" checked>human annotator 2</label></div>
     <p class="hint">Every human-counted section of the annotators ticked: the human count against the automated count of the positivity method chosen above, in the area the human counted (annotator 1 the whole section; annotator 2 from 50 µm before the junction line on). The same ticks also apply to the human counts everywhere else on the page.</p>
-    <div class="row"><label>Plot <select id="hvPlot"><option value="scatter">automated against human (log–log)</option><option value="ba">Bland–Altman (ratio)</option></select></label></div>
+    <div class="row"><label>Plot <select id="hvPlot"><option value="scatter">automated against human (log–log)</option><option value="ba">Bland–Altman (ratio)</option><option value="groups">ratio by group: sections, slide means and tests</option></select></label>
+      <label title="The groups of the ratio-by-group plot and of its table. Genotype × experiment compares WT3 with GD1 within each experiment; experiment compares the experiments (both genotypes together).">Group by <select id="hvGroup"><option value="genotype">genotype</option><option value="geno_exp">genotype × experiment</option><option value="experiment">experiment</option></select></label></div>
+    <p class="hint">Ratio by group: one small marker per human-counted section (automated ÷ human), one large marker per slide (the geometric mean of its sections), and the geometric mean of the slide means with its 95 % CI. The tests use slides as the unit (sections of one slide are not independent): Welch t and Mann–Whitney on the slide means of ln(ratio), and a linear mixed model of ln(ratio) on the sections with the slide as a random intercept. Each group's ratio is also tested against 1 (one-sample t on its slide means).</p>
     <div class="row"><label><input type="checkbox" id="hvFilters">apply the page's filters (experiments, QC …)</label><label>Marker <input type="number" id="hvSize" step="0.5" min="0.5"> pt</label></div>
     <div class="row"><label>Width <input type="number" id="hvWidthMm" step="1" min="20"> mm</label><label>Height <input type="number" id="hvHeightMm" step="1" min="20"> mm</label></div>
     <label>Title<textarea id="hvTitle" rows="1"></textarea></label>
@@ -1286,7 +1288,7 @@ const DEFAULTS = {
   ds: { on: true, unit: "section", f: "crossed / junction_mm", of: "away", group: "genotype", side: "all", region: "all", kind: "kde",
     hnorm: "density", binBy: "number", bins: 30, binWidth: 25, bw: "silverman", bwFactor: 1, layout: "overlay", logX: false, xmin: null, xmax: null,
     medians: true, stats: true, statsText: null, statsPos: null, widthMm: 80, heightMm: 60, sizeAuto: true, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null },
-  hv: { on: true, plot: "scatter", filters: false, size: 4, widthMm: 95, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null,
+  hv: { on: true, plot: "scatter", group: "genotype", gstats: {}, filters: false, size: 4, widthMm: 95, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null,
     statsText: null, statsPos: null },
 };
 // publication greys: WT3 filled dark grey, GD1 open white, black edges; black bars, lines and text
@@ -1424,6 +1426,7 @@ function buildControls() {
   };
   $("bReset").onclick = () => { ST.statsText = {}; ST.statsPos = {}; ST.legendNames = {}; ST.legendPos = null; ST.title = ""; ST.xticks = ""; Object.assign(ST.sc, { title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null });
     for (const o of [ST.ds, ST.hv]) Object.assign(o, { title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null, statsText: null, statsPos: null });
+    ST.hv.gstats = {};
     writeControls(); update(); };
 }
 
@@ -1476,7 +1479,9 @@ function setState(s) {
     hv: Object.assign(base.hv, (s && s.hv) || {}) });
   if (!["section", "object"].includes(ST.ds.unit)) ST.ds.unit = "section";
   if (!(ST.ds.kind in KIND_NAMES)) ST.ds.kind = DEFAULTS.ds.kind;
-  if (!["scatter", "ba"].includes(ST.hv.plot)) ST.hv.plot = "scatter";
+  if (!["scatter", "ba", "groups"].includes(ST.hv.plot)) ST.hv.plot = "scatter";
+  if (!["genotype", "geno_exp", "experiment"].includes(ST.hv.group)) ST.hv.group = "genotype";
+  ST.hv.gstats = Object.fromEntries(Object.entries(ST.hv.gstats || {}).filter(([, v]) => isEdit(v)));
   ST.annotators = Array.isArray(ST.annotators) ? [1, 2].filter((a) => ST.annotators.map(Number).includes(a)) : [1, 2];
   if (!METHODS.some((m) => m.ks.some((k) => m.key + "-" + k === ST.method)) && METHODS.length) ST.method = "gauss-5";
   if (!["genotype", "geno_exp"].includes(ST.group)) ST.group = "genotype";      // a stale or mistyped saved value
@@ -2599,6 +2604,10 @@ function panelEdits(gd, o, isBusy, autoStats) {
           else if (nm === "xtitle") o.xlabel = fromHtml(v);
           else if (nm === "ytitle") o.ylabel = fromHtml(v);
           else if (nm === "stats") o.statsText = makeEdit(v, autoStats());
+          else if (nm.startsWith("gstat:")) {
+            const i = +nm.slice(6), e = makeEdit(v, hvCompText(HV.comps[i]));
+            if (e) ST.hv.gstats[i] = e; else delete ST.hv.gstats[i];
+          }
           else if (nm.startsWith("facet:")) o.legendNames[nm.slice(6)] = fromHtml(v);
           else continue;
         } else if (nm === "stats") o.statsPos = { x: a.x, y: a.y };
@@ -3145,7 +3154,7 @@ function distMethods() {
 // positivity method in the same area (section_browser.py: annotator 1 the whole section, annotator 2 from 50 µm before
 // the extended junction line on). Agreement as 01_validation: Lin's CCC on log10 counts, Bland–Altman on
 // log2(automated ÷ human), Spearman ρ; 95 % CIs from 2,000 section bootstraps (within annotator when pooled).
-const HV_INPUTS = { hvOn: "on", hvPlot: "plot", hvFilters: "filters", hvSize: "size", hvWidthMm: "widthMm", hvHeightMm: "heightMm",
+const HV_INPUTS = { hvOn: "on", hvPlot: "plot", hvGroup: "group", hvFilters: "filters", hvSize: "size", hvWidthMm: "widthMm", hvHeightMm: "heightMm",
   hvTitle: "title", hvXlabel: "xlabel", hvYlabel: "ylabel" };
 const HV_NUMERIC = new Set(["size", "widthMm", "heightMm"]);
 const HV_BOOT = 2000, HV_SEED = 20261105, ANN_SYMBOL = { 1: "circle", 2: "square" };
@@ -3242,6 +3251,77 @@ function gmRatios(rows) {
   }));
 }
 
+// The ratio automated ÷ human by group, on ln(ratio): the sections, the slides (mean of a slide's ln ratios) and
+// each group's geometric mean of slide means with its 95 % CI (one-sample t against ln 1 = 0).
+function oneSample(v) {
+  const n = v.length, m = n ? STATS.mean(v) : NaN;
+  if (n < 2) return { n, m, lo: NaN, hi: NaN, p: NaN };
+  const se = Math.sqrt(STATS.variance(v) / n), half = STATS.tQuantile(0.975, n - 1) * se;
+  return { n, m, lo: m - half, hi: m + half, p: se > 0 ? STATS.tTwoSided(m / se, n - 1) : NaN };
+}
+function hvGroupsOf(rows, mode) {
+  const exps = [...new Set(rows.map((e) => e.r.experiment))].sort((a, b) => +a - +b);
+  const defs = mode === "experiment" ? exps.map((e, i) => ({ key: "experiment " + e, g: null, e, x: i * 1.4 }))
+    : mode === "geno_exp" ? exps.flatMap((e, i) => GENOTYPES.map((g, j) => ({ key: g + " e" + e, g, e, x: i * 2.6 + j })))
+    : GENOTYPES.map((g, j) => ({ key: g, g, e: null, x: j }));
+  return defs.map((d) => {
+    const sec = rows.filter((e) => (d.g === null || e.r.genotype === d.g) && (d.e === null || e.r.experiment === d.e)).map((e) => ({ e, y: e.log2 * Math.LN2 }));
+    const by = {};
+    for (const v of sec) (by[v.e.r.slide] = by[v.e.r.slide] || { g: v.e.r.genotype, ys: [] }).ys.push(v.y);
+    const slides = Object.entries(by).map(([slide, o]) => ({ slide, g: o.g, y: STATS.mean(o.ys), n: o.ys.length }));
+    return { ...d, sec, slides, one: oneSample(slides.map((v) => v.y)) };
+  }).filter((d) => d.sec.length);
+}
+// one-way ANOVA F test on the slide means (the experiments)
+function anova(groupsY) {
+  const gsY = groupsY.filter((v) => v.length), all = gsY.flat(), k = gsY.length, N = all.length;
+  if (k < 2 || N - k < 1) return null;
+  const gm = STATS.mean(all);
+  let ssb = 0, ssw = 0;
+  for (const v of gsY) { const m = STATS.mean(v); ssb += v.length * (m - gm) ** 2; for (const y of v) ssw += (y - m) ** 2; }
+  const df1 = k - 1, df2 = N - k, F = (ssb / df1) / (ssw / df2);
+  return { F, df1, df2, p: ssw > 0 ? STATS.ibeta(df2 / (df2 + df1 * F), df2 / 2, df1 / 2) : NaN };
+}
+// WT3 against GD1 (within each experiment for genotype × experiment), or the experiments against each other
+function hvComparisons(gs, mode) {
+  if (mode === "experiment") {
+    const a = anova(gs.map((g) => g.slides.map((v) => v.y)));
+    return gs.length > 1 ? [{ kind: "anova", label: "experiments", x: (gs[0].x + gs[gs.length - 1].x) / 2 + 0.2, anova: a, n: gs.reduce((t, g) => t + g.slides.length, 0) }] : [];
+  }
+  const out = [];
+  for (const e of [...new Set(gs.map((g) => g.e))]) {
+    const a = gs.find((g) => g.g === "WT3" && g.e === e), b = gs.find((g) => g.g === "GD1" && g.e === e);
+    if (!a || !b) continue;
+    const sa = a.slides.map((v) => v.y), sb = b.slides.map((v) => v.y);
+    out.push({ kind: "pair", a, b, label: e === null ? "all experiments" : "experiment " + e, x: (a.x + b.x) / 2 + 0.2,
+      welch: STATS.welch(sa, sb), mwSlides: STATS.mannWhitney(sa, sb), mwSections: STATS.mannWhitney(a.sec.map((v) => v.y), b.sec.map((v) => v.y)),
+      lmm: hvLmm(a.sec.concat(b.sec), e === null) });
+  }
+  return out;
+}
+// ln(ratio) ~ genotype (+ experiment, + annotator when both are in) + (1 | slide), REML
+function hvLmm(sec, withExp) {
+  const exps = withExp ? [...new Set(sec.map((v) => v.e.r.experiment))].sort((a, b) => +a - +b) : [];
+  const anns = [...new Set(sec.map((v) => v.e.ann))].sort();
+  const slides = new Set(sec.map((v) => v.e.r.slide)).size;
+  if (slides < 3) return { error: "needs at least 3 slides" };
+  try {
+    const r = STATS.fitModel({ kind: "lmm", y: sec.map((v) => v.y), term: 1, groups: sec.map((v) => v.e.r.slide),
+      X: sec.map((v) => [1, v.e.r.genotype === "WT3" ? 1 : 0, ...exps.slice(1).map((x) => (v.e.r.experiment === x ? 1 : 0)), ...anns.slice(1).map((x) => (v.e.ann === x ? 1 : 0))]) });
+    return r ? { ...r, experimentTerm: exps.length > 1, annotatorTerm: anns.length > 1, slides, sections: sec.length } : { error: "could not be fitted" };
+  } catch (err) { return { error: String((err && err.message) || err) }; }
+}
+// the statistics written above one comparison
+function hvCompText(c) {
+  if (!c) return "";
+  if (c.kind === "anova") return c.anova ? "slides: ANOVA F(" + c.anova.df1 + ", " + c.anova.df2 + ") = " + c.anova.F.toFixed(2) + ", " + P(c.anova.p) : "too few slides";
+  const w = c.welch, lines = [];
+  if (w) lines.push("WT3/GD1 " + Math.exp(w.diff).toFixed(2) + "× (" + Math.exp(w.lo).toFixed(2) + "–" + Math.exp(w.hi).toFixed(2) + ")", "slides: Welch " + P(w.p) + ", MW " + P(c.mwSlides ? c.mwSlides.p : NaN));
+  else lines.push("too few slides for Welch");
+  if (c.lmm && !c.lmm.error) lines.push("LMM " + P(c.lmm.p));
+  return lines.join("<br>");
+}
+
 function computeHuman() {
   const keep = ST.hv.filters ? new Set(selected()) : null;
   const rows = humanEntries().filter((e) => !keep || keep.has(e.r)).map((e) => {
@@ -3250,10 +3330,89 @@ function computeHuman() {
   }).filter((e) => Number.isFinite(e.auto) && Number.isFinite(e.human));
   // pooled = the annotators chosen; with one annotator only its own row
   const sets = [...(ST.annotators.length > 1 ? [["pooled", rows]] : []), ...ST.annotators.map((a) => ["human annotator " + a, rows.filter((e) => e.ann === a)])];
-  return { rows, sets: sets.map(([name, rs]) => ({ name, rows: rs, a: withCi(rs) })), ba: baRegression(rows), gm: gmRatios(rows) };
+  const groups = hvGroupsOf(rows, ST.hv.group);
+  return { rows, sets: sets.map(([name, rs]) => ({ name, rows: rs, a: withCi(rs) })), ba: baRegression(rows), gm: gmRatios(rows),
+    groups, comps: hvComparisons(groups, ST.hv.group) };
+}
+
+// Ratio by group: sections (small, jittered), slide means (large) and the geometric mean of the slide means with its
+// 95 % CI, on a log ratio axis; the tests above each comparison. Markers keep their genotype (WT3 filled circle, GD1
+// open square) whatever the grouping.
+function humanGroupsFigure(z) {
+  const hv = ST.hv, fs = ST.fontPt * z, W = hv.widthMm * PT_PER_MM * z, H = hv.heightMm * PT_PER_MM * z, C = COLORS();
+  const name = (k, d) => (hv.legendNames[k] !== undefined ? hv.legendNames[k] : d);
+  const gs = HV.groups, traces = [], annotations = [], seen = new Set(), allY = [];
+  const gcol = (g) => groupColor({ key: g, g });
+  for (const grp of gs) {
+    for (const g of GENOTYPES) {
+      const sec = grp.sec.filter((v) => v.e.r.genotype === g), sl = grp.slides.filter((v) => v.g === g);
+      if (!sec.length) continue;
+      const gc = groupColor({ key: grp.g ? grp.key : g, g });
+      traces.push({ type: "scatter", mode: "markers", meta: "leg:" + g, legendgroup: g, name: name(g, g), showlegend: !seen.has(g),
+        x: sec.map((v) => grp.x - 0.12 + ST.jitter * seededJitter(v.e.r.id + v.e.ann, 1)), y: sec.map((v) => Math.exp(v.y)),
+        customdata: sec.map((v) => [v.e.r.id, v.e.r.slide, v.e.label, v.e.human, v.e.auto, Math.exp(v.y).toFixed(2)]),
+        hovertemplate: "%{customdata[0]} (%{customdata[2]})<br>%{customdata[1]}<br>human %{customdata[3]}, automated %{customdata[4]}: %{customdata[5]}×<extra></extra>",
+        marker: { symbol: SYMBOL[g], size: ST.secSize * z, color: gc.fill, opacity: ST.secOpacity, line: { color: gc.edge, width: 0.3 * z } } });
+      seen.add(g);
+      traces.push({ type: "scatter", mode: "markers", legendgroup: g, showlegend: false,
+        x: sl.map((v) => grp.x + 0.4 + 0.04 * seededJitter(v.slide, 2)), y: sl.map((v) => Math.exp(v.y)),
+        customdata: sl.map((v) => [v.slide, v.n, Math.exp(v.y).toFixed(2)]),
+        hovertemplate: "%{customdata[0]}<br>geometric mean of %{customdata[1]} sections: %{customdata[2]}×<extra></extra>",
+        marker: { symbol: SYMBOL[g], size: ST.slideSize * z, color: gc.fill, line: { color: gc.edge, width: 0.8 * z } } });
+      sec.forEach((v) => allY.push(Math.exp(v.y)));
+      sl.forEach((v) => allY.push(Math.exp(v.y)));
+    }
+    const o = grp.one;
+    if (Number.isFinite(o.m)) {
+      const cx = grp.x + 0.09, cap = 0.05, m = Math.exp(o.m), lo = Math.exp(o.lo), hi = Math.exp(o.hi);
+      if (Number.isFinite(lo)) {
+        traces.push({ type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip", line: { color: COLORS().mean, width: 1.2 * z },
+          x: [cx, cx, null, cx - cap, cx + cap, null, cx - cap, cx + cap], y: [lo, hi, null, lo, lo, null, hi, hi] });
+      }
+      allY.push(m);              // the range follows the data; a CI from two or three slides can be far wider and is clipped
+      traces.push({ type: "scatter", mode: "lines", showlegend: false, line: { color: COLORS().mean, width: 1.6 * z }, x: [grp.x - 0.06, grp.x + 0.24], y: [m, m],
+        hovertemplate: "geometric mean of " + o.n + " slide means: " + m.toFixed(2) + "×" + (Number.isFinite(lo) ? " (95 % CI " + lo.toFixed(2) + "–" + hi.toFixed(2) + ")" : "") + "<extra></extra>" });
+    }
+  }
+  if (ST.legendLayers) {
+    traces.push({ type: "scatter", mode: "markers", meta: "leg:section", name: name("section", "section"), x: [null], y: [null], hoverinfo: "skip", marker: { symbol: "circle", size: ST.secSize * z, color: LIGHT, line: { color: INK, width: 0.3 * z } } },
+      { type: "scatter", mode: "markers", meta: "leg:slide", name: name("slide", "slide (geometric mean)"), x: [null], y: [null], hoverinfo: "skip", marker: { symbol: "circle", size: ST.slideSize * z, color: LIGHT, line: { color: INK, width: 0.8 * z } } },
+      { type: "scatter", mode: "lines", meta: "leg:mean", name: name("mean", "geometric mean of slides, 95 % CI"), x: [null], y: [null], hoverinfo: "skip", line: { color: COLORS().mean, width: 1.6 * z } });
+  }
+  const xs = gs.map((g) => g.x), xr = [Math.min(...xs) - 0.55, Math.max(...xs) + 0.7];
+  traces.unshift({ type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip", x: xr, y: [1, 1], line: { color: MID, width: 0.5 * z, dash: "dot" } });
+  const y0 = Math.min(0.4, ...allY.map((v) => v / 1.12)), y1 = Math.max(2.5, ...allY.map((v) => v * 1.12));
+  const ticks = [0.125, 0.25, 0.5, 1, 2, 4, 8].filter((v) => v >= y0 * 0.999 && v <= y1 * 1.001);
+  // the tests above each comparison (editable on the plot; replaced when the numbers change)
+  let statLines = 0;
+  if (ST.showStats) HV.comps.forEach((c, i) => {
+    const text = isEdit(hv.gstats[i]) ? hv.gstats[i].text : hvCompText(c);
+    statLines = Math.max(statLines, text.split(/<br>/i).length);
+    annotations.push({ name: "gstat:" + i, text, xref: "x", yref: "paper", x: c.x, y: 1, yanchor: "bottom", xanchor: "center", yshift: 3 * z,
+      showarrow: false, align: "center", font: { size: fs * 0.92, color: C.text } });
+  });
+  const titleLines = hv.title ? toHtml(hv.title).split(/<br>/i).length : 0;
+  const top = 6 * z + (titleLines ? titleLines * fs * 1.1 * 1.3 + 4 * z : 0) + statLines * fs * 0.92 * 1.25 + 4 * z;
+  const xticktext = gs.map((g) => name(g.key, g.g && g.e !== null ? g.g + "<br>exp " + g.e : g.key) + (ST.showN ? "<br>(" + g.sec.length + " / " + g.slides.length + ")" : ""));
+  const xLines = Math.max(...xticktext.map((t) => t.split(/<br>/i).length)) + (hv.xlabel ? 1.4 : 0);
+  const entries = traces.filter((t) => t.meta && t.showlegend !== false).map((t) => String(t.name));
+  const right = 6 * z + (ST.showLegend && !hv.legendPos ? 44 + Math.max(0, ...entries.map((t) => t.length)) * fs * 0.55 : 0);
+  const axb = baseAxis(C, z, fs);
+  const layout = { width: W, height: H, paper_bgcolor: "#ffffff", plot_bgcolor: "#ffffff", hovermode: "closest",
+    font: { family: "Arial, Helvetica, sans-serif", size: fs, color: C.text }, showlegend: !!ST.showLegend, legend: legendBox(hv.legendPos, fs), annotations,
+    margin: { l: 10 * z, r: right, t: top, b: xLines * fs * 1.25 + 10 * z, pad: 0 },
+    xaxis: { ...axb, range: xr, tickmode: "array", tickvals: xs.map((x) => x + 0.09), ticktext: xticktext, fixedrange: true, title: { text: toHtml(hv.xlabel) } },
+    yaxis: { ...axb, type: "log", range: [Math.log10(y0), Math.log10(y1)], tickmode: "array", tickvals: ticks, ticktext: ticks.map(String),
+      title: { text: toHtml(hv.ylabel || "Ratio, automated / human count"), standoff: 4 * z } } };
+  const plotH = Math.max(H - top - layout.margin.b, 10);
+  if (hv.title) annotations.push({ name: "title", text: toHtml(hv.title), xref: "paper", yref: "paper", x: 0.5, xanchor: "center",
+    y: 1 + (top - 6 * z) / plotH, yanchor: "top", showarrow: false, font: { size: fs * 1.1, color: C.text } });
+  addMinorTicks(layout, z, { skip: ["xaxis"], force: true });
+  return { data: traces, layout };
 }
 
 function humanFigure(z) {
+  if (ST.hv.plot === "groups") return humanGroupsFigure(z);
   const hv = ST.hv, fs = ST.fontPt * z, W = hv.widthMm * PT_PER_MM * z, H = hv.heightMm * PT_PER_MM * z, C = COLORS();
   const ba = hv.plot === "ba", rows = HV.rows, pooled = HV.sets[0].a;       // pooled over the annotators chosen
   const name = (k, d) => (hv.legendNames[k] !== undefined ? hv.legendNames[k] : d);
@@ -3329,6 +3488,7 @@ function humanFigure(z) {
 function hvAutoStats() {
   const pooled = HV && HV.sets[0] && HV.sets[0].a;
   if (!pooled) return "";
+  if (ST.hv.plot === "groups") return "";
   if (ST.hv.plot === "ba") {
     const R = HV.ba;
     if (!R) return "n = " + HV.rows.length + " (too few sections for the regression)";
@@ -3350,7 +3510,7 @@ function humanTicks(lo, hi) {
 function updateHuman() {
   $("humanBox").className = ST.hv.on ? "" : "off";
   if (!ST.hv.on) return;
-  const key = ST.method + "|" + ST.annotators + "|" + ST.hv.filters + "|" + (ST.hv.filters ? JSON.stringify([ST.exps, ST.qcOnly, ST.noUncertain, ST.humanOnly, ST.region]) : "");
+  const key = ST.method + "|" + ST.annotators + "|" + ST.hv.group + "|" + ST.hv.filters + "|" + (ST.hv.filters ? JSON.stringify([ST.exps, ST.qcOnly, ST.noUncertain, ST.humanOnly, ST.region]) : "");
   if (key !== HV_KEY || !HV) {
     HV = computeHuman(); HV_KEY = key;
     console.log("Geometric-mean ratio, automated / human (" + ST.method + ", " + annotatorWords() + "): " +
@@ -3361,6 +3521,7 @@ function updateHuman() {
     " · " + annotatorWords() + " · " + HV.rows.length + " human-counted section" + (HV.rows.length === 1 ? "" : "s") + (ST.hv.filters ? " (the page's filters applied)" : "");
   if (!HV.rows.length) { $("hvStats").innerHTML = "<p class='note'>" + (ST.annotators.length ? "No human-counted section." : "No human annotator is ticked.") + "</p>"; $("hvTable").innerHTML = ""; Plotly.purge("plot4"); DRAWN4 = false; return; }
   if (editStale(ST.hv.statsText, hvAutoStats(), false)) ST.hv.statsText = null;
+  for (const k of Object.keys(ST.hv.gstats)) if (!HV.comps[+k] || editStale(ST.hv.gstats[k], hvCompText(HV.comps[+k]), false)) delete ST.hv.gstats[k];
   const fig = humanFigure(ST.zoom || 1);
   BUSY4 = true;
   Plotly.react("plot4", fig.data, fig.layout, { editable: true, displaylogo: false, responsive: false,
@@ -3390,6 +3551,43 @@ function updateHuman() {
     "Bland–Altman on log₂(automated ÷ human): bias = mean, 95 % limits of agreement = bias ± 1.96 SD, back-transformed to ratios; a zero count is taken as 0.5. " +
     "95 % CIs: percentiles of " + HV_BOOT.toLocaleString("en-US") + " bootstrap resamples of sections (seeded; within each annotator for the pooled row), as 01_validation. " +
     "The point estimates reproduce the notebook's for the counting method; the CIs differ slightly because the random draws differ.</p>";
+  if (HV.groups.length) {
+    const x = (v) => (Number.isFinite(v) ? Math.exp(v).toFixed(2) + "×" : "–");
+    html += "<h2>Ratio by group (" + annotatorWords() + "; slides as the unit)</h2><table class='st'><tr><th>Group</th><th>Sections</th><th>Slides</th>" +
+      "<th>Geometric mean of slide means (95 % CI)</th><th>P (ratio = 1, one-sample t on slides)</th><th>Geometric mean of sections</th></tr>";
+    for (const g of HV.groups) {
+      const o = g.one;
+      html += "<tr><td>" + g.key + "</td><td>" + g.sec.length + "</td><td>" + g.slides.length + "</td><td>" + x(o.m) + (Number.isFinite(o.lo) ? " (" + x(o.lo) + "–" + x(o.hi) + ")" : "") +
+        "</td><td>" + Pfull(o.p) + "</td><td>" + x(STATS.mean(g.sec.map((v) => v.y))) + "</td></tr>";
+    }
+    html += "</table>";
+    if (HV.comps.length) {
+      if (HV.comps[0].kind === "anova") {
+        const a = HV.comps[0].anova;
+        html += "<table class='st'><tr><th>Experiments compared</th><th>One-way ANOVA on slide means of ln(ratio)</th></tr><tr><td>" + HV.groups.map((g) => g.key).join(", ") +
+          "</td><td>" + (a ? "F(" + a.df1 + ", " + a.df2 + ") = " + a.F.toFixed(3) + ", P = " + Pfull(a.p) : "too few slides") + "</td></tr></table>";
+      } else {
+        html += "<table class='st'><tr><th>WT3 against GD1</th><th>Ratio WT3 / GD1 of slide geometric means (95 % CI, Welch)</th><th>Slides: Welch t</th><th>Slides: Mann–Whitney</th>" +
+          "<th>Sections: Mann–Whitney</th><th>LMM of ln(ratio), slide random (95 % CI)</th><th>LMM P</th><th>LMM terms</th></tr>";
+        for (const c of HV.comps) {
+          const w = c.welch, m = c.lmm;
+          html += "<tr><td>" + c.label + "</td><td>" + (w ? Math.exp(w.diff).toFixed(3) + "× (" + Math.exp(w.lo).toFixed(3) + "–" + Math.exp(w.hi).toFixed(3) + ")" : "–") +
+            "</td><td>" + (w ? minus("t = " + w.t.toFixed(2)) + ", df = " + w.df.toFixed(1) + ", P = " + Pfull(w.p) : "–") +
+            "</td><td>" + (c.mwSlides ? "U = " + g3(c.mwSlides.U) + ", P = " + Pfull(c.mwSlides.p) + " (" + c.mwSlides.method + ")" : "–") +
+            "</td><td>" + (c.mwSections ? "U = " + g3(c.mwSections.U) + ", P = " + Pfull(c.mwSections.p) + " (" + c.mwSections.method + ")" : "–") +
+            "</td><td>" + (m && !m.error ? Math.exp(m.est).toFixed(3) + "× (" + Math.exp(m.lo).toFixed(3) + "–" + Math.exp(m.hi).toFixed(3) + ")" : (m && m.error) || "–") +
+            "</td><td>" + (m && !m.error ? Pfull(m.p) : "–") + "</td><td>" + (m && !m.error ? "genotype" + (m.experimentTerm ? " + experiment" : "") + (m.annotatorTerm ? " + annotator" : "") +
+            " + (1 | slide); " + m.sections + " sections, " + m.slides + " slides" : "–") + "</td></tr>";
+        }
+        html += "</table>";
+      }
+    }
+    html += "<p class='note'>Ratio = automated ÷ human count of a section (a zero count taken as 0.5), analysed as ln(ratio). A slide's value is the mean of its sections' ln(ratio) " +
+      "(their geometric mean as a ratio); a group's is the mean of its slide means with a t-based 95 % CI, back-transformed. WT3 against GD1: Welch t and Mann–Whitney on the slide " +
+      "means, Mann–Whitney on sections (overstates the evidence: sections of a slide are related), and a linear mixed model of ln(ratio) on the sections with genotype" +
+      (ST.hv.group === "genotype" ? " and experiment" : "") + " fixed" + (ST.annotators.length > 1 ? ", annotator fixed (the annotators counted different areas)" : "") +
+      " and slide as a random intercept (REML, Wald CI and P, as the dot plot's LMM). Experiments: one-way ANOVA F test on the slide means. With few slides per group these tests have little power.</p>";
+  }
   const R = HV.ba;
   if (R) {
     const x = (v) => Math.exp(v).toFixed(2) + "×", ci = (v) => x(v[0]) + " (" + x(v[1]) + "–" + x(v[2]) + ")";
@@ -3441,7 +3639,12 @@ function humanMethods() {
     (ST.hv.plot === "ba" ? " In the Bland–Altman plot, ln(automated ÷ human) was regressed on ln(geometric mean of the two counts) by least squares, and the 95 % limits of agreement " +
       "were derived from the regression of the absolute residuals on ln(geometric mean), as regression ± 1.96·√(π/2)·(c₀ + c₁·ln GM) (Bland and Altman, 1999); the slope is given " +
       "with its t-based 95 % CI, the bias (mean log ratio) with its t-based 95 % CI and the constant limits of agreement (bias ± 1.96 SD) with 95 % CIs from their approximate " +
-      "standard error √(3 SD²/n)." : "");
+      "standard error √(3 SD²/n)." : "") +
+    (ST.hv.plot === "groups" ? " The ratio automated ÷ human was compared " + (ST.hv.group === "experiment" ? "between experiments by a one-way ANOVA on slide means of ln(ratio)"
+      : "between WT3 and GD1" + (ST.hv.group === "geno_exp" ? " within each experiment" : "") + " with slides as the unit: Welch's t-test and the Mann–Whitney U test on slide means " +
+        "of ln(ratio) (each slide's mean over its sections), and a linear mixed model of ln(ratio) with genotype" + (ST.hv.group === "genotype" ? " and experiment" : "") +
+        (ST.annotators.length > 1 ? " and annotator" : "") + " as fixed effects and slide as a random intercept (REML; Wald 95 % CI and P)") +
+      "; each group's geometric mean of slide means is given with a t-based 95 % CI and tested against 1 (one-sample t-test)." : "");
 }
 
 // ------------------------------------------------------------------ the raw data table
