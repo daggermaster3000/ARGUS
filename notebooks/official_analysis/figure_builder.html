@@ -126,6 +126,9 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
     <div class="row"><label>y from <input type="number" id="ymin" step="any"></label><label>to <input type="number" id="ymax" step="any"></label><span class="hint">empty = from the data</span></div>
     <div class="row" style="width:100%"><label style="width:100%">y ticks <input type="text" id="yticks" style="flex:1" placeholder="e.g. 0, 1, 2, 5, 10 (empty = automatic)"></label></div>
     <div class="row" style="width:100%"><label style="width:100%">tick labels <input type="text" id="yticklabels" style="flex:1" placeholder="same count as the ticks (empty = the values)"></label></div>
+    <div class="row"><label title="Short unlabelled ticks between the major ones, on every panel's numeric axes."><input type="checkbox" id="minor">minor ticks</label>
+      <label title="On a linear axis: how many intervals each gap between two major ticks is cut into (auto: 5 for steps of 1 or 5, 4 for steps of 2). On a log axis the minor ticks are at 2, 3 … 9 of each decade, whatever is set here.">intervals between major ticks <select id="minorN"><option value="auto">auto</option><option value="2">2</option><option value="4">4</option><option value="5">5</option><option value="10">10</option></select></label></div>
+    <p class="hint">Minor ticks apply to every panel. A linear axis with automatic ticks gets its major ticks from the page then, so the minor ones fall exactly between them.</p>
   </details>
   <details open>
     <summary>Text</summary>
@@ -135,6 +138,7 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
     <label>x axis title<textarea id="xlabel" rows="1"></textarea></label>
     <label>Group labels (one per line, in order; empty = automatic)<textarea id="xticks" rows="2" placeholder="WT3&#10;GD1"></textarea></label>
     <div id="legendFields"></div>
+    <div class="row"><label title="Off: text you edited on the plot or below is replaced by the automatic text as soon as the statistics change (another formula, method, filter, model …), so the plot always shows the numbers in the tables. On: your text stays until you clear it."><input type="checkbox" id="statsKeep">keep my edited statistics text when the numbers change</label></div>
     <div id="statFields"></div>
   </details>
   <details open>
@@ -1274,6 +1278,8 @@ const DEFAULTS = {
   widthMm: 62, heightMm: 75, fontPt: 7, zoom: 2.5, effect: "fold", testScale: "log1p",
   model: "lmm", mCount: "crossed", mExposure: "junction_mm", mSucc: "crossed", mTrials: "crossed+home", mOlre: true, mNodes: 15,
   modelOnPlot: "tests",
+  statsKeep: false,      // edited statistics text stays when the statistics change
+  minor: false, minorN: "auto",   // minor ticks on every panel; intervals between two major ticks on a linear axis
   colors: null,          // null = the publication greys (PUBLICATION_COLORS)
   sc: { on: true, x: "area_mm2", y: "crossed / junction_mm", unit: "section", logX: true, logY: false, fit: true, rho: true, size: 3,
     widthMm: 80, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null },
@@ -1341,7 +1347,7 @@ const KNOWN = new Set([...METHOD_VARS, ...SECTION_VARS, ...NOTEBOOK_VARS].map((x
 const INPUTS = ["method", "formula", "group", "qcOnly", "noUncertain", "humanOnly", "region", "showSections", "showSlides", "showMean",
   "showStats", "showLegend", "legendLayers", "showN", "secSize", "slideSize", "secOpacity", "jitter", "scale", "linthresh", "ymin", "ymax", "yticks",
   "yticklabels", "title", "ylabel", "xlabel", "xticks", "widthMm", "heightMm", "fontPt", "zoom", "effect", "testScale",
-  "model", "mCount", "mExposure", "mSucc", "mTrials", "mOlre", "mNodes", "modelOnPlot"];
+  "model", "mCount", "mExposure", "mSucc", "mTrials", "mOlre", "mNodes", "modelOnPlot", "statsKeep", "minor", "minorN"];
 const NUMERIC = new Set(["secSize", "slideSize", "secOpacity", "jitter", "linthresh", "ymin", "ymax", "widthMm", "heightMm", "fontPt", "zoom", "mNodes"]);
 
 function experiments() {
@@ -1475,6 +1481,10 @@ function setState(s) {
   if (!["genotype", "geno_exp"].includes(ST.group)) ST.group = "genotype";      // a stale or mistyped saved value
   if (!(ST.model in MODELS)) ST.model = DEFAULTS.model;
   if (!["tests", "model", "both"].includes(ST.modelOnPlot)) ST.modelOnPlot = "tests";
+  if (!["auto", "2", "4", "5", "10"].includes(String(ST.minorN))) ST.minorN = "auto";
+  ST.minorN = String(ST.minorN);
+  ST.statsText = Object.fromEntries(Object.entries(ST.statsText || {}).filter(([, v]) => isEdit(v)));
+  for (const o of [ST.ds, ST.hv]) if (!isEdit(o.statsText)) o.statsText = null;
   for (const k of ["mCount", "mSucc"]) if (!KNOWN.has(ST[k])) ST[k] = DEFAULTS[k];
   if (!KNOWN.has(ST.mTrials) && ST.mTrials !== TRIALS_SUM) ST.mTrials = DEFAULTS.mTrials;
   if (!EXPOSURES.some((e) => e[0] === ST.mExposure)) ST.mExposure = DEFAULTS.mExposure;
@@ -1837,6 +1847,24 @@ function effectText(c) {
   return ST.effect === "fold" ? "WT3/GD1 " + c.effect.toFixed(2) + "×" : minus("WT3 − GD1 " + (c.effect >= 0 ? "+" : "") + g3(c.effect));
 }
 
+// Edited statistics text is kept as { text, auto }: the text and the automatic text it replaced. It is shown while the
+// statistics are still those (or "keep my text" is ticked); once they change, the plot shows the new automatic text.
+const isEdit = (v) => !!v && typeof v === "object" && typeof v.text === "string" && typeof v.auto === "string";
+const makeEdit = (text, auto) => (text === auto ? null : { text, auto });
+const editStale = (v, auto, pending) => isEdit(v) && !ST.statsKeep && !pending && v.auto !== auto;
+// a model still fitting: its automatic text is not final yet, so an edit is not judged against it
+function statsPending(i) {
+  if (ST.model === "none" || ST.modelOnPlot === "tests" || !LAST || !LAST.models) return false;
+  const s = LAST.models[i];
+  return !!s && !s.error && !s.res;
+}
+function pruneStats() {
+  for (const k of Object.keys(ST.statsText)) {
+    const i = +k, c = LAST.comps[i];
+    if (!c || !isEdit(ST.statsText[k]) || editStale(ST.statsText[k], autoStatsText(c), statsPending(i))) delete ST.statsText[k];
+  }
+}
+
 function autoStatsText(c) {
   const model = ST.model !== "none" && ST.modelOnPlot !== "tests" && LAST && LAST.models ? modelPlotLines(LAST.models[LAST.comps.indexOf(c)]) : [];
   if (ST.modelOnPlot === "model" && model.length) return model.join("<br>");
@@ -1884,6 +1912,89 @@ function niceTicks(lo, hi) {            // for log and symlog: 1-2-5 per decade,
   if (ST.scale === "symlog") ticks = [...ticks.filter((v) => -v >= lo).map((v) => -v).reverse(), 0, ...ticks.filter((v) => v <= hi)].filter((v) => v >= lo - 1e-12 && v <= hi + 1e-12);
   else ticks = ticks.filter((v) => v >= lo * 0.999 && v <= hi * 1.001);
   return ticks;
+}
+
+// ------------------------------------------------------------------ minor ticks
+// Added to a finished layout: every numeric axis (xaxis, yaxis, xaxis2 …) not listed in skip. Log axes: 2 … 9 of each
+// decade (decades only when the major ticks skip decades). Linear axes: each gap between two major ticks cut into
+// ST.minorN intervals; an automatic linear axis with a range gets its major ticks from here (1-2-5 steps), so the
+// minor ones fall between them. symlog: names of axes drawn in the symlog transform T (the dot plot's y axis).
+const niceStep = (span, target) => {
+  const raw = span / target, p = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / p;
+  return (m < 1.5 ? 1 : m < 3 ? 2 : m < 7 ? 5 : 10) * p;
+};
+function minorIntervals(step) {
+  if (ST.minorN !== "auto") return +ST.minorN;
+  const m = step / Math.pow(10, Math.floor(Math.log10(step) + 1e-9));
+  return Math.abs(m - 2) < 0.01 ? 4 : 5;
+}
+const near = (a, b) => Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
+
+function minorLog(ax) {
+  const major = (ax.tickvals || []).filter((v) => v > 0).sort((a, b) => a - b);
+  let lo, hi;
+  if (Array.isArray(ax.range)) { lo = Math.pow(10, Math.min(...ax.range)); hi = Math.pow(10, Math.max(...ax.range)); }
+  else if (major.length) { lo = major[0] / 10; hi = major[major.length - 1] * 10; }
+  else return null;
+  const dd = decades(lo, hi);
+  if (!dd || dd.d1 - dd.d0 > 60) return null;
+  const gaps = major.slice(1).map((v, i) => v / major[i]);
+  const sparse = gaps.length && STATS.median(gaps) > 10.5;           // majors every few decades: minor at the others
+  const lm = major.map(Math.log10), out = [];
+  for (let d = dd.d0; d <= dd.d1; d++) for (const k of sparse ? [1] : [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
+    const v = k * Math.pow(10, d);
+    if (v >= lo * 0.9999 && v <= hi * 1.0001 && !lm.some((m) => near(m, Math.log10(v)))) out.push(v);
+  }
+  return out;
+}
+
+function minorSymlog(ax) {
+  const c = ST.linthresh > 0 ? ST.linthresh : 1;
+  if (!Array.isArray(ax.range)) return null;
+  const rlo = Tinv(Math.min(...ax.range)), rhi = Tinv(Math.max(...ax.range));
+  const major = (ax.tickvals || []).map(Tinv);
+  const top = Math.max(Math.abs(rlo), Math.abs(rhi)), real = [];
+  const n = ST.minorN === "auto" ? 2 : +ST.minorN;                   // the linear part, −c … c
+  for (let j = -n; j <= n; j++) real.push(c * j / n);
+  const dd = decades(c, top);
+  if (dd && dd.d1 - dd.d0 <= 60) for (let d = dd.d0; d <= dd.d1; d++) for (let k = 1; k <= 9; k++) {
+    const v = k * Math.pow(10, d);
+    if (v > c) real.push(v, -v);
+  }
+  return real.filter((v) => v >= rlo && v <= rhi && !major.some((m) => near(m, v))).map(T);
+}
+
+function minorLinear(ax) {
+  let major = (ax.tickvals || []).slice().sort((a, b) => a - b);
+  const range = Array.isArray(ax.range) ? [Math.min(...ax.range), Math.max(...ax.range)] : null;
+  if (!major.length) {
+    if (!range || !(range[1] > range[0])) return null;
+    const step = niceStep(range[1] - range[0], 5);
+    for (let v = Math.ceil(range[0] / step - 1e-9) * step; v <= range[1] + step * 1e-9 && major.length < 60; v += step) major.push(+v.toPrecision(12));
+    ax.tickmode = "array"; ax.tickvals = major; ax.ticktext = major.map(fmtTick);
+  }
+  if (major.length < 2) return null;
+  const gaps = major.slice(1).map((v, i) => v - major[i]);
+  const out = [];
+  const cut = (a, b) => { const n = minorIntervals(b - a); for (let j = 1; j < n; j++) out.push(a + (b - a) * j / n); };
+  for (let i = 1; i < major.length; i++) cut(major[i - 1], major[i]);
+  if (range) {                                                          // past the first and last major tick, same step
+    const g0 = gaps[0], g1 = gaps[gaps.length - 1];
+    for (let a = major[0] - g0, k = 0; a + g0 > range[0] && k < 50; a -= g0, k++) cut(a, a + g0);
+    for (let a = major[major.length - 1], k = 0; a < range[1] && k < 50; a += g1, k++) cut(a, a + g1);
+  }
+  return out.filter((v) => !range || (v >= range[0] - 1e-12 && v <= range[1] + 1e-12));
+}
+
+function addMinorTicks(layout, z, { skip = [], symlog = [] } = {}) {
+  if (!ST.minor) return layout;
+  for (const [name, ax] of Object.entries(layout)) {
+    if (!/^[xy]axis\d*$/.test(name) || !ax || skip.includes(name)) continue;
+    const vals = ax.type === "log" ? minorLog(ax) : symlog.includes(name) ? minorSymlog(ax) : minorLinear(ax);
+    const style = { ticks: "outside", ticklen: 2.2 * z, tickwidth: (ax.tickwidth || z) * 0.75, tickcolor: ax.tickcolor, showgrid: false };
+    ax.minor = vals && vals.length ? { ...style, tickmode: "array", tickvals: vals } : style;   // no values: Plotly's own
+  }
+  return layout;
 }
 
 function seededJitter(id, salt) {
@@ -1996,7 +2107,7 @@ function figure(z) {
   const comps = LAST.comps;
   let statLines = 0;
   if (ST.showStats) comps.forEach((c, i) => {
-    const text = ST.statsText[i] !== undefined ? ST.statsText[i] : autoStatsText(c);
+    const text = isEdit(ST.statsText[i]) ? ST.statsText[i].text : autoStatsText(c);
     statLines = Math.max(statLines, text.split(/<br>/i).length);
     const pos = ST.statsPos[i];
     annotations.push({ text, xref: "x", yref: "paper", x: pos ? pos.x : c.x, y: pos ? pos.y : 1, yanchor: "bottom", xanchor: "center",
@@ -2025,6 +2136,7 @@ function figure(z) {
       : { orientation: "v", x: 1.01, xanchor: "left", y: 1, yanchor: "top", font: { size: fs },
         bgcolor: "rgba(0,0,0,0)", itemsizing: "trace", tracegroupgap: 0, itemwidth: 30 },
   };
+  addMinorTicks(layout, z, { skip: ["xaxis"], symlog: ST.scale === "symlog" ? ["yaxis"] : [] });
   return { data: traces, layout };
 }
 
@@ -2052,6 +2164,7 @@ function update() {
   const res = compute();
   LAST = { ...res, comps: comparisons(res.gs), models: null };
   LAST.models = modelResults(LAST.comps);
+  pruneStats();
   syncModelRows();
   if (COMPILED) {
     const used = [...COMPILED.used];
@@ -2099,7 +2212,13 @@ function onRelayout(ev) {
       ST.title = fromHtml(v); changed = true;
     } else if (k === "yaxis.title.text") { ST.ylabel = fromHtml(v); changed = true; }
     else if (k === "xaxis.title.text") { ST.xlabel = fromHtml(v); changed = true; }
-    else if (/^annotations\[(\d+)\]\.text$/.test(k)) { ST.statsText[+k.match(/\d+/)[0]] = v; changed = true; }
+    else if (/^annotations\[(\d+)\]\.text$/.test(k)) {
+      const i = +k.match(/\d+/)[0], c = LAST.comps[i];
+      if (!c) continue;
+      const e = makeEdit(v, autoStatsText(c));            // clicked but not changed: stays automatic
+      if (e) ST.statsText[i] = e; else delete ST.statsText[i];
+      changed = true;
+    }
     else if (/^annotations\[(\d+)\]\.[xy]$/.test(k)) {
       const i = +k.match(/\d+/)[0], a = $("plot").layout.annotations[i];
       if (a.name !== "title") ST.statsPos[i] = { x: a.x, y: a.y };
@@ -2142,11 +2261,12 @@ function textFields() {
   if (!active || !active.dataset || active.dataset.stat === undefined) {
     $("statFields").innerHTML = ST.showStats ? "<p class='hint' style='margin-top:8px'>Statistics text on the plot (empty = automatic)</p>" +
       LAST.comps.map((c, i) => '<div class="statText"><label>' + c.label + '<textarea rows="3" data-stat="' + i + '" placeholder="' +
-      fromHtml(autoStatsText(c)).replace(/"/g, "&quot;") + '">' + (ST.statsText[i] !== undefined ? fromHtml(ST.statsText[i]) : "") + "</textarea></label></div>").join("") : "";
-    for (const el of document.querySelectorAll("#statFields textarea")) el.addEventListener("input", () => {
-      if (el.value.trim() === "") delete ST.statsText[el.dataset.stat]; else ST.statsText[el.dataset.stat] = toHtml(el.value);
+      fromHtml(autoStatsText(c)).replace(/"/g, "&quot;") + '">' + (isEdit(ST.statsText[i]) ? fromHtml(ST.statsText[i].text) : "") + "</textarea></label></div>").join("") : "";
+    for (const el of document.querySelectorAll("#statFields textarea")) el.addEventListener("input", debounce(() => {
+      const i = +el.dataset.stat, c = LAST.comps[i], e = c && el.value.trim() !== "" ? makeEdit(toHtml(el.value), autoStatsText(c)) : null;
+      if (e) ST.statsText[i] = e; else delete ST.statsText[i];
       update();
-    });
+    }, TYPING_PAUSE_MS));
   }
 }
 
@@ -2317,6 +2437,17 @@ function axisValues(which) {
 const formulaTitle = (f) => String(f).replace(/\*/g, "×").replace(/\//g, "÷").replace(/-/g, "−");
 
 function scatterFigure(z) {
+  const fig = scatterFigureBase(z);
+  if (ST.minor) for (const [k, log, which] of [["xaxis", ST.sc.logX, "x"], ["yaxis", ST.sc.logY, "y"]]) {
+    const v = axisValues(which).filter(Number.isFinite);      // a linear axis: the data range (+5 %, as Plotly's autorange)
+    if (log || !v.length || fig.layout[k].range) continue;
+    const lo = Math.min(...v), hi = Math.max(...v), pad = (hi - lo || Math.abs(hi) || 1) * 0.05;
+    fig.layout[k].range = [lo - pad, hi + pad];
+  }
+  addMinorTicks(fig.layout, z);
+  return fig;
+}
+function scatterFigureBase(z) {
   const sc = ST.sc, fs = ST.fontPt * z, W = sc.widthMm * PT_PER_MM * z, H = sc.heightMm * PT_PER_MM * z;
   const C = COLORS(), traces = [];
   const name = (k, d) => (sc.legendNames[k] !== undefined ? sc.legendNames[k] : d);
@@ -2453,7 +2584,7 @@ function groupDash(grp, mode) {
   return list[Math.max(0, experiments().indexOf(grp.e)) % list.length];
 }
 // Plotly's in-place edits on a panel's annotations / axis titles / legend → that panel's settings (o)
-function panelEdits(gd, o, isBusy) {
+function panelEdits(gd, o, isBusy, autoStats) {
   gd.on("plotly_relayout", (ev) => {
     if (isBusy()) return;
     let changed = false;
@@ -2465,7 +2596,7 @@ function panelEdits(gd, o, isBusy) {
           if (nm === "title") o.title = fromHtml(v);
           else if (nm === "xtitle") o.xlabel = fromHtml(v);
           else if (nm === "ytitle") o.ylabel = fromHtml(v);
-          else if (nm === "stats") o.statsText = v;
+          else if (nm === "stats") o.statsText = makeEdit(v, autoStats());
           else if (nm.startsWith("facet:")) o.legendNames[nm.slice(6)] = fromHtml(v);
           else continue;
         } else if (nm === "stats") o.statsPos = { x: a.x, y: a.y };
@@ -2829,7 +2960,7 @@ function distFigure(z) {
   }
   // layout
   const axb = baseAxis(C, z, fs);
-  const statText = ds.statsText !== null && ds.statsText !== undefined ? ds.statsText : distAutoStats();
+  const statText = isEdit(ds.statsText) ? ds.statsText.text : distAutoStats();
   const statLines = ds.stats && statText ? statText.split(/<br>/i).length : 0;
   const titleLines = ds.title ? toHtml(ds.title).split(/<br>/i).length : 0;
   const statH = statLines ? statLines * fs * 0.92 * 1.25 + 3 * z : 0;
@@ -2884,6 +3015,7 @@ function distFigure(z) {
       font: { size: fs * 0.92, color: C.text } });
   }
   if (ds.title) annotations.push(titleAnnotation(ds.title, Math.max(H - top - 40 * z, 10), top, z, fs, C));
+  addMinorTicks(layout, z, { skip: cat ? ["xaxis"] : [] });
   return { data: traces, layout };
 }
 
@@ -2893,7 +3025,7 @@ function distSize() {
   const ds = ST.ds, facets = ds.layout === "side" && !["violin", "box"].includes(ds.kind), byExp = ds.group === "geno_exp";
   const w = byExp ? 150 : 80;
   let h = byExp && facets ? 105 : 60;
-  const lines = ds.stats ? (ds.statsText !== null && ds.statsText !== undefined ? ds.statsText : distAutoStats()).split(/<br>/i).length : 0;
+  const lines = ds.stats ? (isEdit(ds.statsText) ? ds.statsText.text : distAutoStats()).split(/<br>/i).length : 0;
   h += Math.max(0, lines - 2) * Math.ceil(ST.fontPt * 1.2 * 0.353);   // a line of statistics ≈ 1.2 × the font, in mm
   return [w, h];
 }
@@ -2916,6 +3048,7 @@ function updateDist() {
     Plotly.purge("plot3"); DRAWN3 = false;
     return;
   }
+  if (editStale(ST.ds.statsText, distAutoStats(), false)) ST.ds.statsText = null;
   if (ST.ds.sizeAuto) {
     const [w, h] = distSize();
     if (w !== ST.ds.widthMm || h !== ST.ds.heightMm) { ST.ds.widthMm = w; ST.ds.heightMm = h; writePanelControls(); }
@@ -2925,7 +3058,7 @@ function updateDist() {
   const facets = ST.ds.layout === "side" && !["violin", "box"].includes(ST.ds.kind);   // facet axis titles are annotations
   Plotly.react("plot3", fig.data, fig.layout, { editable: true, displaylogo: false, responsive: false,
     modeBarButtonsToRemove: ["toImage", "select2d", "lasso2d"], edits: { titleText: false, shapePosition: false, axisTitleText: !facets } }).then(() => { BUSY3 = false; });
-  if (!DRAWN3) { DRAWN3 = true; panelEdits($("plot3"), ST.ds, () => BUSY3); }
+  if (!DRAWN3) { DRAWN3 = true; panelEdits($("plot3"), ST.ds, () => BUSY3, distAutoStats); }
   const unit = DIST.objects ? "object" : "section";
   const parts = [];
   if (DIST.notFinite) parts.push(DIST.notFinite + " " + unit + (DIST.notFinite > 1 ? "s" : "") + " left out: the value is not a finite number");
@@ -3103,9 +3236,7 @@ function humanFigure(z) {
   layout.margin = { l: 10 * z, r: 6 * z + (ST.showLegend && !hv.legendPos ? 44 + Math.max(0, ...entries.map((t) => t.length)) * fs * 0.55 : 0), t: top + 4 * z, b: 10 * z, pad: 0 };
   layout.xaxis = { ...axb, type: "log", range: [Math.log10(r0), Math.log10(r1)], title: { text: toHtml(hv.xlabel || (ba ? "Geometric mean of the two counts" : "Human count (AF488⁺ cells)")) },
     ...humanTicks(r0, r1), constrain: "domain" };
-  const stat = hv.statsText !== null && hv.statsText !== undefined ? hv.statsText : !pooled ? "" : ba
-    ? "Bias " + Math.pow(2, pooled.bias[0]).toFixed(2) + "×; 95 % limits of agreement " + Math.pow(2, pooled.lo[0]).toFixed(2) + "–" + Math.pow(2, pooled.hi[0]).toFixed(2) + "×"
-    : "CCC = " + pooled.ccc[0].toFixed(2) + "<br>(95 % CI " + pooled.ccc[1].toFixed(2) + "–" + pooled.ccc[2].toFixed(2) + ")";
+  const stat = isEdit(hv.statsText) ? hv.statsText.text : hvAutoStats();
   if (ba) {
     const ticks = [0.125, 0.25, 0.5, 1, 2, 4, 8];
     const yl = Math.max(2.2, ...ys.map(Math.abs).map((v) => v + 0.2), pooled ? Math.abs(pooled.lo[0]) + 0.3 : 0, pooled ? Math.abs(pooled.hi[0]) + 0.3 : 0);
@@ -3135,7 +3266,17 @@ function humanFigure(z) {
         showarrow: false, align: "left", font: { size: fs * 0.92, color: C.text } });
   }
   if (hv.title) annotations.push(titleAnnotation(hv.title, Math.max(H - top - 40 * z, 10), top, z, fs, C));
+  addMinorTicks(layout, z);
   return { data: traces, layout };
+}
+
+// the human panel's automatic statistics text (pooled over the annotators chosen)
+function hvAutoStats() {
+  const pooled = HV && HV.sets[0] && HV.sets[0].a;
+  if (!pooled) return "";
+  return ST.hv.plot === "ba"
+    ? "Bias " + Math.pow(2, pooled.bias[0]).toFixed(2) + "×; 95 % limits of agreement " + Math.pow(2, pooled.lo[0]).toFixed(2) + "–" + Math.pow(2, pooled.hi[0]).toFixed(2) + "×"
+    : "CCC = " + pooled.ccc[0].toFixed(2) + "<br>(95 % CI " + pooled.ccc[1].toFixed(2) + "–" + pooled.ccc[2].toFixed(2) + ")";
 }
 
 // log ticks 1-3-10 per decade (1-2-5 crowds a small square plot), as plain numbers, horizontal
@@ -3155,6 +3296,7 @@ function updateHuman() {
   $("hvMethod").textContent = (meth ? meth.label + ", " + k + " SD" : ST.method) + (ST.method === "gauss-5" ? " (the counting method)" : "") +
     " · " + annotatorWords() + " · " + HV.rows.length + " human-counted section" + (HV.rows.length === 1 ? "" : "s") + (ST.hv.filters ? " (the page's filters applied)" : "");
   if (!HV.rows.length) { $("hvStats").innerHTML = "<p class='note'>" + (ST.annotators.length ? "No human-counted section." : "No human annotator is ticked.") + "</p>"; $("hvTable").innerHTML = ""; Plotly.purge("plot4"); DRAWN4 = false; return; }
+  if (editStale(ST.hv.statsText, hvAutoStats(), false)) ST.hv.statsText = null;
   const fig = humanFigure(ST.zoom || 1);
   BUSY4 = true;
   Plotly.react("plot4", fig.data, fig.layout, { editable: true, displaylogo: false, responsive: false,
@@ -3162,7 +3304,7 @@ function updateHuman() {
   if (!DRAWN4) {
     DRAWN4 = true;
     const gd = $("plot4");
-    panelEdits(gd, ST.hv, () => BUSY4);
+    panelEdits(gd, ST.hv, () => BUSY4, hvAutoStats);
     gd.on("plotly_click", (ev) => {
       const p = ev.points && ev.points[0], id = p && p.customdata && p.customdata[1];
       if (id) window.open("section_browser.html#" + encodeURIComponent(id), "_blank");
