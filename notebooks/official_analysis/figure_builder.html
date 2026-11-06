@@ -195,7 +195,7 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
     <label>Title<textarea id="scTitle" rows="1"></textarea></label>
     <label>x axis title (empty = the formula)<textarea id="scXlabel" rows="1"></textarea></label>
     <label>y axis title (empty = the formula)<textarea id="scYlabel" rows="2"></textarea></label>
-    <div class="row"><button id="bScSvg">Scatter SVG</button><button id="bScPng">Scatter PNG, 600 dpi</button><button id="bScCsv">Scatter CSV</button></div>
+    <div class="row"><button id="bScSvg">Scatter SVG</button><button id="bScPdf">PDF</button><button id="bScPng">Scatter PNG, 600 dpi</button><button id="bScCsv">Scatter CSV</button></div>
   </details>
   <details open>
     <summary>Distribution panel</summary>
@@ -237,7 +237,7 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
     <label>Title<textarea id="dsTitle" rows="1"></textarea></label>
     <label>Value axis title (empty = automatic)<textarea id="dsXlabel" rows="1"></textarea></label>
     <label>Other axis title (empty = automatic)<textarea id="dsYlabel" rows="1"></textarea></label>
-    <div class="row"><button id="bDsSvg">Distribution SVG</button><button id="bDsPng">PNG, 600 dpi</button><button id="bDsCsv">Values CSV</button><button id="bDsCurves" title="The drawn curves: histogram bins, density points, ECDF steps, box numbers">Curves CSV</button></div>
+    <div class="row"><button id="bDsSvg">Distribution SVG</button><button id="bDsPdf">PDF</button><button id="bDsPng">PNG, 600 dpi</button><button id="bDsCsv">Values CSV</button><button id="bDsCurves" title="The drawn curves: histogram bins, density points, ECDF steps, box numbers">Curves CSV</button></div>
   </details>
   <details open>
     <summary>Human against automated panel</summary>
@@ -250,12 +250,12 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
     <label>Title<textarea id="hvTitle" rows="1"></textarea></label>
     <label>x axis title (empty = automatic)<textarea id="hvXlabel" rows="1"></textarea></label>
     <label>y axis title (empty = automatic)<textarea id="hvYlabel" rows="1"></textarea></label>
-    <div class="row"><button id="bHvSvg">Agreement SVG</button><button id="bHvPng">PNG, 600 dpi</button></div>
+    <div class="row"><button id="bHvSvg">Agreement SVG</button><button id="bHvPdf">PDF</button><button id="bHvPng">PNG, 600 dpi</button></div>
     <div class="row"><button id="bHvCsv">Table CSV (this method)</button><button id="bHvCsvAll">CSV, every method and threshold</button></div>
   </details>
   <details open>
     <summary>Export and settings</summary>
-    <div class="row"><button id="bSvg">Dot plot SVG</button><button id="bPng">Dot plot PNG, 600 dpi</button><button id="bCsv">Dot plot CSV</button></div>
+    <div class="row"><button id="bSvg">Dot plot SVG</button><button id="bPdf">Dot plot PDF</button><button id="bPng">Dot plot PNG, 600 dpi</button><button id="bCsv">Dot plot CSV</button></div>
     <div class="row"><button id="bLink">Copy link to this figure</button><button id="bApply">Apply the settings below</button><button id="bReset">Reset the text</button><button id="bForget" title="Clear the settings this browser remembers and start from the defaults">Start over (forget saved settings)</button></div>
     <textarea id="settings" spellcheck="false" aria-label="settings as JSON"></textarea>
     <p class="hint">The page's address holds every setting (after #), so a bookmark or the copied link reopens this figure. The box shows the same settings; paste settings there and press Apply.</p>
@@ -1404,6 +1404,7 @@ function buildControls() {
     update();
   });
   $("bSvg").onclick = () => exportImage("svg");
+  $("bPdf").onclick = () => exportImage("pdf");
   $("bPng").onclick = () => exportImage("png");
   $("bCsv").onclick = exportCsv;
   $("bLink").onclick = copyLink;
@@ -1986,8 +1987,8 @@ function minorLinear(ax) {
   return out.filter((v) => !range || (v >= range[0] - 1e-12 && v <= range[1] + 1e-12));
 }
 
-function addMinorTicks(layout, z, { skip = [], symlog = [] } = {}) {
-  if (!ST.minor) return layout;
+function addMinorTicks(layout, z, { skip = [], symlog = [], force = false } = {}) {
+  if (!ST.minor && !force) return layout;
   for (const [name, ax] of Object.entries(layout)) {
     if (!/^[xy]axis\d*$/.test(name) || !ax || skip.includes(name)) continue;
     const vals = ax.type === "log" ? minorLog(ax) : symlog.includes(name) ? minorSymlog(ax) : minorLinear(ax);
@@ -2362,6 +2363,7 @@ function buildScatterControls() {
     }));
   }
   $("bScSvg").onclick = () => exportImage("svg", "scatter");
+  $("bScPdf").onclick = () => exportImage("pdf", "scatter");
   $("bScPng").onclick = () => exportImage("png", "scatter");
   $("bScCsv").onclick = exportScatterCsv;
   $("bGreys").onclick = () => { ST.colors = null; COLOR_SIG = ""; update(); };
@@ -2736,6 +2738,7 @@ function buildDistControls() {
   // a size typed in is kept; until then the size follows the groups, panels and statistics (distSize)
   for (const id of ["dsWidthMm", "dsHeightMm"]) $(id).addEventListener("input", () => { ST.ds.sizeAuto = false; });
   $("bDsSvg").onclick = () => exportImage("svg", "dist");
+  $("bDsPdf").onclick = () => exportImage("pdf", "dist");
   $("bDsPng").onclick = () => exportImage("png", "dist");
   $("bDsCsv").onclick = () => downloadText(distValuesCsv(), fileStem() + "_distribution_values.csv");
   $("bDsCurves").onclick = () => downloadText(distCurvesCsv(), fileStem() + "_distribution_curves.csv");
@@ -3151,6 +3154,7 @@ let HV = null, HV_KEY = "", DRAWN4 = false, BUSY4 = false;
 function buildHumanControls() {
   wirePanelInputs(HV_INPUTS, () => ST.hv, HV_NUMERIC);
   $("bHvSvg").onclick = () => exportImage("svg", "human");
+  $("bHvPdf").onclick = () => exportImage("pdf", "human");
   $("bHvPng").onclick = () => exportImage("png", "human");
   $("bHvCsv").onclick = () => downloadText(humanCsv(false), "human_vs_automated_" + ST.method + ".csv");
   $("bHvCsvAll").onclick = () => downloadText(humanCsv(true), "human_vs_automated_all_methods.csv");
@@ -3194,6 +3198,50 @@ function withCi(rows) {
   return ci;
 }
 
+// Bland–Altman with the difference regressed on the size (Bland & Altman 1999, section 5.2), on natural logs:
+// D = ln(automated ÷ human), A = ln(geometric mean of the two counts). D = b0 + b1·A by least squares (the slope's 95 % CI
+// from t with n − 2 df); the absolute residuals |r| = c0 + c1·A by least squares; 95 % limits D̂ ± 1.96·√(π/2)·(c0 + c1·A).
+// Also the usual constant numbers: bias = mean D (95 % CI from t, n − 1 df) and limits bias ± 1.96 SD (95 % CI ± t·√(3 SD²/n)).
+// A zero count is taken as 0.5, as everywhere on the page.
+function ols(x, y) {
+  const n = x.length, mx = STATS.mean(x), my = STATS.mean(y);
+  let sxx = 0, sxy = 0;
+  for (let i = 0; i < n; i++) { sxx += (x[i] - mx) ** 2; sxy += (x[i] - mx) * (y[i] - my); }
+  const b1 = sxx > 0 ? sxy / sxx : 0, b0 = my - b1 * mx;
+  const res = x.map((v, i) => y[i] - b0 - b1 * v);
+  const s2 = res.reduce((a, r) => a + r * r, 0) / Math.max(n - 2, 1);
+  return { b0, b1, se1: sxx > 0 ? Math.sqrt(s2 / sxx) : NaN, res };
+}
+function baRegression(rows) {
+  const n = rows.length;
+  if (n < 4) return null;
+  const A = rows.map((e) => 0.5 * Math.log(Math.max(e.human, 0.5) * Math.max(e.auto, 0.5)));
+  const D = rows.map((e) => Math.log(Math.max(e.auto, 0.5) / Math.max(e.human, 0.5)));
+  const f = ols(A, D), g = ols(A, f.res.map(Math.abs));
+  const t2 = STATS.tQuantile(0.975, n - 2), t1 = STATS.tQuantile(0.975, n - 1);
+  const md = STATS.mean(D), sd = Math.sqrt(STATS.variance(D));
+  const tSlope = f.b1 / f.se1;
+  return {
+    n, b0: f.b0, c0: g.b0, c1: g.b1, aRange: [Math.min(...A), Math.max(...A)],
+    slope: [f.b1, f.b1 - t2 * f.se1, f.b1 + t2 * f.se1], pSlope: STATS.tTwoSided(tSlope, n - 2),
+    bias: [md, md - t1 * sd / Math.sqrt(n), md + t1 * sd / Math.sqrt(n)],
+    lo: [md - 1.96 * sd, md - 1.96 * sd - t1 * sd * Math.sqrt(3 / n), md - 1.96 * sd + t1 * sd * Math.sqrt(3 / n)],
+    hi: [md + 1.96 * sd, md + 1.96 * sd - t1 * sd * Math.sqrt(3 / n), md + 1.96 * sd + t1 * sd * Math.sqrt(3 / n)],
+  };
+}
+// the regression and its limits at A = ln(geometric mean), as ratios
+function baLines(R, a) {
+  const d = R.b0 + R.slope[0] * a, w = 1.96 * Math.sqrt(Math.PI / 2) * Math.max(0, R.c0 + R.c1 * a);
+  return [Math.exp(d - w), Math.exp(d), Math.exp(d + w)];
+}
+// geometric-mean ratio automated ÷ human per genotype: exp(mean ln ratio)
+function gmRatios(rows) {
+  return Object.fromEntries(GENOTYPES.map((g) => {
+    const d = rows.filter((e) => e.r.genotype === g).map((e) => Math.log(Math.max(e.auto, 0.5) / Math.max(e.human, 0.5)));
+    return [g, { n: d.length, ratio: d.length ? Math.exp(STATS.mean(d)) : NaN }];
+  }));
+}
+
 function computeHuman() {
   const keep = ST.hv.filters ? new Set(selected()) : null;
   const rows = humanEntries().filter((e) => !keep || keep.has(e.r)).map((e) => {
@@ -3202,7 +3250,7 @@ function computeHuman() {
   }).filter((e) => Number.isFinite(e.auto) && Number.isFinite(e.human));
   // pooled = the annotators chosen; with one annotator only its own row
   const sets = [...(ST.annotators.length > 1 ? [["pooled", rows]] : []), ...ST.annotators.map((a) => ["human annotator " + a, rows.filter((e) => e.ann === a)])];
-  return { rows, sets: sets.map(([name, rs]) => ({ name, rows: rs, a: withCi(rs) })) };
+  return { rows, sets: sets.map(([name, rs]) => ({ name, rows: rs, a: withCi(rs) })), ba: baRegression(rows), gm: gmRatios(rows) };
 }
 
 function humanFigure(z) {
@@ -3226,33 +3274,40 @@ function humanFigure(z) {
   // the axes run from a 1-3-10 tick to a 1-3-10 tick, so both ends are labelled
   const down = (v) => { const p = Math.pow(10, Math.floor(Math.log10(v))); return 3 * p <= v ? 3 * p : p; };
   const up = (v) => { const p = Math.pow(10, Math.floor(Math.log10(v))); return v <= p * 1.0001 ? p : v <= 3 * p ? 3 * p : 10 * p; };
-  const r0 = down(lo), r1 = up(hi);
+  // Bland–Altman: the x axis hugs the sections (± 20 %), no empty decade on the right
+  const r0 = ba ? lo / 1.2 : down(lo), r1 = ba ? hi * 1.2 : up(hi);
   const axb = baseAxis(C, z, fs);
+  const stat = isEdit(hv.statsText) ? hv.statsText.text : hvAutoStats();
   const titleLines = hv.title ? toHtml(hv.title).split(/<br>/i).length : 0;
-  const top = 6 * z + titleLines * fs * 1.1 * 1.3 + (ba ? fs * 1.3 : 0);
+  const statLines = ba && stat ? stat.split(/<br>/i).length : 0;           // Bland–Altman: the statistics above the plot
+  const top = 6 * z + titleLines * fs * 1.1 * 1.3 + (statLines ? statLines * fs * 0.92 * 1.25 + 3 * z : 0);
   const layout = { width: W, height: H, paper_bgcolor: "#ffffff", plot_bgcolor: "#ffffff", hovermode: "closest",
     font: { family: "Arial, Helvetica, sans-serif", size: fs, color: C.text }, showlegend: !!ST.showLegend, legend: legendBox(hv.legendPos, fs), shapes, annotations };
   const entries = traces.map((t) => String(t.name));
-  layout.margin = { l: 10 * z, r: 6 * z + (ST.showLegend && !hv.legendPos ? 44 + Math.max(0, ...entries.map((t) => t.length)) * fs * 0.55 : 0), t: top + 4 * z, b: 10 * z, pad: 0 };
+  // Bland–Altman: the legend inside, top left (until dragged), so no room for it on the right
+  const legendRight = ST.showLegend && !hv.legendPos && !ba;
+  if (ba && !hv.legendPos) Object.assign(layout.legend, { x: 0.02, y: 0.98, xanchor: "left", yanchor: "top", bgcolor: "rgba(255,255,255,0.85)" });
+  layout.margin = { l: 10 * z, r: 6 * z + (legendRight ? 44 + Math.max(0, ...entries.map((t) => t.length)) * fs * 0.55 : 0), t: top + 4 * z, b: 10 * z, pad: 0 };
   layout.xaxis = { ...axb, type: "log", range: [Math.log10(r0), Math.log10(r1)], title: { text: toHtml(hv.xlabel || (ba ? "Geometric mean of the two counts" : "Human count (AF488⁺ cells)")) },
     ...humanTicks(r0, r1), constrain: "domain" };
-  const stat = isEdit(hv.statsText) ? hv.statsText.text : hvAutoStats();
   if (ba) {
-    const ticks = [0.125, 0.25, 0.5, 1, 2, 4, 8];
-    const yl = Math.max(2.2, ...ys.map(Math.abs).map((v) => v + 0.2), pooled ? Math.abs(pooled.lo[0]) + 0.3 : 0, pooled ? Math.abs(pooled.hi[0]) + 0.3 : 0);
-    layout.yaxis = { ...axb, range: [-yl, yl], tickmode: "array", tickvals: ticks.map(Math.log2).filter((v) => Math.abs(v) <= yl), ticktext: ticks.filter((v) => Math.abs(Math.log2(v)) <= yl).map(String),
-      title: { text: toHtml(hv.ylabel || "Automated ÷ human (log₂ axis)"), standoff: 4 * z } };
-    shapes.push({ type: "line", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 0, y1: 0, line: { color: LIGHT, width: 0.8 * z } });
-    if (pooled) for (const [k, dash] of [["bias", "solid"], ["lo", "dash"], ["hi", "dash"]]) {
-      shapes.push({ type: "line", xref: "paper", yref: "y", x0: 0, x1: 1, y0: pooled[k][0], y1: pooled[k][0], line: { color: C.fit, width: 0.9 * z, dash } });
-      annotations.push({ text: Math.pow(2, pooled[k][0]).toFixed(2) + "×", xref: "paper", yref: "y", x: 1, y: pooled[k][0], xanchor: "left", yanchor: "middle",
-        showarrow: false, font: { size: fs * 0.85, color: C.text }, captureevents: false });
+    // ratio on a log axis, 0.4–2.5 (wider only if a section falls outside); 1 thin and dotted
+    const ratios = ys.map((v) => Math.pow(2, v));
+    const y0 = Math.min(0.4, ...ratios.map((v) => v / 1.12)), y1 = Math.max(2.5, ...ratios.map((v) => v * 1.12));
+    const ticks = [0.125, 0.25, 0.5, 1, 2, 4, 8].filter((v) => v >= y0 * 0.999 && v <= y1 * 1.001);
+    layout.yaxis = { ...axb, type: "log", range: [Math.log10(y0), Math.log10(y1)], tickmode: "array", tickvals: ticks, ticktext: ticks.map(String),
+      title: { text: toHtml(hv.ylabel || "Ratio, automated / human count"), standoff: 4 * z } };
+    const lines = [{ type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip", x: [r0, r1], y: [1, 1], line: { color: MID, width: 0.5 * z, dash: "dot" } }];
+    const R = HV.ba;
+    if (R) {                     // the regression and its limits over the sections' range of geometric means
+      const as = Array.from({ length: 61 }, (_, i) => R.aRange[0] + (R.aRange[1] - R.aRange[0]) * i / 60), gm = as.map(Math.exp), at = as.map((a) => baLines(R, a));
+      const hover = (k, what) => ({ customdata: gm.map((g, i) => [g3(g), at[i][k].toFixed(2)]), hovertemplate: what + " at %{customdata[0]}: %{customdata[1]}×<extra></extra>" });
+      lines.push({ type: "scatter", mode: "lines", showlegend: false, x: gm, y: at.map((v) => v[1]), line: { color: C.fit, width: 0.9 * z }, ...hover(1, "regression") },
+        { type: "scatter", mode: "lines", showlegend: false, x: gm, y: at.map((v) => v[0]), line: { color: C.fit, width: 0.9 * z, dash: "dash" }, ...hover(0, "lower 95 % limit") },
+        { type: "scatter", mode: "lines", showlegend: false, x: gm, y: at.map((v) => v[2]), line: { color: C.fit, width: 0.9 * z, dash: "dash" }, ...hover(2, "upper 95 % limit") });
     }
-    layout.margin.r += fs * 3.2;
-    if (!hv.legendPos && layout.showlegend) {
-      const plotW = W - layout.margin.l - layout.margin.r - fs * 4;     // the y tick labels and title take ~4 font sizes
-      layout.legend.x = 1 + fs * 3.2 / Math.max(plotW, 1);
-    }
+    traces.unshift(...lines);
+    for (const t of traces) if (t.mode === "markers") t.y = t.y.map((v) => Math.pow(2, v));
   } else {
     layout.yaxis = { ...axb, type: "log", range: [Math.log10(r0), Math.log10(r1)], title: { text: toHtml(hv.ylabel || "Automated count (AF488⁺ cells)"), standoff: 4 * z },
       ...humanTicks(r0, r1), scaleanchor: "x", scaleratio: 1, constrain: "domain" };
@@ -3266,7 +3321,7 @@ function humanFigure(z) {
         showarrow: false, align: "left", font: { size: fs * 0.92, color: C.text } });
   }
   if (hv.title) annotations.push(titleAnnotation(hv.title, Math.max(H - top - 40 * z, 10), top, z, fs, C));
-  addMinorTicks(layout, z);
+  addMinorTicks(layout, z, { force: ba });            // Bland–Altman: log minor ticks on both axes, always
   return { data: traces, layout };
 }
 
@@ -3274,9 +3329,14 @@ function humanFigure(z) {
 function hvAutoStats() {
   const pooled = HV && HV.sets[0] && HV.sets[0].a;
   if (!pooled) return "";
-  return ST.hv.plot === "ba"
-    ? "Bias " + Math.pow(2, pooled.bias[0]).toFixed(2) + "×; 95 % limits of agreement " + Math.pow(2, pooled.lo[0]).toFixed(2) + "–" + Math.pow(2, pooled.hi[0]).toFixed(2) + "×"
-    : "CCC = " + pooled.ccc[0].toFixed(2) + "<br>(95 % CI " + pooled.ccc[1].toFixed(2) + "–" + pooled.ccc[2].toFixed(2) + ")";
+  if (ST.hv.plot === "ba") {
+    const R = HV.ba;
+    if (!R) return "n = " + HV.rows.length + " (too few sections for the regression)";
+    const x = (v) => Math.exp(v).toFixed(2), ci = (v) => x(v[0]) + "× (" + x(v[1]) + "–" + x(v[2]) + ")";
+    return "Bias " + ci(R.bias) + "<br>95 % limits of agreement " + ci(R.lo) + " to " + ci(R.hi) + "<br>Slope " +
+      minus(R.slope[0].toFixed(2) + " (" + R.slope[1].toFixed(2) + " to " + R.slope[2].toFixed(2) + ")") + "<br>n = " + R.n;
+  }
+  return "CCC = " + pooled.ccc[0].toFixed(2) + "<br>(95 % CI " + pooled.ccc[1].toFixed(2) + "–" + pooled.ccc[2].toFixed(2) + ")";
 }
 
 // log ticks 1-3-10 per decade (1-2-5 crowds a small square plot), as plain numbers, horizontal
@@ -3291,7 +3351,11 @@ function updateHuman() {
   $("humanBox").className = ST.hv.on ? "" : "off";
   if (!ST.hv.on) return;
   const key = ST.method + "|" + ST.annotators + "|" + ST.hv.filters + "|" + (ST.hv.filters ? JSON.stringify([ST.exps, ST.qcOnly, ST.noUncertain, ST.humanOnly, ST.region]) : "");
-  if (key !== HV_KEY || !HV) { HV = computeHuman(); HV_KEY = key; }
+  if (key !== HV_KEY || !HV) {
+    HV = computeHuman(); HV_KEY = key;
+    console.log("Geometric-mean ratio, automated / human (" + ST.method + ", " + annotatorWords() + "): " +
+      GENOTYPES.map((g) => g + " " + (Number.isFinite(HV.gm[g].ratio) ? HV.gm[g].ratio.toFixed(3) : "–") + " (n = " + HV.gm[g].n + ")").join(", "));
+  }
   const meth = METHODS.find((m) => ST.method.startsWith(m.key + "-")), k = ST.method.split("-")[1];
   $("hvMethod").textContent = (meth ? meth.label + ", " + k + " SD" : ST.method) + (ST.method === "gauss-5" ? " (the counting method)" : "") +
     " · " + annotatorWords() + " · " + HV.rows.length + " human-counted section" + (HV.rows.length === 1 ? "" : "s") + (ST.hv.filters ? " (the page's filters applied)" : "");
@@ -3326,6 +3390,20 @@ function updateHuman() {
     "Bland–Altman on log₂(automated ÷ human): bias = mean, 95 % limits of agreement = bias ± 1.96 SD, back-transformed to ratios; a zero count is taken as 0.5. " +
     "95 % CIs: percentiles of " + HV_BOOT.toLocaleString("en-US") + " bootstrap resamples of sections (seeded; within each annotator for the pooled row), as 01_validation. " +
     "The point estimates reproduce the notebook's for the counting method; the CIs differ slightly because the random draws differ.</p>";
+  const R = HV.ba;
+  if (R) {
+    const x = (v) => Math.exp(v).toFixed(2) + "×", ci = (v) => x(v[0]) + " (" + x(v[1]) + "–" + x(v[2]) + ")";
+    html += "<h2>Bland–Altman as on the plot (" + annotatorWords() + ")</h2><table class='st'><tr><th>n</th><th>Bias (95 % CI)</th><th>95 % LoA, lower (95 % CI)</th>" +
+      "<th>95 % LoA, upper (95 % CI)</th><th>Slope of log ratio on log geometric mean (95 % CI)</th><th>P (slope)</th><th>Limits' half-width</th>" +
+      GENOTYPES.map((g) => "<th>Geometric-mean ratio, " + g + "</th>").join("") + "</tr><tr><td>" + R.n + "</td><td>" + ci(R.bias) + "</td><td>" + ci(R.lo) + "</td><td>" + ci(R.hi) +
+      "</td><td>" + minus(R.slope[0].toFixed(3) + " (" + R.slope[1].toFixed(3) + " to " + R.slope[2].toFixed(3) + ")") + "</td><td>" + Pfull(R.pSlope) + "</td><td>" +
+      "1.96·√(π/2)·(" + minus(R.c0.toFixed(3)) + (R.c1 < 0 ? " − " : " + ") + Math.abs(R.c1).toFixed(3) + "·ln GM)</td>" +
+      GENOTYPES.map((g) => "<td>" + (Number.isFinite(HV.gm[g].ratio) ? HV.gm[g].ratio.toFixed(3) + " (n = " + HV.gm[g].n + ")" : "–") + "</td>").join("") + "</tr></table>" +
+      "<p class='note'>The Bland–Altman plot regresses ln(automated ÷ human) on ln(geometric mean of the two counts) by least squares (line; slope with its t-based 95 % CI, " +
+      "n − 2 df); its 95 % limits follow the regression of the absolute residuals on ln(geometric mean): regression ± 1.96·√(π/2)·(c₀ + c₁·ln GM) (Bland &amp; Altman 1999). " +
+      "Bias, mean of ln ratio with its t-based 95 % CI; limits of agreement, bias ± 1.96 SD with 95 % CI ± t·√(3 SD²/n). These CIs are the usual formulas, not the " +
+      "bootstrap of the table above, so they differ slightly from it.</p>";
+  }
   $("hvStats").innerHTML = html;
   const head = ["", "Section", "Genotype", "Experiment", "Annotator", "Counted area", "Human", "Automated", "Automated ÷ human", "log₂ ratio"];
   $("hvTable").innerHTML = "<table class='st'><thead><tr>" + head.map((h) => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>" +
@@ -3359,7 +3437,11 @@ function humanMethods() {
     "(maximum over z): " + ST.annotators.map((a) => area[a]).join("; ") + ". The automated count (" + (meth ? methodPhrase(meth, k) : ST.method) +
     ") was taken in the same area of the same sections. Agreement was summarised by Lin's concordance correlation coefficient on log₁₀ counts, " +
     "Bland–Altman analysis of log₂(automated ÷ human) (bias and 95 % limits of agreement, bias ± 1.96 SD, back-transformed to ratios) and " +
-    "Spearman's ρ, with 95 % confidence intervals from " + HV_BOOT.toLocaleString("en-US") + " bootstrap resamples of sections" + (two ? " (stratified by annotator when pooled)." : ".");
+    "Spearman's ρ, with 95 % confidence intervals from " + HV_BOOT.toLocaleString("en-US") + " bootstrap resamples of sections" + (two ? " (stratified by annotator when pooled)." : ".") +
+    (ST.hv.plot === "ba" ? " In the Bland–Altman plot, ln(automated ÷ human) was regressed on ln(geometric mean of the two counts) by least squares, and the 95 % limits of agreement " +
+      "were derived from the regression of the absolute residuals on ln(geometric mean), as regression ± 1.96·√(π/2)·(c₀ + c₁·ln GM) (Bland and Altman, 1999); the slope is given " +
+      "with its t-based 95 % CI, the bias (mean log ratio) with its t-based 95 % CI and the constant limits of agreement (bias ± 1.96 SD) with 95 % CIs from their approximate " +
+      "standard error √(3 SD²/n)." : "");
 }
 
 // ------------------------------------------------------------------ the raw data table
@@ -3476,6 +3558,33 @@ function fileStem() {
   return (ST.preset && ST.preset !== "custom" ? ST.preset : "figure") + "_" + ST.method + (ST.group === "geno_exp" ? "_by_experiment" : "");
 }
 
+// PDF: the SVG drawn into a PDF of the same size in mm by jsPDF + svg2pdf.js (loaded on the first PDF export). The PDF's
+// standard font is Helvetica (Arial's metrics), which has no superscript plus, minus sign or Greek letters: those become
+// + - and names (AF488+ …). Use the SVG when they must stay.
+const PDF_LIBS_SRC = ["https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js", "https://cdn.jsdelivr.net/npm/svg2pdf.js@2.2.3/dist/svg2pdf.umd.min.js"];
+let PDF_LIBS = null;
+function loadScript(src) {
+  return new Promise((ok, fail) => {
+    const el = document.createElement("script");
+    el.src = src; el.onload = ok; el.onerror = () => fail(new Error("could not load " + src));
+    document.head.appendChild(el);
+  });
+}
+const pdfLibs = () => (PDF_LIBS = PDF_LIBS || PDF_LIBS_SRC.reduce((p, src) => p.then(() => loadScript(src)), Promise.resolve()).catch((e) => { PDF_LIBS = null; throw e; }));
+const PDF_TEXT = { "⁺": "+", "⁻": "-", "−": "-", "₀": "0", "₁": "1", "₂": "2", "₃": "3", "ρ": "rho", "σ": "sigma", "τ": "tau", "θ": "theta", "≤": "<=", "≥": ">=", "′": "'", "√": "sqrt", "π": "pi" };
+function svgToPdf(text, wMm, hMm, name) {
+  return pdfLibs().then(() => {
+    text = text.replace(/[⁺⁻−₀₁₂₃ρστθ≤≥′√π]/g, (c) => PDF_TEXT[c]);
+    const host = document.createElement("div");
+    host.style.cssText = "position:fixed;left:-10000px;top:0";
+    host.innerHTML = text;
+    document.body.appendChild(host);
+    const svg = host.querySelector("svg");
+    const doc = new window.jspdf.jsPDF({ unit: "mm", format: [wMm, hMm], orientation: wMm > hMm ? "landscape" : "portrait" });
+    return window.svg2pdf.svg2pdf(svg, doc, { x: 0, y: 0, width: wMm, height: hMm }).then(() => { host.remove(); doc.save(name); });
+  }).catch((e) => alert("The PDF could not be made: " + e.message + ". The SVG export works without a network connection."));
+}
+
 function exportImage(format, which) {
   // The figure as drawn on screen (zoom z: 1 pt = z px). The SVG gets its physical size in mm and a viewBox, so it
   // opens at the chosen size with the text as text; the PNG is scaled to 600 dpi at that size.
@@ -3486,6 +3595,10 @@ function exportImage(format, which) {
   const W = fig.layout.width, H = fig.layout.height;
   const size = which === "scatter" ? ST.sc : which === "dist" ? ST.ds : which === "human" ? ST.hv : ST;
   const wMm = size.widthMm, hMm = size.heightMm;
+  const stem = which === "human" ? "human_vs_automated_" + ST.method + (ST.hv.plot === "ba" ? "_bland_altman" : "")
+    : fileStem() + (which ? "_" + (which === "dist" ? "distribution" : which) : "");
+  const pdf = format === "pdf";
+  if (pdf) format = "svg";
   return Plotly.toImage(fig, { format, width: W, height: H, scale: format === "png" ? 600 / (72 * z) : 1 }).then((url) => {
     let href = url;
     if (format === "svg") {
@@ -3494,11 +3607,12 @@ function exportImage(format, which) {
         attrs = attrs.replace(/\swidth="[^"]*"/, "").replace(/\sheight="[^"]*"/, "").replace(/\sviewBox="[^"]*"/, "");
         return "<svg" + attrs + ' width="' + wMm + 'mm" height="' + hMm + 'mm" viewBox="0 0 ' + W + " " + H + '">';
       });
+      if (pdf) return svgToPdf(text, wMm, hMm, stem + ".pdf");
       href = URL.createObjectURL(new Blob([text], { type: "image/svg+xml" }));
     }
     const a = document.createElement("a");
     a.href = href;
-    a.download = (which === "human" ? "human_vs_automated_" + ST.method : fileStem() + (which ? "_" + (which === "dist" ? "distribution" : which) : "")) + "." + format;
+    a.download = stem + "." + format;
     document.body.appendChild(a);
     a.click();
     a.remove();
