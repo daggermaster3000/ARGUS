@@ -1121,7 +1121,7 @@ const SECTION_VARS = [
   ["experiment", "Experiment", "experiment number"],
 ];
 const NOTEBOOK_VARS = [
-  ["edge_um", "edge (µm)", "crossed cells: mean distance to the organoid edge, µm (sections with ≥ 3 crossed)"],
+  ["edge_um", "edge (µm)", "crossed cells: mean distance to the organoid edge, µm (negative distances left out; sections with ≥ 3 crossed)"],
   ["past_um", "past line (µm)", "crossed cells: mean distance past the line, µm (≥ 3 crossed)"],
   ["edge_rel", "edge ÷ half-width", "crossed cells: distance to the edge ÷ local half-width (≥ 3 crossed)"],
   ["past_rel", "past line ÷ assembloid length", "crossed cells: distance past the line ÷ assembloid length (≥ 3 crossed)"],
@@ -2736,7 +2736,7 @@ const OBJECT_VARS = [
   ["area", "the object's area, µm²"],
   ["is_crossed", "1 if the object crossed (away > 0), else 0"],
   ["in_region", "1 if its centroid lies in the junction region, else 0"],
-  ["edge", "distance to the organoid edge, µm (that of the nearest segmented cell, as 02_biology)"],
+  ["edge", "distance to the organoid edge, µm (that of the nearest segmented cell; negative ones, outside the tissue mask, left out)"],
   ["edge_rel", "distance to the edge ÷ the organoid's local half-width at that depth past the line (crossed objects only)"],
   ["home_depth", "the section's home depth, µm: the distance from the line to the centroid of its home-side objects"],
 ];
@@ -3968,7 +3968,7 @@ const WORDS = {   // variable → plain words for the outcome sentence
   junction_mm: "the junction line's length (mm)", junction_um: "the junction line's length (µm)",
   area_mm2: "the assembloid (tissue) area of the section (mm²)", nuclei: "the number of segmented nuclei in the section",
   assembloid_um: "the assembloid's length across the junction line (µm)", human: "the human count",
-  edge_um: "the crossed cells' mean distance to the organoid edge (µm)", past_um: "the crossed cells' mean distance past the line (µm)",
+  edge_um: "the crossed cells' mean distance to the organoid edge (µm; negative distances, the nearest cell outside the tissue mask, left out)", past_um: "the crossed cells' mean distance past the line (µm)",
   edge_rel: "the crossed cells' distance to the edge divided by the organoid's local half-width",
   past_rel: "the crossed cells' distance past the line divided by the assembloid length",
   share_crossed: "the share of AF488⁺ cells that crossed, crossed ÷ (crossed + home)",

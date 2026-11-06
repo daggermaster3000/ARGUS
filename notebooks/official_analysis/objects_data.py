@@ -9,7 +9,8 @@ browser's ``data.json`` (WT3 and GD1), with:
 - ``area`` — the object's area (µm²);
 - ``reg`` — 1 when its centroid lies in the junction region (the stored ``In region``);
 - ``edge`` — distance to the organoid edge (µm): that of the nearest segmented cell of the run's cell table
-  (``Distance to the tissue edge (µm)``), as ``02_biology.ipynb`` does for the crossed objects;
+  (``Distance to the tissue edge (µm)``), as ``02_biology.ipynb`` does for the crossed objects; missing (null)
+  where that distance is negative (a cell outside the tissue mask);
 - ``edge_rel`` — ``edge`` ÷ the organoid's local half-width at the same depth past the line (99th percentile of
   the cells' distance to the edge per 25 µm step over the far side, ≥ 20 cells; as 02_biology), clipped to 0–1,
   for crossed objects only.
@@ -95,7 +96,7 @@ def section_objects(name: str, sign: float | None) -> tuple[pd.DataFrame, float]
     cyx = cells[["Centroid Y (µm)", "Centroid X (µm)"]].to_numpy(float)
     cedge = cells[EDGE_COLUMN].to_numpy(float)
     _, nearest = cKDTree(cyx).query(yx)
-    frame["edge"] = cedge[nearest]
+    frame["edge"] = np.where(cedge[nearest] >= 0, cedge[nearest], np.nan)   # negative: outside the tissue mask, left out
     steps, widths = half_widths(sides.away(cyx, line, sign), cedge)
     rel = np.clip(frame["edge"].to_numpy() / width_at(away, steps, widths), 0, 1)
     frame["edge_rel"] = np.where(away > 0, rel, np.nan)
