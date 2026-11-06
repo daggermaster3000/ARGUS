@@ -150,6 +150,11 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
   <details open>
     <summary>Statistics</summary>
     <div class="row"><label>Effect <select id="effect"><option value="fold">fold of means, WT3 / GD1</option><option value="difference">difference of means, WT3 − GD1</option></select></label></div>
+    <div class="row"><label title="A bracket between the two groups compared, with stars, drawn only where P < 0.05 (unless n.s. is ticked). Automatic: the mixed model when one is chosen under Model (the reference test), else Welch's t on slide means. Applies to the dot plot and to the human panel's ratio-by-group plot (whose mixed model is its own LMM of the log ratio; experiments: the ANOVA).">Significance bars <select id="sigBars">
+      <option value="off">off</option><option value="auto">automatic (mixed model, else Welch on slides)</option><option value="model">mixed model</option>
+      <option value="welch">Welch t on slide means</option><option value="mwSlides">Mann–Whitney on slide means</option><option value="mwSections">Mann–Whitney on sections</option></select></label></div>
+    <div class="row"><label>Show <select id="sigStyle"><option value="stars">stars (* &lt; 0.05, ** &lt; 0.01, *** &lt; 0.001)</option><option value="p">the P value</option></select></label>
+      <label><input type="checkbox" id="sigNs">also n.s.</label></div>
     <div class="row"><label title="The scale the slide-level tests are done on. The notebook models counts per mm on log(1 + y), the area on log y, shares and distances as they are.">Slide tests on <select id="testScale"><option value="none">the values as they are</option><option value="log1p">log(1 + y)</option><option value="log">log y</option></select></label></div>
   </details>
   <details open>
@@ -1281,6 +1286,7 @@ const DEFAULTS = {
   model: "lmm", mCount: "crossed", mExposure: "junction_mm", mSucc: "crossed", mTrials: "crossed+home", mOlre: true, mNodes: 15,
   modelOnPlot: "tests",
   statsKeep: false,      // edited statistics text stays when the statistics change
+  sigBars: "auto", sigStyle: "stars", sigNs: false,   // significance brackets: which test, stars or P, also n.s.
   minor: false, minorN: "auto",   // minor ticks on every panel; intervals between two major ticks on a linear axis
   colors: null,          // null = the publication greys (PUBLICATION_COLORS)
   sc: { on: true, x: "area_mm2", y: "crossed / junction_mm", unit: "section", logX: true, logY: false, fit: true, rho: true, size: 3,
@@ -1349,7 +1355,7 @@ const KNOWN = new Set([...METHOD_VARS, ...SECTION_VARS, ...NOTEBOOK_VARS].map((x
 const INPUTS = ["method", "formula", "group", "qcOnly", "noUncertain", "humanOnly", "region", "showSections", "showSlides", "showMean",
   "showStats", "showLegend", "legendLayers", "showN", "secSize", "slideSize", "secOpacity", "jitter", "scale", "linthresh", "ymin", "ymax", "yticks",
   "yticklabels", "title", "ylabel", "xlabel", "xticks", "widthMm", "heightMm", "fontPt", "zoom", "effect", "testScale",
-  "model", "mCount", "mExposure", "mSucc", "mTrials", "mOlre", "mNodes", "modelOnPlot", "statsKeep", "minor", "minorN"];
+  "model", "mCount", "mExposure", "mSucc", "mTrials", "mOlre", "mNodes", "modelOnPlot", "statsKeep", "minor", "minorN", "sigBars", "sigStyle", "sigNs"];
 const NUMERIC = new Set(["secSize", "slideSize", "secOpacity", "jitter", "linthresh", "ymin", "ymax", "widthMm", "heightMm", "fontPt", "zoom", "mNodes"]);
 
 function experiments() {
@@ -1488,6 +1494,8 @@ function setState(s) {
   if (!(ST.model in MODELS)) ST.model = DEFAULTS.model;
   if (!["tests", "model", "both"].includes(ST.modelOnPlot)) ST.modelOnPlot = "tests";
   if (!["auto", "2", "4", "5", "10"].includes(String(ST.minorN))) ST.minorN = "auto";
+  if (!["off", "auto", "model", "welch", "mwSlides", "mwSections"].includes(ST.sigBars)) ST.sigBars = "auto";
+  if (!["stars", "p"].includes(ST.sigStyle)) ST.sigStyle = "stars";
   ST.minorN = String(ST.minorN);
   ST.statsText = Object.fromEntries(Object.entries(ST.statsText || {}).filter(([, v]) => isEdit(v)));
   for (const o of [ST.ds, ST.hv]) if (!isEdit(o.statsText)) o.statsText = null;
@@ -2009,6 +2017,45 @@ function seededJitter(id, salt) {
   return STATS.rng(h)() * 2 - 1;        // −1 … 1
 }
 
+// ------------------------------------------------------------------ significance bars
+// A bracket over the two groups compared, with stars or P, where P < 0.05 (or always with "also n.s."). The y range
+// grows to make room above the data; overlapping brackets go on separate levels. items: [{ x0, x1, p, test }].
+const SIG_TEST_NAMES = { model: "mixed model", welch: "Welch t on slide means", mwSlides: "Mann–Whitney on slide means", mwSections: "Mann–Whitney on sections", anova: "ANOVA on slide means" };
+function sigLabel(p) {
+  if (!Number.isFinite(p)) return null;
+  if (p >= 0.05) return ST.sigNs ? "n.s." : null;
+  if (ST.sigStyle === "p") return P(p);
+  return p < 0.001 ? "***" : p < 0.01 ? "**" : "*";
+}
+// the P of the test chosen for a comparison: { model, welch, mwSlides, mwSections } → { p, test }
+function sigPick(ps) {
+  const want = ST.sigBars === "auto" ? (Number.isFinite(ps.model) ? "model" : "welch") : ST.sigBars;
+  return { p: ps[want], test: want };
+}
+function addSigBars(fig, items, z) {
+  if (ST.sigBars === "off") return;
+  const list = items.map((it) => ({ ...it, label: sigLabel(it.p) })).filter((it) => it.label).sort((a, b) => (a.x1 - a.x0) - (b.x1 - b.x0));
+  if (!list.length) return;
+  const ax = fig.layout.yaxis, log = ax.type === "log", r = ax.range, span = r[1] - r[0];
+  const fs = ST.fontPt * z, plotH = Math.max(fig.layout.height - (fig.layout.margin.t || 0) - (fig.layout.margin.b || 0), 40);
+  const step = span * Math.max(0.07, (fs * 1.5) / plotH);       // one level: the text's height
+  const levels = [];                                             // the x spans already used on each level
+  let top = 0;
+  for (const it of list) {
+    let k = 0;
+    while (levels[k] && levels[k].some(([a, b]) => it.x0 < b + 0.05 && it.x1 > a - 0.05)) k++;
+    (levels[k] = levels[k] || []).push([it.x0, it.x1]);
+    top = Math.max(top, k + 1);
+    const y = r[1] + step * (0.35 + k), tick = step * 0.18;
+    const real = (v) => (log ? Math.pow(10, v) : v);
+    fig.data.push({ type: "scatter", mode: "lines", showlegend: false, x: [it.x0, it.x0, it.x1, it.x1], y: [y - tick, y, y, y - tick].map(real),
+      line: { color: COLORS().text, width: 0.8 * z }, hovertemplate: SIG_TEST_NAMES[it.test] + ": " + P(it.p) + "<extra></extra>" });
+    fig.layout.annotations.push({ name: "sig", text: it.label, xref: "x", yref: "y", x: (it.x0 + it.x1) / 2, y, yanchor: "bottom", xanchor: "center",
+      yshift: it.label.startsWith("*") ? -fs * 0.25 : 0, showarrow: false, captureevents: false, font: { size: it.label.startsWith("*") ? fs * 1.15 : fs * 0.92, color: COLORS().text } });
+  }
+  ax.range = [r[0], r[1] + step * (top + 0.4)];
+}
+
 // ------------------------------------------------------------------ the figure
 function figure(z) {
   const { gs } = LAST;
@@ -2142,8 +2189,15 @@ function figure(z) {
       : { orientation: "v", x: 1.01, xanchor: "left", y: 1, yanchor: "top", font: { size: fs },
         bgcolor: "rgba(0,0,0,0)", itemsizing: "trace", tracegroupgap: 0, itemwidth: 30 },
   };
+  const fig = { data: traces, layout };
+  addSigBars(fig, comps.map((c, i) => {
+    const m = LAST.models && LAST.models[i], pm = m && m.res && !m.res.error ? m.res.p : NaN;
+    const ps = { model: ST.model !== "none" ? pm : NaN, welch: c.welchSlides ? c.welchSlides.p : NaN, mwSlides: c.mwSlides ? c.mwSlides.p : NaN,
+      mwSections: c.mwSections ? c.mwSections.p : NaN };
+    return { x0: c.a.x + 0.09, x1: c.b.x + 0.09, ...sigPick(ps) };
+  }), z);
   addMinorTicks(layout, z, { skip: ["xaxis"], symlog: ST.scale === "symlog" ? ["yaxis"] : [] });
-  return { data: traces, layout };
+  return fig;
 }
 
 let LAST = null, DRAWN = false, BUSY = false;
@@ -3341,7 +3395,7 @@ function computeHuman() {
 function humanGroupsFigure(z) {
   const hv = ST.hv, fs = ST.fontPt * z, W = hv.widthMm * PT_PER_MM * z, H = hv.heightMm * PT_PER_MM * z, C = COLORS();
   const name = (k, d) => (hv.legendNames[k] !== undefined ? hv.legendNames[k] : d);
-  const gs = HV.groups, traces = [], annotations = [], seen = new Set(), allY = [];
+  const gs = HV.groups, traces = [], annotations = [], seen = new Set(), allY = [], ciBars = [];
   const gcol = (g) => groupColor({ key: g, g });
   for (const grp of gs) {
     for (const g of GENOTYPES) {
@@ -3366,8 +3420,7 @@ function humanGroupsFigure(z) {
     if (Number.isFinite(o.m)) {
       const cx = grp.x + 0.09, cap = 0.05, m = Math.exp(o.m), lo = Math.exp(o.lo), hi = Math.exp(o.hi);
       if (Number.isFinite(lo)) {
-        traces.push({ type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip", line: { color: COLORS().mean, width: 1.2 * z },
-          x: [cx, cx, null, cx - cap, cx + cap, null, cx - cap, cx + cap], y: [lo, hi, null, lo, lo, null, hi, hi] });
+        ciBars.push({ cx, cap, lo, hi });     // drawn once the y range is known: cut at it, without the cap where cut
       }
       allY.push(m);              // the range follows the data; a CI from two or three slides can be far wider and is clipped
       traces.push({ type: "scatter", mode: "lines", showlegend: false, line: { color: COLORS().mean, width: 1.6 * z }, x: [grp.x - 0.06, grp.x + 0.24], y: [m, m],
@@ -3383,6 +3436,12 @@ function humanGroupsFigure(z) {
   traces.unshift({ type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip", x: xr, y: [1, 1], line: { color: MID, width: 0.5 * z, dash: "dot" } });
   const y0 = Math.min(0.4, ...allY.map((v) => v / 1.12)), y1 = Math.max(2.5, ...allY.map((v) => v * 1.12));
   const ticks = [0.125, 0.25, 0.5, 1, 2, 4, 8].filter((v) => v >= y0 * 0.999 && v <= y1 * 1.001);
+  for (const b of ciBars) {
+    const lo = Math.max(b.lo, y0), hi = Math.min(b.hi, y1), x = [b.cx, b.cx], y = [lo, hi];
+    if (b.lo >= y0) x.push(null, b.cx - b.cap, b.cx + b.cap), y.push(null, lo, lo);
+    if (b.hi <= y1) x.push(null, b.cx - b.cap, b.cx + b.cap), y.push(null, hi, hi);
+    traces.push({ type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip", line: { color: COLORS().mean, width: 1.2 * z }, x, y });
+  }
   // the tests above each comparison (editable on the plot; replaced when the numbers change)
   let statLines = 0;
   if (ST.showStats) HV.comps.forEach((c, i) => {
@@ -3407,8 +3466,15 @@ function humanGroupsFigure(z) {
   const plotH = Math.max(H - top - layout.margin.b, 10);
   if (hv.title) annotations.push({ name: "title", text: toHtml(hv.title), xref: "paper", yref: "paper", x: 0.5, xanchor: "center",
     y: 1 + (top - 6 * z) / plotH, yanchor: "top", showarrow: false, font: { size: fs * 1.1, color: C.text } });
+  const fig = { data: traces, layout };
+  addSigBars(fig, HV.comps.map((c) => {
+    if (c.kind === "anova") return { x0: gs[0].x + 0.09, x1: gs[gs.length - 1].x + 0.09, p: c.anova ? c.anova.p : NaN, test: "anova" };
+    const ps = { model: c.lmm && !c.lmm.error ? c.lmm.p : NaN, welch: c.welch ? c.welch.p : NaN, mwSlides: c.mwSlides ? c.mwSlides.p : NaN,
+      mwSections: c.mwSections ? c.mwSections.p : NaN };
+    return { x0: c.a.x + 0.09, x1: c.b.x + 0.09, ...sigPick(ps) };
+  }), z);
   addMinorTicks(layout, z, { skip: ["xaxis"], force: true });
-  return { data: traces, layout };
+  return fig;
 }
 
 function humanFigure(z) {
@@ -3998,7 +4064,9 @@ function methodsText() {
       (ST.effect === "fold" ? "ratio of the section means (WT3 ÷ GD1)" : "difference of the section means (WT3 − GD1)") +
       ", by the two-sided Mann–Whitney U test on sections (normal approximation with tie and continuity correction when both groups " +
       "had more than 20 values, exact otherwise), and at the slide level, with slides as the unit, by Welch's t-test on the slide means " +
-      "of " + scaleWords + " and the Mann–Whitney U test on slide means. Two-sided P < 0.05 was taken as significant.");
+      "of " + scaleWords + " and the Mann–Whitney U test on slide means. Two-sided P < 0.05 was taken as significant." +
+      (ST.sigBars !== "off" ? " Brackets mark the comparisons with P < 0.05 by " + (ST.sigBars === "auto" ? (ST.model !== "none" ? "the mixed model" : "Welch's t-test on slide means")
+        : SIG_TEST_NAMES[ST.sigBars]) + (ST.sigStyle === "stars" ? " (* P < 0.05, ** P < 0.01, *** P < 0.001)" : "") + (ST.sigNs ? "; n.s., not significant" : "") + "." : ""));
   }
   if ($("mModel").checked && ST.model !== "none") out.push(modelMethods());
   if ($("mScatter").checked && ST.sc) {
