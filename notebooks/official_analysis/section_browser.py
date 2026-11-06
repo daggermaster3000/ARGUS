@@ -34,7 +34,9 @@ Writes into *out* (default ``run_analysis_20261028/section_browser``) ``data.jso
 ``data.js`` (so the page opens from disk too), ``img/`` and ``parts/`` (one file per section, so a
 rerun skips what is done), beside a copy of ``section_browser.html`` and of ``figure_builder.html``
 (the biology notebook's graphs with any normalisation; it also reads ``sections_table.js``, which
-the last cell of ``02_biology.ipynb`` writes into the same folder).
+the last cell of ``02_biology.ipynb`` writes into the same folder), and ``objects.js`` (every counted AF488⁺
+object, for the figure builder's distribution panel; written by ``objects_data.py`` from the new ``data.json``,
+or on its own with ``python notebooks/official_analysis/objects_data.py``).
 
     python notebooks/official_analysis/section_browser.py            # every section not done yet
     python notebooks/official_analysis/section_browser.py 5          # just five, to time it
@@ -633,6 +635,8 @@ def main(argv: list[str]) -> int:
     pool_run("outlines and counts", run_masks, todo, out)
     n = assemble(out, table)
     print(f"written {out / 'data.json'}: {n} sections", flush=True)
+    import objects_data                         # every counted object, for the figure builder (objects.js)
+    objects_data.main(["--out", str(out)])
     return 0
 
 
