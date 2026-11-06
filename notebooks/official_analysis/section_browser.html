@@ -52,6 +52,7 @@ tbody tr.sel { background: var(--ink); color: var(--paper); }
 #svg.drag { cursor: grabbing; }
 #scalebar { position: absolute; left: 14px; bottom: 12px; color: #fff; font-size: 12px; pointer-events: none; }
 #scalebar div { height: 3px; background: #fff; margin-bottom: 3px; }
+#scalebar em { font-style: normal; margin-left: 10px; color: #ccc; }
 #toggles { position: absolute; top: 8px; left: 8px; display: flex; flex-wrap: wrap; gap: 4px 10px; color: #fff; background: rgba(0,0,0,.6); padding: 4px 8px; font-size: 12px; }
 #toggles label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
 #toggles button { background: transparent; color: #fff; border: 1px solid #fff; font-size: 12px; padding: 0 6px; cursor: pointer; }
@@ -146,9 +147,15 @@ body.gallery #gallery { display: grid; }
             <!-- each channel's contrast limits and gamma (the brightness panel): a lookup table on the displayed values -->
             <filter id="fltG" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="identity"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer></filter>
             <filter id="fltR" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="identity"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer></filter>
+            <!-- the full-resolution tiles are grey: the same contrast, then only the channel's colour -->
+            <filter id="fltGt" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="identity"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer>
+              <feColorMatrix type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0"/></filter>
+            <filter id="fltRt" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="identity"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer>
+              <feColorMatrix type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/></filter>
           </defs>
-          <image id="img" x="0" y="0"></image>
-          <image id="imgR" x="0" y="0" style="mix-blend-mode: screen"></image>
+          <!-- each channel: its overview (~1.3 µm) and, zoomed in, its full-resolution tiles over it; the red layer is added onto the green one -->
+          <g id="chG"><image id="img" x="0" y="0"></image><g id="tilesG" filter="url(#fltGt)"></g></g>
+          <g id="chR" style="mix-blend-mode: screen"><image id="imgR" x="0" y="0"></image><g id="tilesR" filter="url(#fltRt)"></g></g>
           <g id="gRegion" fill="none" stroke="#d9d9d9" stroke-width="1.5" stroke-dasharray="5 4"></g>
           <g id="gLine" fill="none" stroke="#ffffff" stroke-width="2"></g>
           <g id="gObjects" fill="#ffffff" fill-opacity="0" stroke-width="1.2" stroke-linejoin="round"></g>
@@ -177,7 +184,7 @@ body.gallery #gallery { display: grid; }
           <p class="hint">Contrast limits on the image as displayed (0–255): below min is black, above max full brightness; gamma &lt; 1 brightens the dim cells. The pictures are already stretched 8-bit copies, so detail clipped in them cannot come back. Applies to every section; the outlines and counts do not change.</p>
         </div>
         <div id="nav"><button id="prev" title="previous (left arrow)">&larr;</button><button id="fit" title="fit (0)">fit</button><button id="next" title="next (right arrow)">&rarr;</button></div>
-        <div id="scalebar"><div></div><span></span></div>
+        <div id="scalebar"><div></div><span></span><em id="tileStatus"></em></div>
         <div id="maskStatus"></div>
       </div>
       <aside id="info"></aside>
@@ -526,7 +533,69 @@ function markPlots(s) {
 // ------------------------------------------------------------------ viewer
 function el(tag, attrs) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
 
-function setViewBox() { $("svg").setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); scaleBar(); }
+function setViewBox() { $("svg").setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); scaleBar(); scheduleTiles(); }
+
+// ------------------------------------------------------------------ full-resolution tiles (browser_tiles.py)
+// tiles/<id>/tiles.js lists a section's tiles: per level (d = 1 the scan's pixels, 2 halved), per channel, [row, col, w, h]
+// of TILE-px greyscale JPEGs. Once the overview's pixels are larger than ~1.5 screen pixels, the coarsest level that
+// is fine enough is shown, only the tiles in view. A <script> tag, not fetch(), so the page works from file:// too.
+const TILES = {}, TILES_WAIT = {};
+window.TILES_LOADED = (id, d) => { TILES[id] = d; };
+function loadTiles(id) {
+  if (id in TILES) return Promise.resolve(TILES[id]);
+  if (TILES_WAIT[id]) return TILES_WAIT[id];
+  TILES_WAIT[id] = new Promise((resolve) => {
+    const tag = document.createElement("script");
+    tag.src = "tiles/" + encodeURIComponent(id) + "/tiles.js";
+    tag.onload = () => { tag.remove(); delete TILES_WAIT[id]; if (!(id in TILES)) TILES[id] = null; resolve(TILES[id]); };
+    tag.onerror = () => { tag.remove(); delete TILES_WAIT[id]; TILES[id] = null; resolve(null); };     // not tiled: the overview only
+    document.head.appendChild(tag);
+  });
+  return TILES_WAIT[id];
+}
+let TILE_TIMER = 0;
+function scheduleTiles() { clearTimeout(TILE_TIMER); TILE_TIMER = setTimeout(updateTiles, 80); }
+function updateTiles() {
+  const s = CUR;
+  if (!s) return;
+  if (!(s.id in TILES)) { loadTiles(s.id).then(() => { if (CUR === s) updateTiles(); }); return; }
+  const d = TILES[s.id], groups = { g: $("tilesG"), r: $("tilesR") };
+  let level = null;
+  const r = $("svg").getBoundingClientRect(), sc = screenScale(), dpr = window.devicePixelRatio || 1;
+  if (d && r.width > 0) {
+    const perOverview = sc * dpr;                            // device pixels per overview pixel
+    if (perOverview > 1.5) {
+      const levels = d.levels.slice().sort((a, b) => b.d - a.d);   // coarse first
+      level = levels.find((lv) => perOverview * lv.d / d.f <= 1.5) || levels[levels.length - 1];
+    }
+  }
+  const status = $("tileStatus");
+  if (status) status.textContent = !d ? "" : level ? (level.d === 1 ? "full resolution" : "½ resolution") + " (" + (s.um_per_px / d.f * level.d).toFixed(2) + " µm/px)" : "";
+  // the area in view, in overview pixels (the stage may show more than the viewBox on one side)
+  const cx = vb.x + vb.w / 2, cy = vb.y + vb.h / 2, hw = r.width / sc / 2, hh = r.height / sc / 2;
+  const ch = $("tChannel").value, shown = $("tImage").checked;
+  for (const c of ["g", "r"]) {
+    const g = groups[c], want = new Map();
+    if (level && shown && ch.includes(c) && level.have[c]) {
+      const k = level.d / d.f, T = level.tile;               // overview pixels per level pixel; tile side
+      const x0 = (cx - hw) / k / T, x1 = (cx + hw) / k / T, y0 = (cy - hh) / k / T, y1 = (cy + hh) / k / T;
+      for (const [row, col, w, h] of level.have[c]) {
+        if (col + 1 < x0 || col > x1 || row + 1 < y0 || row > y1) continue;
+        want.set(level.d + "/" + row + "_" + col, { x: col * T * k, y: row * T * k, w: w * k, h: h * k });
+      }
+    }
+    for (const im of [...g.children]) if (!want.has(im.dataset.k)) im.remove();
+    const have = new Set([...g.children].map((im) => im.dataset.k));
+    for (const [key, t] of want) {
+      if (have.has(key)) continue;
+      // a hair wider than the tile, so no seam shows between neighbours
+      const im = el("image", { href: "tiles/" + encodeURIComponent(s.id) + "/" + c + "/" + key + ".jpg", x: t.x, y: t.y,
+        width: t.w + 0.02, height: t.h + 0.02, preserveAspectRatio: "none" });
+      im.dataset.k = key;
+      g.appendChild(im);
+    }
+  }
+}
 
 function fit() {
   if (!CUR) return;
@@ -556,6 +625,8 @@ function draw(s) {
   $("imgR").setAttribute("href", s.red ? "img/" + s.id + "_r.jpg" : "");
   $("imgR").setAttribute("width", s.width);
   $("imgR").setAttribute("height", s.height);
+  $("tilesG").innerHTML = ""; $("tilesR").innerHTML = "";
+  scheduleTiles();
   const gL = $("gLine"), gR = $("gRegion"), gO = $("gObjects"), gH = $("gHumans");
   for (const g of [gL, gR, gO, gH]) g.innerHTML = "";
   if (s.line && s.line.length) gL.appendChild(el("polyline", { points: s.line.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
@@ -644,7 +715,8 @@ function contrastTable(c) {
 function applyContrast() {
   for (const ch of ["g", "r"]) {
     const c = CONTRAST[ch], plain = c.lo === 0 && c.hi === 255 && Math.abs(c.g) < 1e-9;
-    const funcs = $(ch === "g" ? "fltG" : "fltR").querySelectorAll("feFuncR, feFuncG, feFuncB");
+    const funcs = [...$(ch === "g" ? "fltG" : "fltR").querySelectorAll("feFuncR, feFuncG, feFuncB"),
+      ...$(ch === "g" ? "fltGt" : "fltRt").querySelectorAll("feFuncR, feFuncG, feFuncB")];
     for (const f of funcs) {
       if (plain) { f.setAttribute("type", "identity"); f.removeAttribute("tableValues"); }
       else { f.setAttribute("type", "table"); f.setAttribute("tableValues", contrastTable(c)); }
@@ -684,8 +756,9 @@ function applyToggles() {
   $("gObjects").style.display = $("tObjects").checked ? "" : "none";
   $("gHumans").style.display = $("tHumans").checked ? "" : "none";
   const ch = $("tChannel").value, shown = $("tImage").checked;
-  $("img").style.display = shown && ch.includes("g") ? "" : "none";
-  $("imgR").style.display = shown && ch.includes("r") ? "" : "none";
+  $("chG").style.display = shown && ch.includes("g") ? "" : "none";
+  $("chR").style.display = shown && ch.includes("r") ? "" : "none";
+  scheduleTiles();
   saveUI();
 }
 
@@ -779,7 +852,7 @@ function setupStage() {
   const end = () => { drag = null; svg.classList.remove("drag"); };
   svg.addEventListener("pointerup", end);
   svg.addEventListener("pointercancel", end);
-  window.addEventListener("resize", scaleBar);
+  window.addEventListener("resize", () => { scaleBar(); scheduleTiles(); });
   for (const id of ["tLine", "tRegion", "tObjects", "tHumans", "tImage", "tChannel"]) $(id).onchange = applyToggles;
   $("prev").onclick = () => step(-1);
   $("next").onclick = () => step(1);

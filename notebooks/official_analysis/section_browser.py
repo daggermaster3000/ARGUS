@@ -44,6 +44,10 @@ or on its own with ``python notebooks/official_analysis/objects_data.py``).
 
 Then open ``section_browser.html`` there (from disk), or ``python -m http.server`` in *out* and
 http://localhost:8000/section_browser.html. No Qt.
+
+Full resolution when zoomed in: ``python notebooks/official_analysis/browser_tiles.py`` afterwards writes
+``tiles/`` (512 px tiles of each channel at the scan's pixels and halved, ~7 GB for the 614 sections); without it
+the page shows the ~1.3 µm overview only.
 """
 from __future__ import annotations
 
