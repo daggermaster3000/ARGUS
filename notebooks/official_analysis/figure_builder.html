@@ -22,7 +22,7 @@ input[type=number] { width: 70px; }
 input[type=checkbox] { margin: 0 4px 0 0; }
 textarea { width: 100%; padding: 4px; resize: vertical; }
 button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
-main { display: grid; grid-template-columns: 400px minmax(0, 1fr); min-height: calc(100vh - 44px); }
+main { display: grid; grid-template-columns: 360px minmax(0, 1fr); min-height: calc(100vh - 44px); }
 #controls { border-right: 1px solid var(--ink); overflow: auto; max-height: calc(100vh - 44px); padding-bottom: 20px; }
 details { border-bottom: 1px solid var(--light); padding: 6px 12px; }
 summary { font-weight: bold; cursor: pointer; padding: 2px 0; }
@@ -74,6 +74,29 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
 #dataT { margin: 0; }
 #dataT th { position: sticky; top: 0; background: var(--paper); cursor: pointer; }
 #dataT td { font-size: 12px; }
+#controls .row label { max-width: 100%; min-width: 0; }
+#controls .row label select { min-width: 0; max-width: 100%; flex: 0 1 auto; }
+.flyout .row label { max-width: 100%; min-width: 0; }
+.flyout .row label select { min-width: 0; max-width: 100%; flex: 0 1 auto; }
+details.sub { border: 0; padding: 0; margin: 4px 0 0; }
+details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px; }
+.plothint { color: var(--dark); font-size: 12px; margin: 3px 0 8px; }
+.linkbtn { border: 0; padding: 0; background: none; color: inherit; font-size: inherit; text-decoration: underline; cursor: pointer; }
+.linkbtn:hover { background: none; color: var(--ink); }
+/* right-click menus: the menu at the cursor, and a panel of controls beside it */
+.ctx, .flyout { position: fixed; z-index: 1000; background: var(--paper); border: 1px solid var(--ink); box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.12); }
+.ctx { min-width: 200px; padding: 3px 0; user-select: none; }
+.ctx .head { padding: 3px 12px 4px; color: var(--dark); font-size: 12px; border-bottom: 1px solid var(--light); margin-bottom: 3px; }
+.ctx .item { display: flex; justify-content: space-between; gap: 18px; padding: 4px 12px; cursor: pointer; white-space: nowrap; outline: none; }
+.ctx .item:hover, .ctx .item:focus, .ctx .item.on { background: var(--soft); }
+.ctx .item.on { font-weight: bold; }
+.ctx .arrow { color: var(--dark); }
+.ctx .sep { border-top: 1px solid var(--light); margin: 3px 0; }
+.flyout { z-index: 1001; width: min(390px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto; padding: 4px 12px 8px; }
+.flyout h3 { font-size: 13px; margin: 4px 0 2px; }
+.flyout .pane + .pane { border-top: 1px solid var(--light); margin-top: 8px; padding-top: 2px; }
+.flyout label > textarea { display: block; margin: 2px 0 6px; }
+.panehead { font-size: 12px; color: var(--dark); margin: 6px 0 0; }
 @media (max-width: 900px) {
   main { grid-template-columns: 1fr; }
   #controls { max-height: none; border-right: 0; border-bottom: 1px solid var(--ink); }
@@ -94,12 +117,15 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
   <details open>
     <summary>What to plot</summary>
     <div class="row"><label>Preset <select id="preset"></select></label></div>
-    <div class="row"><label title="How a cell is called AF488-positive, for the variables total, region, crossed, home and auto_in_human_area. The notebook's counting method is the Gaussian 20 µm mask at 5 SD.">Positivity <select id="method"></select></label></div>
+    <div class="row"><label id="methodLabel" title="How a cell is called AF488-positive, for the variables total, region, crossed, home and auto_in_human_area.">Positivity <select id="method"></select></label></div>
     <label for="formula"><b>Formula</b> (one value per section)</label>
     <textarea id="formula" rows="2" spellcheck="false"></textarea>
     <div id="formulaMsg"></div>
-    <p class="hint">+ − × ÷ (or * /), ^, parentheses, numbers; functions log (natural), log10, log2, log1p, exp, sqrt, abs, min, max, pow, ifelse(test, a, b); comparisons &lt; &gt; &lt;= &gt;= == != give 1 or 0; <code>nan</code> drops a section. A section whose value is not a finite number (division by zero, a missing value) is left out and counted below the plot. Click a variable to insert it.</p>
-    <div id="vars"></div>
+    <details class="sub">
+      <summary>Variables and functions (click a variable to insert it)</summary>
+      <p class="hint">+ − × ÷ (or * /), ^, parentheses, numbers; functions log (natural), log10, log2, log1p, exp, sqrt, abs, min, max, pow, ifelse(test, a, b); comparisons &lt; &gt; &lt;= &gt;= == != give 1 or 0; <code>nan</code> drops a section. A section whose value is not a finite number (division by zero, a missing value) is left out and counted below the plot.</p>
+      <div id="vars"></div>
+    </details>
   </details>
   <details open>
     <summary>Groups and sections</summary>
@@ -108,186 +134,61 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
     <div class="row"><label><input type="checkbox" id="qcOnly">QC status ok only</label></div>
     <div class="row"><label title="Sections where fewer than half of the run's AF488+ nuclei near the line lie on the side called home."><input type="checkbox" id="noUncertain">leave out the sections whose home side is uncertain</label></div>
     <div class="row"><label><input type="checkbox" id="humanOnly">human-counted sections only</label></div>
-    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>human annotator 1</label><label><input type="checkbox" data-ann="2" checked>human annotator 2</label></div>
+    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label></div>
     <div class="row"><label>Junction region <select id="region"><option value="all">all</option><option value="hand">drawn by hand</option><option value="auto">found automatically</option></select></label></div>
   </details>
   <details open>
-    <summary>Layers and markers</summary>
-    <div class="row"><label><input type="checkbox" id="showSections">sections</label><label><input type="checkbox" id="showSlides">slide means</label><label><input type="checkbox" id="showMean">mean ± SEM</label></div>
-    <div class="row"><label><input type="checkbox" id="showStats">statistics on the plot</label><label><input type="checkbox" id="showLegend">legend</label><label><input type="checkbox" id="showN">n under the groups</label></div>
-    <div class="row"><label><input type="checkbox" id="legendLayers">legend also explains section, slide mean, mean ± SEM</label></div>
-    <div class="row"><label>Section marker <input type="number" id="secSize" step="0.5" min="0.5"> pt</label><label>Slide mean <input type="number" id="slideSize" step="0.5" min="0.5"> pt</label></div>
-    <div class="row"><label>Section opacity <input type="number" id="secOpacity" step="0.1" min="0.1" max="1"></label><label>Jitter ± <input type="number" id="jitter" step="0.02" min="0" max="0.4"></label></div>
-  </details>
-  <details open>
-    <summary>Axes</summary>
-    <div class="row"><label>y axis <select id="scale"><option value="linear">linear</option><option value="log">log</option><option value="symlog">symlog (linear near 0, log above)</option></select></label>
-      <label title="Below this value the symlog axis is linear (matplotlib's linthresh; the notebook uses 1).">linear below <input type="number" id="linthresh" step="0.1" min="0.001"></label></div>
-    <div class="row"><label>y from <input type="number" id="ymin" step="any"></label><label>to <input type="number" id="ymax" step="any"></label><span class="hint">empty = from the data</span></div>
-    <div class="row" style="width:100%"><label style="width:100%">y ticks <input type="text" id="yticks" style="flex:1" placeholder="e.g. 0, 1, 2, 5, 10 (empty = automatic)"></label></div>
-    <div class="row" style="width:100%"><label style="width:100%">tick labels <input type="text" id="yticklabels" style="flex:1" placeholder="same count as the ticks (empty = the values)"></label></div>
-    <div class="row"><label title="Short unlabelled ticks between the major ones, on every panel's numeric axes."><input type="checkbox" id="minor">minor ticks</label>
-      <label title="On a linear axis: how many intervals each gap between two major ticks is cut into (auto: 5 for steps of 1 or 5, 4 for steps of 2). On a log axis the minor ticks are at 2, 3 … 9 of each decade, whatever is set here.">intervals between major ticks <select id="minorN"><option value="auto">auto</option><option value="2">2</option><option value="4">4</option><option value="5">5</option><option value="10">10</option></select></label></div>
-    <p class="hint">Minor ticks apply to every panel. A linear axis with automatic ticks gets its major ticks from the page then, so the minor ones fall exactly between them.</p>
-  </details>
-  <details open>
-    <summary>Text</summary>
-    <p class="hint">Title, axis titles, legend entries and the statistics text can also be edited on the plot itself: click the text. A line break is a new line here, &lt;br&gt; on the plot.</p>
-    <label>Title<textarea id="title" rows="1"></textarea></label>
-    <label>y axis title<textarea id="ylabel" rows="2"></textarea></label>
-    <label>x axis title<textarea id="xlabel" rows="1"></textarea></label>
-    <label>Group labels (one per line, in order; empty = automatic)<textarea id="xticks" rows="2" placeholder="WT3&#10;GD1"></textarea></label>
-    <div id="legendFields"></div>
-    <div class="row"><label title="Off: text you edited on the plot or below is replaced by the automatic text as soon as the statistics change (another formula, method, filter, model …), so the plot always shows the numbers in the tables. On: your text stays until you clear it."><input type="checkbox" id="statsKeep">keep my edited statistics text when the numbers change</label></div>
-    <div id="statFields"></div>
-  </details>
-  <details open>
-    <summary>Figure size and font</summary>
-    <div class="row"><label>Width <input type="number" id="widthMm" step="1" min="20"> mm</label><label>Height <input type="number" id="heightMm" step="1" min="20"> mm</label></div>
-    <div class="row"><label>Font <input type="number" id="fontPt" step="0.5" min="4"> pt (Arial)</label><label>Screen zoom <input type="number" id="zoom" step="0.25" min="0.5" max="8"></label></div>
-    <p class="hint">Sizes are physical: the font and marker sizes are in pt at the chosen width and height. The exports are the figure as it is on screen, at that size: the SVG in mm (text stays text, Arial), the PNG at 600 dpi. The zoom only changes how large it is drawn here (and the spacing of the legend's symbols, which Plotly keeps in screen pixels).</p>
-  </details>
-  <details open>
-    <summary>Statistics</summary>
-    <div class="row"><label>Effect <select id="effect"><option value="fold">fold of means, WT3 / GD1</option><option value="difference">difference of means, WT3 − GD1</option></select></label></div>
-    <div class="row"><label title="A bracket between the two groups compared, with stars, drawn only where P < 0.05 (unless n.s. is ticked). Automatic: the mixed model when one is chosen under Model (the reference test), else Welch's t on slide means. Applies to the dot plot and to the human panel's ratio-by-group plot (whose mixed model is its own LMM of the log ratio; experiments: the ANOVA).">Significance bars <select id="sigBars">
-      <option value="off">off</option><option value="auto">automatic (mixed model, else Welch on slides)</option><option value="model">mixed model</option>
-      <option value="welch">Welch t on slide means</option><option value="mwSlides">Mann–Whitney on slide means</option><option value="mwSections">Mann–Whitney on sections</option></select></label></div>
-    <div class="row"><label>Show <select id="sigStyle"><option value="stars">stars (* &lt; 0.05, ** &lt; 0.01, *** &lt; 0.001)</option><option value="p">the P value</option></select></label>
-      <label><input type="checkbox" id="sigNs">also n.s.</label></div>
-    <div class="row"><label title="The scale the slide-level tests are done on. The notebook models counts per mm on log(1 + y), the area on log y, shares and distances as they are.">Slide tests on <select id="testScale"><option value="none">the values as they are</option><option value="log1p">log(1 + y)</option><option value="log">log y</option></select></label></div>
-  </details>
-  <details open>
     <summary>Model</summary>
-    <p class="hint">A mixed model compares WT3 with GD1 with the slide as a random effect, so the sections of one slide are not counted as independent evidence. Grouped by genotype × experiment, each experiment is fitted on its own (without the experiment term). The result is the table under the statistics; the plot can show it.</p>
-    <div class="row"><label>Model <select id="model">
+    <div class="row"><label title="A mixed model compares WT3 with GD1 with the slide as a random effect, so the sections of one slide are not counted as independent evidence. Grouped by genotype × experiment, each experiment is fitted on its own (without the experiment term). The result is the table under the statistics; whether the plot shows it is under the dot plot's right-click menu, Statistics.">Model <select id="model">
       <option value="none">none</option>
       <option value="lmm">linear mixed model of the plotted value (REML)</option>
       <option value="nb">negative-binomial GLMM of a count</option>
       <option value="poisson">Poisson GLMM of a count</option>
       <option value="binomial">binomial GLMM of a share</option></select></label></div>
-    <p class="hint" id="rowLmm">Modelled: the plotted value on the scale chosen under Statistics (“Slide tests on”). log(1 + y) and log y give a fold WT3 / GD1, the values as they are a difference.</p>
+    <p class="hint" id="rowLmm">Modelled: the plotted value on the scale chosen under the dot plot's Statistics (“Slide tests on”). log(1 + y) and log y give a fold WT3 / GD1, the values as they are a difference.</p>
     <div class="row" id="rowCount"><label title="A count per section: the model is for counts, not for a ratio. The offset turns it into a rate (per mm of junction, per mm² …).">Count <select id="mCount"></select></label>
       <label title="log(exposure) is an offset: the rate ratio is per unit of it.">per <select id="mExposure"></select></label></div>
     <div class="row" id="rowShare"><label>Successes <select id="mSucc"></select></label><label>out of <select id="mTrials"></select></label></div>
     <div class="row" id="rowOlre"><label title="A random intercept for every section, inside its slide: sections vary more than a binomial allows (overdispersion). Without it the CI is too narrow when they do."><input type="checkbox" id="mOlre">random effect per section (overdispersion)</label></div>
     <div class="row" id="rowNodes"><label title="Adaptive Gauss–Hermite quadrature over each slide's random effect. 15 is plenty; more is slower and changes the numbers only in the 4th digit or later.">Quadrature nodes per slide <input type="number" id="mNodes" step="1" min="5" max="41"></label></div>
-    <div class="row"><label>On the plot <select id="modelOnPlot"><option value="tests">the simple tests</option><option value="model">the model</option><option value="both">both</option></select></label></div>
+  </details>
+  <details open>
+    <summary>Panels</summary>
+    <div class="row"><span>Show</span><label><input type="checkbox" id="scOn">scatter</label><label><input type="checkbox" id="dsOn">distribution</label><label><input type="checkbox" id="hvOn">human against automated</label></div>
+    <p class="hint">Everything else is on the plots: <b>right-click a plot</b> for its layers, axes, statistics, text, size and font, colours and export.</p>
   </details>
   <details>
-    <summary>Colours</summary>
-    <p class="hint">Marker fill and edge per group (both panels), the mean ± SEM bar, the fit lines, and the text and axes. The defaults are the publication greys: WT3 dark grey, GD1 white, black edges.</p>
-    <div id="colorFields" class="colors"></div>
-    <div class="row"><button id="bGreys">Reset to publication greys</button></div>
-  </details>
-  <details open>
-    <summary>Scatter panel</summary>
-    <div class="row"><label><input type="checkbox" id="scOn">show the scatter panel (below the dot plot)</label></div>
-    <p class="hint">Each axis is a formula like the one above (same variables). Pick a variable, or the dot plot's formula, to fill it in. Same sections and filters as the dot plot; the series are its groups. Click a point to open the section in the section browser.</p>
-    <div class="axisf">
-      <span>x</span><select id="scXPick" aria-label="choose x"></select>
-      <span></span><textarea id="scX" rows="1" spellcheck="false" aria-label="x formula"></textarea>
-      <span></span><div id="scXMsg" class="fmsg"></div>
-      <span>y</span><select id="scYPick" aria-label="choose y"></select>
-      <span></span><textarea id="scY" rows="1" spellcheck="false" aria-label="y formula"></textarea>
-      <span></span><div id="scYMsg" class="fmsg"></div>
-    </div>
-    <div class="row"><label>One marker per <select id="scUnit"><option value="section">section</option><option value="slide">slide mean</option></select></label></div>
-    <div class="row"><label><input type="checkbox" id="scLogX">log x</label><label><input type="checkbox" id="scLogY">log y</label>
-      <label title="Least squares on the axes as drawn: on log10 of a log axis."><input type="checkbox" id="scFit">least-squares line per group</label></div>
-    <div class="row"><label><input type="checkbox" id="scRho">Spearman ρ and n in the legend</label><label>Marker <input type="number" id="scSize" step="0.5" min="0.5"> pt</label></div>
-    <div class="row"><label>Width <input type="number" id="scWidthMm" step="1" min="20"> mm</label><label>Height <input type="number" id="scHeightMm" step="1" min="20"> mm</label></div>
-    <label>Title<textarea id="scTitle" rows="1"></textarea></label>
-    <label>x axis title (empty = the formula)<textarea id="scXlabel" rows="1"></textarea></label>
-    <label>y axis title (empty = the formula)<textarea id="scYlabel" rows="2"></textarea></label>
-    <div class="row"><button id="bScSvg">Scatter SVG</button><button id="bScPdf">PDF</button><button id="bScPng">Scatter PNG, 600 dpi</button><button id="bScCsv">Scatter CSV</button></div>
-  </details>
-  <details open>
-    <summary>Distribution panel</summary>
-    <div class="row"><label><input type="checkbox" id="dsOn">show the distribution panel</label></div>
-    <p class="hint">How a value is distributed: one value per section (a formula, as the dot plot), or one per AF488⁺ object of the counting
-      method (AF488 mask, Gaussian 20 µm, 5 SD; read from objects.js the first time). Same filters as the dot plot.</p>
-    <div class="row"><label>One value per <select id="dsUnit"><option value="section">section</option><option value="object">AF488⁺ object</option></select></label>
-      <label>Group by <select id="dsGroup"><option value="genotype">genotype</option><option value="geno_exp">genotype × experiment</option></select></label></div>
-    <div class="axisf ds-sec">
-      <span>value</span><select id="dsFPick" aria-label="choose the section value"></select>
-      <span></span><textarea id="dsF" rows="1" spellcheck="false" aria-label="section formula"></textarea>
-      <span></span><div id="dsFMsg" class="fmsg"></div>
-    </div>
-    <div class="ds-obj">
-      <div class="axisf">
-        <span>value</span><select id="dsOfPick" aria-label="choose the object value"></select>
-        <span></span><textarea id="dsOf" rows="1" spellcheck="false" aria-label="object formula"></textarea>
-        <span></span><div id="dsOfMsg" class="fmsg"></div>
-      </div>
-      <div class="row"><label title="Crossed: the object's centroid lies past the junction line (extended past its ends), in the organoid where AF488 is not at home.">Objects
-        <select id="dsSide"><option value="all">all</option><option value="crossed">crossed only</option><option value="home">home only</option></select></label>
-        <label>Junction region <select id="dsObjRegion"><option value="all">in or out</option><option value="in">inside only</option><option value="out">outside only</option></select></label></div>
-      <details class="hint" style="border:0;padding:0"><summary style="font-weight:normal">Object variables</summary><div id="dsObjVars" style="font-size:12px"></div></details>
-    </div>
-    <div class="row"><label>Kind <select id="dsKind"><option value="hist">histogram</option><option value="kde">kernel density (Gaussian)</option>
-      <option value="ecdf">ECDF</option><option value="violin">violin per group</option><option value="box">box per group</option></select></label>
-      <label title="Histogram, density and ECDF: all groups on one axis, or one panel per group (same axes)">Groups <select id="dsLayout"><option value="overlay">overlaid</option><option value="side">side by side</option></select></label></div>
-    <div class="row ds-hist"><label>Height <select id="dsNorm"><option value="count">count</option><option value="density">density (area 1)</option><option value="percent">percent</option></select></label>
-      <label>Bins by <select id="dsBinBy"><option value="number">number</option><option value="width">width</option></select></label></div>
-    <div class="row ds-hist"><label>Number of bins <input type="number" id="dsBins" step="1" min="1"></label>
-      <label title="Bin width, in the value's units (in log₁₀ units with log x)">Bin width <input type="number" id="dsBinWidth" step="any" min="0"> <span id="dsWidthLabel" class="hint"></span></label></div>
-    <div class="row ds-kde"><label title="Bandwidth h of the Gaussian kernel, as scipy.stats.gaussian_kde: Silverman s·(3n/4)^(−1/5), Scott s·n^(−1/5), s the SD">Bandwidth
-      <select id="dsBw"><option value="silverman">Silverman</option><option value="scott">Scott</option></select></label>
-      <label title="Multiplies the rule's bandwidth: below 1 more detail (and noise), above 1 smoother">× <input type="number" id="dsBwFactor" step="0.1" min="0.05"></label></div>
-    <div class="row"><label title="Values ≤ 0 are left out on a log axis"><input type="checkbox" id="dsLogX">log value axis</label>
-      <label><input type="checkbox" id="dsMedians">median lines</label><label><input type="checkbox" id="dsStats">statistics on the plot</label></div>
-    <div class="row"><label>Values from <input type="number" id="dsXmin" step="any"></label><label>to <input type="number" id="dsXmax" step="any"></label><span class="hint">empty = the data</span></div>
-    <div class="row"><label>Width <input type="number" id="dsWidthMm" step="1" min="20"> mm</label><label>Height <input type="number" id="dsHeightMm" step="1" min="20"> mm</label></div>
-    <label>Title<textarea id="dsTitle" rows="1"></textarea></label>
-    <label>Value axis title (empty = automatic)<textarea id="dsXlabel" rows="1"></textarea></label>
-    <label>Other axis title (empty = automatic)<textarea id="dsYlabel" rows="1"></textarea></label>
-    <div class="row"><button id="bDsSvg">Distribution SVG</button><button id="bDsPdf">PDF</button><button id="bDsPng">PNG, 600 dpi</button><button id="bDsCsv">Values CSV</button><button id="bDsCurves" title="The drawn curves: histogram bins, density points, ECDF steps, box numbers">Curves CSV</button></div>
-  </details>
-  <details open>
-    <summary>Human against automated panel</summary>
-    <div class="row"><label><input type="checkbox" id="hvOn">show the human against automated panel</label></div>
-    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>human annotator 1</label><label><input type="checkbox" data-ann="2" checked>human annotator 2</label></div>
-    <p class="hint">Every human-counted section of the annotators ticked: the human count against the automated count of the positivity method chosen above, in the area the human counted (annotator 1 the whole section; annotator 2 from 50 µm before the junction line on). The same ticks also apply to the human counts everywhere else on the page.</p>
-    <div class="row"><label>Plot <select id="hvPlot"><option value="scatter">automated against human (log–log)</option><option value="ba">Bland–Altman (ratio)</option><option value="groups">ratio by group: sections, slide means and tests</option></select></label>
-      <label title="The groups of the ratio-by-group plot and of its table. Genotype × experiment compares WT3 with GD1 within each experiment; experiment compares the experiments (both genotypes together).">Group by <select id="hvGroup"><option value="genotype">genotype</option><option value="geno_exp">genotype × experiment</option><option value="experiment">experiment</option></select></label></div>
-    <p class="hint">Ratio by group: one small marker per human-counted section (automated ÷ human), one large marker per slide (the geometric mean of its sections), and the geometric mean of the slide means with its 95 % CI. The tests use slides as the unit (sections of one slide are not independent): Welch t and Mann–Whitney on the slide means of ln(ratio), and a linear mixed model of ln(ratio) on the sections with the slide as a random intercept. Each group's ratio is also tested against 1 (one-sample t on its slide means).</p>
-    <div class="row"><label><input type="checkbox" id="hvFilters">apply the page's filters (experiments, QC …)</label><label>Marker <input type="number" id="hvSize" step="0.5" min="0.5"> pt</label></div>
-    <div class="row"><label>Width <input type="number" id="hvWidthMm" step="1" min="20"> mm</label><label>Height <input type="number" id="hvHeightMm" step="1" min="20"> mm</label></div>
-    <label>Title<textarea id="hvTitle" rows="1"></textarea></label>
-    <label>x axis title (empty = automatic)<textarea id="hvXlabel" rows="1"></textarea></label>
-    <label>y axis title (empty = automatic)<textarea id="hvYlabel" rows="1"></textarea></label>
-    <div class="row"><button id="bHvSvg">Agreement SVG</button><button id="bHvPdf">PDF</button><button id="bHvPng">PNG, 600 dpi</button></div>
-    <div class="row"><button id="bHvCsv">Table CSV (this method)</button><button id="bHvCsvAll">CSV, every method and threshold</button></div>
-  </details>
-  <details open>
-    <summary>Export and settings</summary>
-    <div class="row"><button id="bSvg">Dot plot SVG</button><button id="bPdf">Dot plot PDF</button><button id="bPng">Dot plot PNG, 600 dpi</button><button id="bCsv">Dot plot CSV</button></div>
-    <div class="row"><button id="bLink">Copy link to this figure</button><button id="bApply">Apply the settings below</button><button id="bReset">Reset the text</button><button id="bForget" title="Clear the settings this browser remembers and start from the defaults">Start over (forget saved settings)</button></div>
+    <summary>Link and settings</summary>
+    <div class="row"><button id="bLink">Copy link to this figure</button><button id="bForget" title="Clear the settings this browser remembers and start from the defaults">Start over (forget saved settings)</button></div>
     <textarea id="settings" spellcheck="false" aria-label="settings as JSON"></textarea>
+    <div class="row"><button id="bApply">Apply the settings above</button></div>
     <p class="hint">The page's address holds every setting (after #), so a bookmark or the copied link reopens this figure. The box shows the same settings; paste settings there and press Apply.</p>
   </details>
 </section>
 <section id="right">
   <div id="plotwrap"><div id="plot"></div></div>
+  <p class="plothint">Right-click the plot for options · <button class="linkbtn" data-menu="dot">or open them here</button></p>
   <div id="dropped"></div>
   <div id="stats"></div>
   <div id="scatterBox">
     <h2>Scatter</h2>
     <div id="plotwrap2" style="border: 1px dashed var(--light); display: inline-block; background: #fff;"><div id="plot2"></div></div>
+    <p class="plothint">Right-click the plot for options · <button class="linkbtn" data-menu="scatter">or open them here</button></p>
     <div id="dropped2" class="note" style="margin: 6px 0"></div>
     <div id="scStats"></div>
   </div>
   <div id="distBox">
     <h2>Distribution</h2>
-    <div class="plotframe"><div id="plot3"></div></div>
+    <div class="plotframe" id="plotframe3"><div id="plot3"></div></div>
+    <p class="plothint">Right-click the plot for options · <button class="linkbtn" data-menu="dist">or open them here</button></p>
     <div id="dsMsg" class="note" style="margin: 6px 0"></div>
     <div id="dsStats"></div>
   </div>
   <div id="humanBox">
     <h2>Human against automated counts</h2>
     <p id="hvMethod" class="note"></p>
-    <div class="plotframe"><div id="plot4"></div></div>
+    <div class="plotframe" id="plotframe4"><div id="plot4"></div></div>
+    <p class="plothint">Right-click the plot for options · <button class="linkbtn" data-menu="human">or open them here</button></p>
     <div id="hvStats"></div>
     <div id="hvTable" style="max-height: 420px; overflow: auto; border: 1px solid var(--light)"></div>
   </div>
@@ -318,17 +219,208 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
     <div class="row"><label><input type="checkbox" id="dataAll">all sections (not only those the filters keep)</label>
       <label>Search <input type="text" id="dataFilter" placeholder="e.g. WT3 e9, 018-017"></label></div>
     <div class="row"><button id="bDataCsv">Download this table (CSV)</button>
-      <button id="bAllCsv" title="Every section with every positivity method and threshold (crossed_gauss-5, home_gauss-5, …, threshold_cellraw-7), every section variable and the notebook's per-section outcomes">Download all raw counts (CSV)</button>
+      <button id="bAllCsv" title="Every section with every positivity method and threshold (crossed_gauss-8, home_gauss-8, …, threshold_cellraw-7), every section variable and the notebook's per-section outcomes">Download all raw counts (CSV)</button>
       <span id="dataMsg" class="note"></span></div>
     <div id="dataTable"></div>
     <p class="note">Further data. Every counted object (AF488 mask, counting method) with its position, area, distance to the junction line and side:
-      <code>af488_mask/&lt;section&gt;/objects.parquet</code> in the run's analysis folder (<code>mask</code> = "kmad5"), with the thresholds in
+      <code>af488_mask/&lt;section&gt;/objects.parquet</code> in the run's analysis folder (<code>mask</code> = "<span id="maskName">kmad8</span>"), with the thresholds in
       <code>summary.json</code>. The objects drawn in the section browser, per section: <code>section_browser/parts/&lt;section id&gt;.json</code>.
       The notebook's per-section outcomes: <code>figures_official/sections_table.csv</code> (the same as <code>sections_table.js</code> here).
       The per-method counts of this page: <code>section_browser/data.js</code> (written by section_browser.py).</p>
   </details>
 </section>
 </main>
+<!-- The plots' right-click menus show these panes (MENUS in the script moves them into the menu while it is open). -->
+<div id="paneStore" hidden>
+  <!-- ---------------------------------------------------------------- shared by several panels -->
+  <div class="pane" id="pane-markers">
+    <p class="panehead">Markers (the dot plot and the human panel's ratio by group)</p>
+    <div class="row"><label>Section marker <input type="number" id="secSize" step="0.5" min="0.5"> pt</label><label>Slide mean <input type="number" id="slideSize" step="0.5" min="0.5"> pt</label></div>
+    <div class="row"><label>Section opacity <input type="number" id="secOpacity" step="0.1" min="0.1" max="1"></label><label>Jitter ± <input type="number" id="jitter" step="0.02" min="0" max="0.4"></label></div>
+  </div>
+  <div class="pane" id="pane-legend">
+    <p class="panehead">Legend and group labels (every panel)</p>
+    <div class="row"><label><input type="checkbox" id="showLegend">legend</label><label><input type="checkbox" id="showN">n under the groups</label></div>
+    <div class="row"><label><input type="checkbox" id="legendLayers">legend also explains section, slide mean, mean ± SEM</label></div>
+  </div>
+  <div class="pane" id="pane-minor">
+    <p class="panehead">Minor ticks (every panel)</p>
+    <div class="row"><label title="Short unlabelled ticks between the major ones, on every panel's numeric axes."><input type="checkbox" id="minor">minor ticks</label>
+      <label title="On a linear axis: how many intervals each gap between two major ticks is cut into (auto: 5 for steps of 1 or 5, 4 for steps of 2). On a log axis the minor ticks are at 2, 3 … 9 of each decade, whatever is set here.">intervals between major ticks <select id="minorN"><option value="auto">auto</option><option value="2">2</option><option value="4">4</option><option value="5">5</option><option value="10">10</option></select></label></div>
+    <p class="hint">A linear axis with automatic ticks gets its major ticks from the page then, so the minor ones fall exactly between them.</p>
+  </div>
+  <div class="pane" id="pane-sig">
+    <p class="panehead">On the plot (the dot plot and the human panel's ratio by group)</p>
+    <div class="row"><label><input type="checkbox" id="showStats">statistics text above the groups</label></div>
+    <div class="row"><label title="A bracket between the two groups compared, with stars, drawn only where P < 0.05 (unless n.s. is ticked). Automatic: the mixed model when one is chosen under Model (the reference test), else Welch's t on slide means. Applies to the dot plot and to the human panel's ratio-by-group plot (whose mixed model is its own LMM of the log ratio; experiments: the ANOVA).">Significance bars <select id="sigBars">
+      <option value="off">off</option><option value="auto">automatic (mixed model, else Welch on slides)</option><option value="model">mixed model</option>
+      <option value="welch">Welch t on slide means</option><option value="mwSlides">Mann–Whitney on slide means</option><option value="mwSections">Mann–Whitney on sections</option></select></label></div>
+    <div class="row"><label>Show <select id="sigStyle"><option value="stars">stars (* &lt; 0.05, ** &lt; 0.01, *** &lt; 0.001)</option><option value="p">the P value</option></select></label>
+      <label><input type="checkbox" id="sigNs">also n.s.</label></div>
+  </div>
+  <div class="pane" id="pane-font">
+    <p class="panehead">Font and screen zoom (every panel)</p>
+    <div class="row"><label>Font <input type="number" id="fontPt" step="0.5" min="4"> pt (Arial)</label><label>Screen zoom <input type="number" id="zoom" step="0.25" min="0.5" max="8"></label></div>
+    <p class="hint">Sizes are physical: the font and marker sizes are in pt at the chosen width and height. The exports are the figure as it is on screen, at that size: the SVG in mm (text stays text, Arial), the PNG at 600 dpi. The zoom only changes how large it is drawn here (and the spacing of the legend's symbols, which Plotly keeps in screen pixels).</p>
+  </div>
+  <div class="pane" id="pane-colors">
+    <p class="hint">Marker fill and edge per group (every panel), the mean ± SEM bar, the fit lines, and the text and axes. The defaults are the publication greys: WT3 dark grey, GD1 white, black edges.</p>
+    <div id="colorFields" class="colors"></div>
+    <div class="row"><button id="bGreys">Reset to publication greys</button></div>
+  </div>
+  <div class="pane" id="pane-reset">
+    <div class="row"><button id="bReset" title="Titles, axis titles you typed, legend names and positions, statistics text, on every panel">Reset the text on every plot</button></div>
+  </div>
+
+  <!-- ---------------------------------------------------------------- the dot plot -->
+  <div class="pane" id="pane-dot-layers">
+    <div class="row"><label title="Dots: one marker per section and per slide mean. Violin: the distribution of the section values (kernel density, on the axis's scale). Violin + dots: both.">Plot <select id="dotKind"><option value="dots">dots</option><option value="violin">violin</option><option value="violinDots">violin + dots</option></select></label>
+      <label class="dot-violin" title="Inside each violin: the quartiles and median as a box, or the mean of the values as drawn (on a log axis that is the geometric mean)">inside <select id="violinInner"><option value="none">nothing</option><option value="box">box (quartiles)</option><option value="mean">mean line</option></select></label></div>
+    <div class="row dot-dots"><label title="Both: sections left of the group's tick, slide means right of it. One layer alone is centred on the tick.">Show <select id="dotShow"><option value="both">sections and slide means</option><option value="sections">sections only</option><option value="slides">slide means only</option><option value="none">neither (mean ± SEM only)</option></select></label></div>
+    <div class="row"><label><input type="checkbox" id="showMean">mean ± SEM</label></div>
+  </div>
+  <div class="pane" id="pane-dot-axes">
+    <div class="row"><label>y axis <select id="scale"><option value="linear">linear</option><option value="log">log</option><option value="symlog">symlog (linear near 0, log above)</option></select></label>
+      <label title="Below this value the symlog axis is linear (matplotlib's linthresh; the notebook uses 1).">linear below <input type="number" id="linthresh" step="0.1" min="0.001"></label></div>
+    <div class="row"><label>y from <input type="number" id="ymin" step="any"></label><label>to <input type="number" id="ymax" step="any"></label><span class="hint">empty = from the data</span></div>
+    <div class="row" style="width:100%"><label style="width:100%">y ticks <input type="text" id="yticks" style="flex:1" placeholder="e.g. 0, 1, 2, 5, 10 (empty = automatic)"></label></div>
+    <div class="row" style="width:100%"><label style="width:100%">tick labels <input type="text" id="yticklabels" style="flex:1" placeholder="same count as the ticks (empty = the values)"></label></div>
+    <div class="row"><button id="bYAuto" title="Clear y from / to, the ticks and their labels">y axis from the data</button></div>
+  </div>
+  <div class="pane" id="pane-dot-stats">
+    <div class="row"><label>Effect <select id="effect"><option value="fold">fold of means, WT3 / GD1</option><option value="difference">difference of means, WT3 − GD1</option></select></label></div>
+    <div class="row"><label title="The scale the slide-level tests (and the linear mixed model) are done on. The notebook models counts per mm on log(1 + y), the area on log y, shares and distances as they are.">Slide tests on <select id="testScale"><option value="none">the values as they are</option><option value="log1p">log(1 + y)</option><option value="log">log y</option></select></label></div>
+    <div class="row"><label title="The statistics text above the groups: the simple tests, the mixed model chosen under Model, or both">Text shows <select id="modelOnPlot"><option value="tests">the simple tests</option><option value="model">the model</option><option value="both">both</option></select></label></div>
+  </div>
+  <div class="pane" id="pane-dot-text">
+    <p class="hint">Title, axis titles, legend entries and the statistics text can also be edited on the plot itself: click the text. A line break is a new line here, &lt;br&gt; on the plot.</p>
+    <label>Title<textarea id="title" rows="1"></textarea></label>
+    <label>y axis title<textarea id="ylabel" rows="2"></textarea></label>
+    <label>x axis title<textarea id="xlabel" rows="1"></textarea></label>
+    <label>Group labels (one per line, in order; empty = automatic)<textarea id="xticks" rows="2" placeholder="WT3&#10;GD1"></textarea></label>
+    <div id="legendFields"></div>
+    <div class="row"><label title="Off: text you edited on the plot or below is replaced by the automatic text as soon as the statistics change (another formula, method, filter, model …), so the plot always shows the numbers in the tables. On: your text stays until you clear it."><input type="checkbox" id="statsKeep">keep my edited statistics text when the numbers change</label></div>
+    <div id="statFields"></div>
+  </div>
+  <div class="pane" id="pane-dot-size">
+    <div class="row"><label>Width <input type="number" id="widthMm" step="1" min="20"> mm</label><label>Height <input type="number" id="heightMm" step="1" min="20"> mm</label></div>
+  </div>
+  <div class="pane" id="pane-dot-export">
+    <div class="row"><button id="bSvg">SVG</button><button id="bPdf">PDF</button><button id="bPng">PNG, 600 dpi</button><button id="bCsv">CSV (sections and slide means)</button></div>
+  </div>
+
+  <!-- ---------------------------------------------------------------- the scatter panel -->
+  <div class="pane" id="pane-sc-data">
+    <p class="hint">Each axis is a formula like the dot plot's (same variables). Pick a variable, or the dot plot's formula, to fill it in. Same sections and filters as the dot plot; the series are its groups. Click a point to open the section in the section browser.</p>
+    <div class="axisf">
+      <span>x</span><select id="scXPick" aria-label="choose x"></select>
+      <span></span><textarea id="scX" rows="1" spellcheck="false" aria-label="x formula"></textarea>
+      <span></span><div id="scXMsg" class="fmsg"></div>
+      <span>y</span><select id="scYPick" aria-label="choose y"></select>
+      <span></span><textarea id="scY" rows="1" spellcheck="false" aria-label="y formula"></textarea>
+      <span></span><div id="scYMsg" class="fmsg"></div>
+    </div>
+    <div class="row"><label>One marker per <select id="scUnit"><option value="section">section</option><option value="slide">slide mean</option></select></label></div>
+  </div>
+  <div class="pane" id="pane-sc-layers">
+    <div class="row"><label title="Least squares on the axes as drawn: on log10 of a log axis."><input type="checkbox" id="scFit">least-squares line per group</label></div>
+    <div class="row"><label><input type="checkbox" id="scRho">Spearman ρ and n in the legend</label><label>Marker <input type="number" id="scSize" step="0.5" min="0.5"> pt</label></div>
+  </div>
+  <div class="pane" id="pane-sc-axes">
+    <div class="row"><label><input type="checkbox" id="scLogX">log x</label><label><input type="checkbox" id="scLogY">log y</label></div>
+  </div>
+  <div class="pane" id="pane-sc-text">
+    <label>Title<textarea id="scTitle" rows="1"></textarea></label>
+    <label>x axis title (empty = the formula)<textarea id="scXlabel" rows="1"></textarea></label>
+    <label>y axis title (empty = the formula)<textarea id="scYlabel" rows="2"></textarea></label>
+  </div>
+  <div class="pane" id="pane-sc-size">
+    <div class="row"><label>Width <input type="number" id="scWidthMm" step="1" min="20"> mm</label><label>Height <input type="number" id="scHeightMm" step="1" min="20"> mm</label></div>
+  </div>
+  <div class="pane" id="pane-sc-export">
+    <div class="row"><button id="bScSvg">SVG</button><button id="bScPdf">PDF</button><button id="bScPng">PNG, 600 dpi</button><button id="bScCsv">CSV (the points)</button></div>
+  </div>
+
+  <!-- ---------------------------------------------------------------- the distribution panel -->
+  <div class="pane" id="pane-ds-data">
+    <p class="hint">How a value is distributed: one value per section (a formula, as the dot plot), or one per AF488⁺ object of the counting
+      method (<span class="cmName">the counting method</span>; read from objects.js the first time). Same filters as the dot plot.</p>
+    <div class="row"><label>One value per <select id="dsUnit"><option value="section">section</option><option value="object">AF488⁺ object</option></select></label>
+      <label>Group by <select id="dsGroup"><option value="genotype">genotype</option><option value="geno_exp">genotype × experiment</option></select></label></div>
+    <div class="axisf ds-sec">
+      <span>value</span><select id="dsFPick" aria-label="choose the section value"></select>
+      <span></span><textarea id="dsF" rows="1" spellcheck="false" aria-label="section formula"></textarea>
+      <span></span><div id="dsFMsg" class="fmsg"></div>
+    </div>
+    <div class="ds-obj">
+      <div class="axisf">
+        <span>value</span><select id="dsOfPick" aria-label="choose the object value"></select>
+        <span></span><textarea id="dsOf" rows="1" spellcheck="false" aria-label="object formula"></textarea>
+        <span></span><div id="dsOfMsg" class="fmsg"></div>
+      </div>
+      <div class="row"><label title="Crossed: the object's centroid lies past the junction line (extended past its ends), in the organoid where AF488 is not at home.">Objects
+        <select id="dsSide"><option value="all">all</option><option value="crossed">crossed only</option><option value="home">home only</option></select></label>
+        <label>Junction region <select id="dsObjRegion"><option value="all">in or out</option><option value="in">inside only</option><option value="out">outside only</option></select></label></div>
+      <details class="hint" style="border:0;padding:0"><summary style="font-weight:normal">Object variables</summary><div id="dsObjVars" style="font-size:12px"></div></details>
+    </div>
+    <div class="row"><label>Kind <select id="dsKind"><option value="hist">histogram</option><option value="kde">kernel density (Gaussian)</option>
+      <option value="ecdf">ECDF</option><option value="violin">violin per group</option><option value="box">box per group</option></select></label>
+      <label title="Histogram, density and ECDF: all groups on one axis, or one panel per group (same axes)">Groups <select id="dsLayout"><option value="overlay">overlaid</option><option value="side">side by side</option></select></label></div>
+    <div class="row ds-hist"><label>Height <select id="dsNorm"><option value="count">count</option><option value="density">density (area 1)</option><option value="percent">percent</option></select></label>
+      <label>Bins by <select id="dsBinBy"><option value="number">number</option><option value="width">width</option></select></label></div>
+    <div class="row ds-hist"><label>Number of bins <input type="number" id="dsBins" step="1" min="1"></label>
+      <label title="Bin width, in the value's units (in log₁₀ units with log x)">Bin width <input type="number" id="dsBinWidth" step="any" min="0"> <span id="dsWidthLabel" class="hint"></span></label></div>
+    <div class="row ds-kde"><label title="Bandwidth h of the Gaussian kernel, as scipy.stats.gaussian_kde: Silverman s·(3n/4)^(−1/5), Scott s·n^(−1/5), s the SD">Bandwidth
+      <select id="dsBw"><option value="silverman">Silverman</option><option value="scott">Scott</option></select></label>
+      <label title="Multiplies the rule's bandwidth: below 1 more detail (and noise), above 1 smoother">× <input type="number" id="dsBwFactor" step="0.1" min="0.05"></label></div>
+  </div>
+  <div class="pane" id="pane-ds-layers">
+    <div class="row"><label><input type="checkbox" id="dsMedians">median lines</label><label><input type="checkbox" id="dsShowStats">statistics on the plot</label></div>
+  </div>
+  <div class="pane" id="pane-ds-axes">
+    <div class="row"><label title="Values ≤ 0 are left out on a log axis"><input type="checkbox" id="dsLogX">log value axis</label></div>
+    <div class="row"><label>Values from <input type="number" id="dsXmin" step="any"></label><label>to <input type="number" id="dsXmax" step="any"></label><span class="hint">empty = the data</span></div>
+  </div>
+  <div class="pane" id="pane-ds-text">
+    <label>Title<textarea id="dsTitle" rows="1"></textarea></label>
+    <label>Value axis title (empty = automatic)<textarea id="dsXlabel" rows="1"></textarea></label>
+    <label>Other axis title (empty = automatic)<textarea id="dsYlabel" rows="1"></textarea></label>
+  </div>
+  <div class="pane" id="pane-ds-size">
+    <div class="row"><label>Width <input type="number" id="dsWidthMm" step="1" min="20"> mm</label><label>Height <input type="number" id="dsHeightMm" step="1" min="20"> mm</label></div>
+    <p class="hint">Until a size is typed in, it follows the groups, panels and statistics.</p>
+  </div>
+  <div class="pane" id="pane-ds-export">
+    <div class="row"><button id="bDsSvg">SVG</button><button id="bDsPdf">PDF</button><button id="bDsPng">PNG, 600 dpi</button></div>
+    <div class="row"><button id="bDsCsv">Values CSV</button><button id="bDsCurves" title="The drawn curves: histogram bins, density points, ECDF steps, box numbers">Curves CSV</button></div>
+  </div>
+
+  <!-- ---------------------------------------------------------------- the human against automated panel -->
+  <div class="pane" id="pane-hv-data">
+    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label></div>
+    <p class="hint">Every human-counted section of the annotators ticked: the human count against the automated count of the positivity method chosen in the sidebar, in the area the human counted (annotator 1 the whole section; annotator 2 from 50 µm before the junction line on). The same ticks also apply to the human counts everywhere else on the page.</p>
+    <div class="row"><label>Plot <select id="hvPlot"><option value="scatter">automated against human (log–log)</option><option value="ba">Bland–Altman (ratio)</option><option value="groups">ratio by group: sections, slide means and tests</option></select></label></div>
+    <div class="row"><label title="The groups of the ratio-by-group plot and of its table. Genotype × experiment compares WT3 with GD1 within each experiment; experiment compares the experiments (both genotypes together).">Group by <select id="hvGroup"><option value="genotype">genotype</option><option value="geno_exp">genotype × experiment</option><option value="experiment">experiment</option></select></label></div>
+    <p class="hint">Ratio by group: one small marker per human-counted section (automated ÷ human), one large marker per slide (the geometric mean of its sections), and the geometric mean of the slide means with its 95 % CI. The tests use slides as the unit (sections of one slide are not independent): Welch t and Mann–Whitney on the slide means of ln(ratio), and a linear mixed model of ln(ratio) on the sections with the slide as a random intercept. Each group's ratio is also tested against 1 (one-sample t on its slide means).</p>
+    <div class="row"><label><input type="checkbox" id="hvFilters">apply the page's filters (experiments, QC …)</label></div>
+  </div>
+  <div class="pane" id="pane-hv-layers">
+    <div class="row"><label title="Ratio by group. Both: sections left of the group's tick, slide means right of it. One layer alone is centred on the tick.">Ratio by group shows <select id="hvShow"><option value="both">sections and slide means</option><option value="sections">sections only</option><option value="slides">slide means only</option></select></label></div>
+    <div class="row"><label title="The markers of the log–log and Bland–Altman plots">Marker <input type="number" id="hvSize" step="0.5" min="0.5"> pt</label></div>
+  </div>
+  <div class="pane" id="pane-hv-text">
+    <label>Title<textarea id="hvTitle" rows="1"></textarea></label>
+    <label>x axis title (empty = automatic)<textarea id="hvXlabel" rows="1"></textarea></label>
+    <label>y axis title (empty = automatic)<textarea id="hvYlabel" rows="1"></textarea></label>
+  </div>
+  <div class="pane" id="pane-hv-size">
+    <div class="row"><label>Width <input type="number" id="hvWidthMm" step="1" min="20"> mm</label><label>Height <input type="number" id="hvHeightMm" step="1" min="20"> mm</label></div>
+  </div>
+  <div class="pane" id="pane-hv-export">
+    <div class="row"><button id="bHvSvg">SVG</button><button id="bHvPdf">PDF</button><button id="bHvPng">PNG, 600 dpi</button></div>
+    <div class="row"><button id="bHvCsv">Table CSV (this method)</button><button id="bHvCsvAll">CSV, every method and threshold</button></div>
+  </div>
+</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.34.0/plotly.min.js"></script>
 <!-- data.js (section_browser.py): window.SECTION_DATA, the per-method counts of every section.
      sections_table.js (02_biology.ipynb, last cell): window.BIOLOGY_SECTIONS, the notebook's per-section outcomes. -->
@@ -1274,11 +1366,16 @@ const PRESETS = {
   custom: { name: "(your own formula)" },
 };
 
+// The counting method of the official analysis: data.js's "default" (section_browser.py), else this. The AF488 mask
+// with a Gaussian 20 µm background at median + 8 robust SD (mask kmad8) since November 2026; gauss-5 before.
+const COUNTING_FALLBACK = "gauss-8";
+let COUNTING = COUNTING_FALLBACK;
 const DEFAULTS = {
-  preset: "fig1b", method: "gauss-5", formula: "crossed / junction_mm",
+  preset: "fig1b", method: COUNTING_FALLBACK, formula: "crossed / junction_mm",
   group: "genotype", exps: null, qcOnly: false, noUncertain: false, humanOnly: false, region: "all",
   annotators: [1, 2],    // whose human counts are used (human annotator 1, 2)
   showSections: true, showSlides: true, showMean: true, showStats: true, showLegend: true, legendLayers: false, showN: true,
+  dotKind: "dots", violinInner: "none",   // the dot plot: dots, violin or violin + dots; inside the violin: nothing, box, mean line
   secSize: 2.5, slideSize: 5, secOpacity: 0.8, jitter: 0.16,
   scale: "symlog", linthresh: 1, ymin: 0, ymax: null, yticks: "", yticklabels: "",
   title: "", ylabel: L.crossed, xlabel: "", xticks: "", legendNames: {}, legendPos: null, statsText: {}, statsPos: {},
@@ -1294,7 +1391,7 @@ const DEFAULTS = {
   ds: { on: true, unit: "section", f: "crossed / junction_mm", of: "away", group: "genotype", side: "all", region: "all", kind: "kde",
     hnorm: "density", binBy: "number", bins: 30, binWidth: 25, bw: "silverman", bwFactor: 1, layout: "overlay", logX: false, xmin: null, xmax: null,
     medians: true, stats: true, statsText: null, statsPos: null, widthMm: 80, heightMm: 60, sizeAuto: true, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null },
-  hv: { on: true, plot: "scatter", group: "genotype", gstats: {}, filters: false, size: 4, widthMm: 95, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null,
+  hv: { on: true, plot: "scatter", group: "genotype", show: "both", gstats: {}, filters: false, size: 4, widthMm: 95, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null,
     statsText: null, statsPos: null },
 };
 // publication greys: WT3 filled dark grey, GD1 open white, black edges; black bars, lines and text
@@ -1315,6 +1412,10 @@ function loadRows() {
   const browser = window.SECTION_DATA, bio = window.BIOLOGY_SECTIONS;
   if (!browser && !bio) throw new Error("Neither data.js nor sections_table.js was found beside this page. Run section_browser.py and the last cell of 02_biology.ipynb, and open this page from the section_browser folder.");
   METHODS = browser ? browser.methods : [];
+  const known = (key) => !!key && METHODS.some((m) => m.ks.some((k) => m.key + "-" + k === key));
+  COUNTING = [browser && browser.default, COUNTING_FALLBACK].find(known) || (METHODS[0] ? METHODS[0].key + "-" + METHODS[0].default : COUNTING_FALLBACK);
+  DEFAULTS.method = COUNTING;
+  ST.method = COUNTING;
   META = { browser: browser ? browser.generated : null, bio: window.BIOLOGY_META || null };
   const byName = {};
   for (const s of (browser ? browser.sections : [])) byName[s.name] = s;
@@ -1332,6 +1433,16 @@ function loadRows() {
   });
   if (!bio) $("subtitle").textContent = "sections_table.js not found: only the browser's counts are available (run the last cell of 02_biology.ipynb)";
 }
+
+// a method key ("gauss-8") in words: short (the menus) and long (the Methods text)
+function methodParts(key) {
+  return { m: METHODS.find((x) => String(key).startsWith(x.key + "-")), k: String(key).split("-")[1] };
+}
+const methodShort = (key) => { const { m, k } = methodParts(key); return m ? m.label + ", " + k + " SD" : String(key); };
+const methodLong = (key) => { const { m, k } = methodParts(key); return m ? m.label + ", median + " + k + " robust SD" : String(key); };
+const objectsMethod = () => (window.OBJECT_DATA && window.OBJECT_DATA.method) || COUNTING;   // the objects of objects.js
+const maskName = (key) => (window.OBJECT_DATA && window.OBJECT_DATA.mask && key === window.OBJECT_DATA.method ? window.OBJECT_DATA.mask
+  : String(key).startsWith("gauss-") ? "kmad" + String(key).split("-")[1] : "");
 
 const annotatorOn = (n) => (ST.annotators || []).includes(n);
 const annotatorWords = () => (ST.annotators.length === 2 ? "human annotators 1 and 2" : ST.annotators.length ? "human annotator " + ST.annotators[0] : "no human annotator");
@@ -1352,7 +1463,7 @@ function applyMethod() {
 const KNOWN = new Set([...METHOD_VARS, ...SECTION_VARS, ...NOTEBOOK_VARS].map((x) => x[0]));
 
 // ------------------------------------------------------------------ controls
-const INPUTS = ["method", "formula", "group", "qcOnly", "noUncertain", "humanOnly", "region", "showSections", "showSlides", "showMean",
+const INPUTS = ["method", "formula", "group", "qcOnly", "noUncertain", "humanOnly", "region", "dotKind", "violinInner", "showMean",
   "showStats", "showLegend", "legendLayers", "showN", "secSize", "slideSize", "secOpacity", "jitter", "scale", "linthresh", "ymin", "ymax", "yticks",
   "yticklabels", "title", "ylabel", "xlabel", "xticks", "widthMm", "heightMm", "fontPt", "zoom", "effect", "testScale",
   "model", "mCount", "mExposure", "mSucc", "mTrials", "mOlre", "mNodes", "modelOnPlot", "statsKeep", "minor", "minorN", "sigBars", "sigStyle", "sigNs"];
@@ -1367,9 +1478,13 @@ function buildControls() {
   const opts = [];
   for (const m of METHODS) for (const k of m.ks) {
     const key = m.key + "-" + k;
-    opts.push('<option value="' + key + '">' + m.label + ", " + k + " SD" + (key === "gauss-5" ? " (counting method)" : "") + "</option>");
+    opts.push('<option value="' + key + '">' + m.label + ", " + k + " SD" + (key === COUNTING ? " (counting method)" : "") + "</option>");
   }
-  $("method").innerHTML = opts.join("") || '<option value="gauss-5">counting method</option>';
+  $("method").innerHTML = opts.join("") || '<option value="' + COUNTING + '">counting method</option>';
+  $("methodLabel").title += " The notebook's counting method is " + methodShort(COUNTING) + ".";
+  for (const el of document.querySelectorAll(".cmName")) el.textContent = methodShort(COUNTING);
+  if (maskName(COUNTING)) $("maskName").textContent = maskName(COUNTING);
+  $("bAllCsv").title = $("bAllCsv").title.replace(/gauss-8/g, COUNTING);
   // the model's variables: counts first, then every other variable (a non-count is refused when fitted)
   const others = [...KNOWN].filter((v) => !COUNT_VARS.includes(v));
   const varOpts = (first) => first + '<optgroup label="counts">' + COUNT_VARS.map((v) => '<option value="' + v + '">' + v + "</option>").join("") +
@@ -1404,6 +1519,13 @@ function buildControls() {
     update();
   });
   $("preset").addEventListener("change", () => applyPreset($("preset").value));
+  $("dotShow").addEventListener("change", () => {
+    const v = $("dotShow").value;
+    ST.showSections = v === "both" || v === "sections";
+    ST.showSlides = v === "both" || v === "slides";
+    update();
+  });
+  $("bYAuto").onclick = () => { Object.assign(ST, { ymin: null, ymax: null, yticks: "", yticklabels: "" }); writeControls(); update(); };
   for (const box of document.querySelectorAll(".annBoxes input")) box.addEventListener("change", () => {
     const a = +box.dataset.ann;
     ST.annotators = [1, 2].filter((n) => (n === a ? box.checked : annotatorOn(n)));
@@ -1428,7 +1550,7 @@ function buildControls() {
     location.replace(location.pathname);
   };
   $("bApply").onclick = () => {
-    try { setState(JSON.parse($("settings").value)); } catch (e) { alert("Those settings are not valid JSON: " + e.message); }
+    try { setState(migrate(JSON.parse($("settings").value))); } catch (e) { alert("Those settings are not valid JSON: " + e.message); }
   };
   $("bReset").onclick = () => { ST.statsText = {}; ST.statsPos = {}; ST.legendNames = {}; ST.legendPos = null; ST.title = ""; ST.xticks = ""; Object.assign(ST.sc, { title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null });
     for (const o of [ST.ds, ST.hv]) Object.assign(o, { title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null, statsText: null, statsPos: null });
@@ -1451,6 +1573,7 @@ function onInput(id) {
   ST[id] = v;
   if (id === "formula") { ST.preset = "custom"; $("preset").value = "custom"; }
   if (id === "method") applyMethod();
+  if (id === "dotKind") writeControls();
   update();
 }
 
@@ -1461,11 +1584,16 @@ function writeControls() {
     else el.value = v === null || v === undefined ? "" : v;
   }
   $("preset").value = ST.preset in PRESETS ? ST.preset : "custom";
+  $("dotShow").value = dotShowValue();
+  for (const el of document.querySelectorAll(".dot-violin")) el.style.display = ST.dotKind === "dots" ? "none" : "";
+  for (const el of document.querySelectorAll(".dot-dots")) el.style.display = ST.dotKind === "violin" ? "none" : "";
   writeScatterControls();
   writePanelControls();
   for (const box of document.querySelectorAll("#expBoxes input")) box.checked = !ST.exps || ST.exps.includes(box.dataset.exp);
   for (const box of document.querySelectorAll(".annBoxes input")) box.checked = annotatorOn(+box.dataset.ann);
 }
+
+const dotShowValue = () => (ST.showSections && ST.showSlides ? "both" : ST.showSections ? "sections" : ST.showSlides ? "slides" : "none");
 
 function applyPreset(key) {
   const p = PRESETS[key];
@@ -1473,7 +1601,7 @@ function applyPreset(key) {
   if (!p || !p.formula) { update(); return; }
   Object.assign(ST, { formula: p.formula, ylabel: p.ylabel, scale: p.scale, ymin: p.ymin === undefined ? null : p.ymin, ymax: null,
     yticks: "", yticklabels: "", effect: p.effect, testScale: p.testScale, title: "", statsText: {}, statsPos: {} });
-  if (key !== "custom" && key !== "share_per_mm" && !ST.method) ST.method = "gauss-5";
+  if (key !== "custom" && key !== "share_per_mm" && !ST.method) ST.method = COUNTING;
   applyMethod();
   writeControls();
   update();
@@ -1489,7 +1617,10 @@ function setState(s) {
   if (!["genotype", "geno_exp", "experiment"].includes(ST.hv.group)) ST.hv.group = "genotype";
   ST.hv.gstats = Object.fromEntries(Object.entries(ST.hv.gstats || {}).filter(([, v]) => isEdit(v)));
   ST.annotators = Array.isArray(ST.annotators) ? [1, 2].filter((a) => ST.annotators.map(Number).includes(a)) : [1, 2];
-  if (!METHODS.some((m) => m.ks.some((k) => m.key + "-" + k === ST.method)) && METHODS.length) ST.method = "gauss-5";
+  if (!METHODS.some((m) => m.ks.some((k) => m.key + "-" + k === ST.method)) && METHODS.length) ST.method = DEFAULTS.method;
+  if (!["dots", "violin", "violinDots"].includes(ST.dotKind)) ST.dotKind = "dots";
+  if (!["none", "box", "mean"].includes(ST.violinInner)) ST.violinInner = "none";
+  if (!["both", "sections", "slides"].includes(ST.hv.show)) ST.hv.show = "both";
   if (!["genotype", "geno_exp"].includes(ST.group)) ST.group = "genotype";      // a stale or mistyped saved value
   if (!(ST.model in MODELS)) ST.model = DEFAULTS.model;
   if (!["tests", "model", "both"].includes(ST.modelOnPlot)) ST.modelOnPlot = "tests";
@@ -2021,6 +2152,26 @@ function addMinorTicks(layout, z, { skip = [], symlog = [], force = false } = {}
   return layout;
 }
 
+// Where a group's layers go, from its tick (grp.x + DOT_TICK): sections left and slide means right of it when both are
+// shown, else the one layer centred on it. left / right: the x axis's room past the first and last tick.
+const DOT_TICK = 0.09;
+function dotPositions(both) {
+  return both ? { both, sec: -0.21, slide: 0.31, slideJ: 0.04, violin: -0.21, violinW: 0.42, left: -0.64, right: 0.61 }
+    : { both, sec: 0, slide: 0, slideJ: 0.08, violin: 0, violinW: 0.6, left: -0.6, right: 0.6 };
+}
+// the statistics text over a comparison: c.x is over the two groups with both layers; centred between the ticks otherwise
+const statX = (c, pos) => (pos.both ? c.x : c.x - 0.2 + DOT_TICK);
+// A Plotly violin of a group's section values, on the axis as drawn: T(y) on the linear (and symlog) axis, log10 y on
+// the hidden linear axis y2 that overlays a log y axis (so the density is that of the values on the scale shown).
+function dotViolin(grp, pts, x, width, log, z, showlegend, name) {
+  const gc = groupColor(grp), inner = ST.violinInner;
+  return { type: "violin", x: pts.map(() => x), y: pts.map((v) => (log ? Math.log10(v.y) : T(v.y))), yaxis: log ? "y2" : "y",
+    meta: "leg:" + grp.g, legendgroup: grp.g, name, showlegend, width, spanmode: "hard", scalemode: "width", points: false, side: "both",
+    fillcolor: rgba(gc.fill, 0.45), line: { color: gc.edge, width: 0.8 * z }, hoverinfo: "skip", hoveron: "violins",
+    box: { visible: inner === "box", width: 0.3, fillcolor: "#ffffff", line: { color: gc.edge, width: 0.8 * z } },
+    meanline: { visible: inner === "mean", color: gc.edge, width: 1.4 * z } };
+}
+
 function seededJitter(id, salt) {
   let h = 2166136261 ^ salt;
   for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619);
@@ -2076,14 +2227,21 @@ function figure(z) {
   DROPPED.notOnLog = 0;
   const seenLegend = new Set();
   const legendName = (k, d) => (ST.legendNames[k] !== undefined ? ST.legendNames[k] : d);
+  const kind = ST.dotKind || "dots", dots = kind !== "violin";
+  const showSec = dots && !!ST.showSections, showSl = dots && !!ST.showSlides, pos = dotPositions(showSec && showSl);
   for (const grp of gs) {
-    const g = grp.g;
+    const g = grp.g, cx = grp.x + DOT_TICK;
     const pts = grp.sec.filter((v) => keep(v.y));
     DROPPED.notOnLog += grp.sec.length - pts.length;
-    if (ST.showSections) {
+    if (kind !== "dots" && pts.length >= 2) {
+      const lead = !showSec && !showSl && !seenLegend.has(g);      // the legend entry, when no marker carries it
+      traces.push(dotViolin(grp, pts, cx + pos.violin, pos.violinW, log, z, lead, legendName(g, g)));
+      if (lead) seenLegend.add(g);
+    }
+    if (showSec) {
       traces.push({
         type: "scatter", mode: "markers", meta: "leg:" + g, legendgroup: g, name: legendName(g, g),
-        showlegend: !seenLegend.has(g), x: pts.map((v) => grp.x - 0.12 + ST.jitter * seededJitter(v.r.id, 1)), y: pts.map((v) => T(v.y)),
+        showlegend: !seenLegend.has(g), x: pts.map((v) => cx + pos.sec + ST.jitter * seededJitter(v.r.id, 1)), y: pts.map((v) => T(v.y)),
         customdata: pts.map((v) => [v.r.id, v.r.slide, g3(v.y)]),
         hovertemplate: "%{customdata[0]}<br>%{customdata[1]}<br>%{customdata[2]}<extra></extra>",
         marker: { symbol: SYMBOL[g], size: ST.secSize * z, color: groupColor(grp).fill, opacity: ST.secOpacity, line: { color: groupColor(grp).edge, width: 0.3 * z } },
@@ -2092,10 +2250,10 @@ function figure(z) {
     }
     pts.forEach((v) => allY.push(v.y));
     const sl = grp.slides.filter((s) => keep(s.y));
-    if (ST.showSlides) {
+    if (showSl) {
       traces.push({
         type: "scatter", mode: "markers", meta: "leg:" + g, legendgroup: g, name: legendName(g, g), showlegend: !seenLegend.has(g),
-        x: sl.map((s) => grp.x + 0.4 + 0.04 * seededJitter(s.slide, 2)), y: sl.map((s) => T(s.y)),
+        x: sl.map((s) => cx + pos.slide + pos.slideJ * seededJitter(s.slide, 2)), y: sl.map((s) => T(s.y)),
         customdata: sl.map((s) => [s.slide, s.n, g3(s.y)]),
         hovertemplate: "%{customdata[0]}<br>mean of %{customdata[1]} sections: %{customdata[2]}<extra></extra>",
         marker: { symbol: SYMBOL[g], size: ST.slideSize * z, color: groupColor(grp).fill, line: { color: groupColor(grp).edge, width: 0.8 * z } },
@@ -2105,19 +2263,19 @@ function figure(z) {
     }
     if (ST.showMean && grp.sec.length >= 1) {
       const ys = grp.sec.map((v) => v.y), m = STATS.mean(ys), e = ys.length > 1 ? STATS.sem(ys) : 0;
-      const lo = log ? Math.max(m - e, Number.MIN_VALUE) : m - e, hi = m + e, cx = grp.x + 0.09, cap = 0.05;
+      const lo = log ? Math.max(m - e, Number.MIN_VALUE) : m - e, hi = m + e, cap = 0.05;
       if (keep(m)) {
         traces.push({ type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip", line: { color: COLORS().mean, width: 1.2 * z },
           x: [cx, cx, null, cx - cap, cx + cap, null, cx - cap, cx + cap], y: [T(lo), T(hi), null, T(lo), T(lo), null, T(hi), T(hi)] });
         traces.push({ type: "scatter", mode: "lines", showlegend: false, line: { color: COLORS().mean, width: 1.6 * z },
-          x: [grp.x - 0.06, grp.x + 0.24], y: [T(m), T(m)], hovertemplate: "mean " + g3(m) + " ± " + g3(e) + " (SEM)<extra></extra>" });
+          x: [cx - 0.15, cx + 0.15], y: [T(m), T(m)], hovertemplate: "mean " + g3(m) + " ± " + g3(e) + " (SEM)<extra></extra>" });
         allY.push(lo, hi);
       }
     }
   }
   // legend entries for the layers (light grey markers, as the notebook's legend)
-  const layerKeys = [["section", "section", ST.showSections, { symbol: "circle", size: ST.secSize * z }, 0.3],
-    ["slide", "slide mean", ST.showSlides, { symbol: "circle", size: ST.slideSize * z }, 0.8]];
+  const layerKeys = [["section", "section", showSec, { symbol: "circle", size: ST.secSize * z }, 0.3],
+    ["slide", "slide mean", showSl, { symbol: "circle", size: ST.slideSize * z }, 0.8]];
   for (const [k, d, on, mk, lw] of layerKeys) if (on && ST.legendLayers) traces.push({ type: "scatter", mode: "markers", meta: "leg:" + k, name: legendName(k, d),
     x: [null], y: [null], hoverinfo: "skip", marker: { ...mk, color: LIGHT, line: { color: INK, width: lw * z } } });
   if (ST.showMean && ST.legendLayers) traces.push({ type: "scatter", mode: "lines", meta: "leg:mean", name: legendName("mean", "mean ± SEM (sections)"),
@@ -2156,12 +2314,12 @@ function figure(z) {
     if (xlabels[i] !== undefined && xlabels[i].trim() !== "") return xlabels[i];
     let t = legendName(grp.g, grp.g);
     if (grp.e !== null) t += "<br>exp " + grp.e;
-    if (ST.showN) t += "<br>(n = " + grp.sec.length + ")";
+    if (ST.showN) t += "<br>(" + (showSl && !showSec ? grp.slides.length + " slides" : "n = " + grp.sec.length) + ")";
     return t;
   });
   const xs = gs.map((grp) => grp.x);
   const xaxis = {
-    range: [Math.min(...xs) - 0.55, Math.max(...xs) + 0.7], tickmode: "array", tickvals: xs.map((x) => x + 0.09), ticktext: xticktext,
+    range: [Math.min(...xs) + DOT_TICK + pos.left, Math.max(...xs) + DOT_TICK + pos.right], tickmode: "array", tickvals: xs.map((x) => x + DOT_TICK), ticktext: xticktext, tickangle: 0,
     showline: true, linecolor: COLORS().text, linewidth: 1 * z, ticks: "outside", ticklen: 4 * z, tickwidth: 1 * z, tickcolor: COLORS().text,
     showgrid: false, zeroline: false, automargin: true, fixedrange: true, tickfont: { size: fs }, title: { text: toHtml(ST.xlabel) },
   };
@@ -2172,9 +2330,9 @@ function figure(z) {
   if (ST.showStats) comps.forEach((c, i) => {
     const text = isEdit(ST.statsText[i]) ? ST.statsText[i].text : autoStatsText(c);
     statLines = Math.max(statLines, text.split(/<br>/i).length);
-    const pos = ST.statsPos[i];
-    annotations.push({ text, xref: "x", yref: "paper", x: pos ? pos.x : c.x, y: pos ? pos.y : 1, yanchor: "bottom", xanchor: "center",
-      showarrow: false, yshift: pos ? 0 : 3 * z, font: { size: fs * 0.92, color: COLORS().text }, align: "center" });
+    const moved = ST.statsPos[i];
+    annotations.push({ text, xref: "x", yref: "paper", x: moved ? moved.x : statX(c, pos), y: moved ? moved.y : 1, yanchor: "bottom", xanchor: "center",
+      showarrow: false, yshift: moved ? 0 : 3 * z, font: { size: fs * 0.92, color: COLORS().text }, align: "center" });
   });
   const titleLines = ST.title ? toHtml(ST.title).split(/<br>/i).length : 0;
   const top = 6 * z + (titleLines ? titleLines * fs * 1.1 * 1.3 + 4 * z : 0) + statLines * fs * 0.92 * 1.25 + 4 * z;
@@ -2193,7 +2351,7 @@ function figure(z) {
     width: W, height: H, paper_bgcolor: "#ffffff", plot_bgcolor: "#ffffff",
     font: { family: "Arial, Helvetica, sans-serif", size: fs, color: COLORS().text },
     margin: { l: 10 * z, r: right, t: top, b: bottom, pad: 0 },
-    xaxis, yaxis, annotations, showlegend: !!ST.showLegend, hovermode: "closest",
+    xaxis, yaxis, annotations, showlegend: !!ST.showLegend, hovermode: "closest", violinmode: "overlay",
     legend: ST.legendPos ? { x: ST.legendPos.x, y: ST.legendPos.y, xanchor: ST.legendPos.xanchor || "left", yanchor: ST.legendPos.yanchor || "top", orientation: ST.legendPos.orientation || "v",
       font: { size: fs }, bgcolor: "rgba(0,0,0,0)", itemsizing: "trace", tracegroupgap: 0, itemwidth: 30 }
       : { orientation: "v", x: 1.01, xanchor: "left", y: 1, yanchor: "top", font: { size: fs },
@@ -2204,9 +2362,18 @@ function figure(z) {
     const m = LAST.models && LAST.models[i], pm = m && m.res && !m.res.error ? m.res.p : NaN;
     const ps = { model: ST.model !== "none" ? pm : NaN, welch: c.welchSlides ? c.welchSlides.p : NaN, mwSlides: c.mwSlides ? c.mwSlides.p : NaN,
       mwSections: c.mwSections ? c.mwSections.p : NaN };
-    return { x0: c.a.x + 0.09, x1: c.b.x + 0.09, ...sigPick(ps) };
+    return { x0: c.a.x + DOT_TICK, x1: c.b.x + DOT_TICK, ...sigPick(ps) };
   }), z);
-  addMinorTicks(layout, z, { skip: ["xaxis"], symlog: ST.scale === "symlog" ? ["yaxis"] : [] });
+  // A log axis: the violins are drawn in log10 on a hidden linear axis with the same range (set after the brackets).
+  // Plotly draws an overlaying axis's traces above the base axis's, so the markers, bars and brackets move there too.
+  if (log && kind !== "dots") {
+    layout.yaxis2 = { overlaying: "y", type: "linear", range: layout.yaxis.range.slice(), visible: false, fixedrange: true, showgrid: false, zeroline: false };
+    for (const t of fig.data) if (t.type === "scatter" && !t.yaxis) {
+      t.yaxis = "y2";
+      t.y = t.y.map((v) => (v === null || v === undefined ? v : v > 0 ? Math.log10(v) : null));
+    }
+  }
+  addMinorTicks(layout, z, { skip: ["xaxis", "yaxis2"], symlog: ST.scale === "symlog" ? ["yaxis"] : [] });
   return fig;
 }
 
@@ -2580,6 +2747,7 @@ function updateScatter() {
     DRAWN2 = true;
     const gd = $("plot2");
     gd.on("plotly_click", (ev) => {      // open the section in the section browser
+      if (ev.event && ev.event.button === 2) return;
       const p = ev.points && ev.points[0];
       const id = p && p.customdata && p.customdata[0];
       if (id) window.open("section_browser.html#" + encodeURIComponent(id), "_blank");
@@ -2749,7 +2917,7 @@ const OBJECT_TITLES = { away: "Distance past the junction line (µm)", "away / a
   edge_rel: "Distance to the edge ÷ local half-width" };
 const DS_INPUTS = { dsOn: "on", dsUnit: "unit", dsF: "f", dsOf: "of", dsGroup: "group", dsSide: "side", dsObjRegion: "region", dsKind: "kind",
   dsNorm: "hnorm", dsBinBy: "binBy", dsBins: "bins", dsBinWidth: "binWidth", dsBw: "bw", dsBwFactor: "bwFactor", dsLayout: "layout",
-  dsLogX: "logX", dsXmin: "xmin", dsXmax: "xmax", dsMedians: "medians", dsStats: "stats", dsWidthMm: "widthMm", dsHeightMm: "heightMm",
+  dsLogX: "logX", dsXmin: "xmin", dsXmax: "xmax", dsMedians: "medians", dsShowStats: "stats", dsWidthMm: "widthMm", dsHeightMm: "heightMm",
   dsTitle: "title", dsXlabel: "xlabel", dsYlabel: "ylabel" };
 const DS_NUMERIC = new Set(["bins", "binWidth", "bwFactor", "xmin", "xmax", "widthMm", "heightMm"]);
 const KIND_NAMES = { hist: "histogram", kde: "kernel density estimate", ecdf: "empirical cumulative distribution (ECDF)", violin: "violin plot", box: "box plot" };
@@ -3139,7 +3307,7 @@ function updateDist() {
   const parts = [];
   if (DIST.notFinite) parts.push(DIST.notFinite + " " + unit + (DIST.notFinite > 1 ? "s" : "") + " left out: the value is not a finite number");
   if (DIST.notOnLog) parts.push(DIST.notOnLog + " " + unit + (DIST.notOnLog > 1 ? "s" : "") + " ≤ 0 left out (log axis; also left out of the statistics)");
-  $("dsMsg").textContent = (DIST.objects ? "Objects of the counting method (AF488 mask, Gaussian 20 µm, 5 SD), whatever the positivity chosen above" +
+  $("dsMsg").textContent = (DIST.objects ? "Objects of the counting method (" + methodShort(objectsMethod()) + "), whatever the positivity chosen in the sidebar" +
     (ST.ds.side !== "all" ? "; " + ST.ds.side + " only" : "") + (ST.ds.region !== "all" ? "; " + (ST.ds.region === "in" ? "in" : "outside") + " the junction region" : "") + ". " : "") +
     (parts.join(" · ") || "Nothing left out.");
   const many = DIST.objects;
@@ -3182,7 +3350,7 @@ function distMethods() {
   if (!D || !D.ok) return "";
   const objects = D.objects;
   const what = objects ? "the value " + formulaInWords(ds.of).replace(/\baway\b/g, "distance past the line (µm)") + " of every AF488⁺ object of the counting method " +
-    "(AF488 mask, Gaussian 20 µm background, median + 5 robust SD; " + D.series.reduce((a, s) => a + s.n, 0).toLocaleString("en-US") + " objects in " +
+    "(" + methodLong(objectsMethod()) + "; " + D.series.reduce((a, s) => a + s.n, 0).toLocaleString("en-US") + " objects in " +
     D.series.reduce((a, s) => a + s.sections, 0) + " sections" +
     (ds.side !== "all" ? ", " + (ds.side === "crossed" ? "crossed objects only (on the far side of the junction line)" : "home-side objects only") : "") +
     (ds.region !== "all" ? ", " + (ds.region === "in" ? "inside" : "outside") + " the junction region" : "") + ")"
@@ -3218,7 +3386,7 @@ function distMethods() {
 // positivity method in the same area (section_browser.py: annotator 1 the whole section, annotator 2 from 50 µm before
 // the extended junction line on). Agreement as 01_validation: Lin's CCC on log10 counts, Bland–Altman on
 // log2(automated ÷ human), Spearman ρ; 95 % CIs from 2,000 section bootstraps (within annotator when pooled).
-const HV_INPUTS = { hvOn: "on", hvPlot: "plot", hvGroup: "group", hvFilters: "filters", hvSize: "size", hvWidthMm: "widthMm", hvHeightMm: "heightMm",
+const HV_INPUTS = { hvOn: "on", hvPlot: "plot", hvGroup: "group", hvShow: "show", hvFilters: "filters", hvSize: "size", hvWidthMm: "widthMm", hvHeightMm: "heightMm",
   hvTitle: "title", hvXlabel: "xlabel", hvYlabel: "ylabel" };
 const HV_NUMERIC = new Set(["size", "widthMm", "heightMm"]);
 const HV_BOOT = 2000, HV_SEED = 20261105, ANN_SYMBOL = { 1: "circle", 2: "square" };
@@ -3393,43 +3561,45 @@ function humanGroupsFigure(z) {
   const hv = ST.hv, fs = ST.fontPt * z, W = hv.widthMm * PT_PER_MM * z, H = hv.heightMm * PT_PER_MM * z, C = COLORS();
   const name = (k, d) => (hv.legendNames[k] !== undefined ? hv.legendNames[k] : d);
   const gs = HV.groups, traces = [], annotations = [], seen = new Set(), allY = [], ciBars = [];
-  const gcol = (g) => groupColor({ key: g, g });
+  const show = hv.show || "both", hSec = show !== "slides", hSl = show !== "sections", pos = dotPositions(hSec && hSl);
   for (const grp of gs) {
+    const cx = grp.x + DOT_TICK;
     for (const g of GENOTYPES) {
       const sec = grp.sec.filter((v) => v.e.r.genotype === g), sl = grp.slides.filter((v) => v.g === g);
       if (!sec.length) continue;
       const gc = groupColor({ key: grp.g ? grp.key : g, g });
-      traces.push({ type: "scatter", mode: "markers", meta: "leg:" + g, legendgroup: g, name: name(g, g), showlegend: !seen.has(g),
-        x: sec.map((v) => grp.x - 0.12 + ST.jitter * seededJitter(v.e.r.id + v.e.ann, 1)), y: sec.map((v) => Math.exp(v.y)),
+      if (hSec) traces.push({ type: "scatter", mode: "markers", meta: "leg:" + g, legendgroup: g, name: name(g, g), showlegend: !seen.has(g),
+        x: sec.map((v) => cx + pos.sec + ST.jitter * seededJitter(v.e.r.id + v.e.ann, 1)), y: sec.map((v) => Math.exp(v.y)),
         customdata: sec.map((v) => [v.e.r.id, v.e.r.slide, v.e.label, v.e.human, v.e.auto, Math.exp(v.y).toFixed(2)]),
         hovertemplate: "%{customdata[0]} (%{customdata[2]})<br>%{customdata[1]}<br>human %{customdata[3]}, automated %{customdata[4]}: %{customdata[5]}×<extra></extra>",
         marker: { symbol: SYMBOL[g], size: ST.secSize * z, color: gc.fill, opacity: ST.secOpacity, line: { color: gc.edge, width: 0.3 * z } } });
-      seen.add(g);
-      traces.push({ type: "scatter", mode: "markers", legendgroup: g, showlegend: false,
-        x: sl.map((v) => grp.x + 0.4 + 0.04 * seededJitter(v.slide, 2)), y: sl.map((v) => Math.exp(v.y)),
+      if (hSec) seen.add(g);
+      if (hSl) traces.push({ type: "scatter", mode: "markers", legendgroup: g, ...(hSec ? { showlegend: false } : { meta: "leg:" + g, name: name(g, g), showlegend: !seen.has(g) }),
+        x: sl.map((v) => cx + pos.slide + pos.slideJ * seededJitter(v.slide, 2)), y: sl.map((v) => Math.exp(v.y)),
         customdata: sl.map((v) => [v.slide, v.n, Math.exp(v.y).toFixed(2)]),
         hovertemplate: "%{customdata[0]}<br>geometric mean of %{customdata[1]} sections: %{customdata[2]}×<extra></extra>",
         marker: { symbol: SYMBOL[g], size: ST.slideSize * z, color: gc.fill, line: { color: gc.edge, width: 0.8 * z } } });
+      seen.add(g);
       sec.forEach((v) => allY.push(Math.exp(v.y)));
       sl.forEach((v) => allY.push(Math.exp(v.y)));
     }
     const o = grp.one;
     if (Number.isFinite(o.m)) {
-      const cx = grp.x + 0.09, cap = 0.05, m = Math.exp(o.m), lo = Math.exp(o.lo), hi = Math.exp(o.hi);
+      const cap = 0.05, m = Math.exp(o.m), lo = Math.exp(o.lo), hi = Math.exp(o.hi);
       if (Number.isFinite(lo)) {
         ciBars.push({ cx, cap, lo, hi });     // drawn once the y range is known: cut at it, without the cap where cut
       }
       allY.push(m);              // the range follows the data; a CI from two or three slides can be far wider and is clipped
-      traces.push({ type: "scatter", mode: "lines", showlegend: false, line: { color: COLORS().mean, width: 1.6 * z }, x: [grp.x - 0.06, grp.x + 0.24], y: [m, m],
+      traces.push({ type: "scatter", mode: "lines", showlegend: false, line: { color: COLORS().mean, width: 1.6 * z }, x: [cx - 0.15, cx + 0.15], y: [m, m],
         hovertemplate: "geometric mean of " + o.n + " slide means: " + m.toFixed(2) + "×" + (Number.isFinite(lo) ? " (95 % CI " + lo.toFixed(2) + "–" + hi.toFixed(2) + ")" : "") + "<extra></extra>" });
     }
   }
   if (ST.legendLayers) {
-    traces.push({ type: "scatter", mode: "markers", meta: "leg:section", name: name("section", "section"), x: [null], y: [null], hoverinfo: "skip", marker: { symbol: "circle", size: ST.secSize * z, color: LIGHT, line: { color: INK, width: 0.3 * z } } },
-      { type: "scatter", mode: "markers", meta: "leg:slide", name: name("slide", "slide (geometric mean)"), x: [null], y: [null], hoverinfo: "skip", marker: { symbol: "circle", size: ST.slideSize * z, color: LIGHT, line: { color: INK, width: 0.8 * z } } },
-      { type: "scatter", mode: "lines", meta: "leg:mean", name: name("mean", "geometric mean of slides, 95 % CI"), x: [null], y: [null], hoverinfo: "skip", line: { color: COLORS().mean, width: 1.6 * z } });
+    if (hSec) traces.push({ type: "scatter", mode: "markers", meta: "leg:section", name: name("section", "section"), x: [null], y: [null], hoverinfo: "skip", marker: { symbol: "circle", size: ST.secSize * z, color: LIGHT, line: { color: INK, width: 0.3 * z } } });
+    if (hSl) traces.push({ type: "scatter", mode: "markers", meta: "leg:slide", name: name("slide", "slide (geometric mean)"), x: [null], y: [null], hoverinfo: "skip", marker: { symbol: "circle", size: ST.slideSize * z, color: LIGHT, line: { color: INK, width: 0.8 * z } } });
+    traces.push({ type: "scatter", mode: "lines", meta: "leg:mean", name: name("mean", "geometric mean of slides, 95 % CI"), x: [null], y: [null], hoverinfo: "skip", line: { color: COLORS().mean, width: 1.6 * z } });
   }
-  const xs = gs.map((g) => g.x), xr = [Math.min(...xs) - 0.55, Math.max(...xs) + 0.7];
+  const xs = gs.map((g) => g.x), xr = [Math.min(...xs) + DOT_TICK + pos.left, Math.max(...xs) + DOT_TICK + pos.right];
   traces.unshift({ type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip", x: xr, y: [1, 1], line: { color: MID, width: 0.5 * z, dash: "dot" } });
   const y0 = Math.min(0.4, ...allY.map((v) => v / 1.12)), y1 = Math.max(2.5, ...allY.map((v) => v * 1.12));
   const ticks = [0.125, 0.25, 0.5, 1, 2, 4, 8].filter((v) => v >= y0 * 0.999 && v <= y1 * 1.001);
@@ -3444,7 +3614,7 @@ function humanGroupsFigure(z) {
   if (ST.showStats) HV.comps.forEach((c, i) => {
     const text = isEdit(hv.gstats[i]) ? hv.gstats[i].text : hvCompText(c);
     statLines = Math.max(statLines, text.split(/<br>/i).length);
-    annotations.push({ name: "gstat:" + i, text, xref: "x", yref: "paper", x: c.x, y: 1, yanchor: "bottom", xanchor: "center", yshift: 3 * z,
+    annotations.push({ name: "gstat:" + i, text, xref: "x", yref: "paper", x: statX(c, pos), y: 1, yanchor: "bottom", xanchor: "center", yshift: 3 * z,
       showarrow: false, align: "center", font: { size: fs * 0.92, color: C.text } });
   });
   const titleLines = hv.title ? toHtml(hv.title).split(/<br>/i).length : 0;
@@ -3457,7 +3627,7 @@ function humanGroupsFigure(z) {
   const layout = { width: W, height: H, paper_bgcolor: "#ffffff", plot_bgcolor: "#ffffff", hovermode: "closest",
     font: { family: "Arial, Helvetica, sans-serif", size: fs, color: C.text }, showlegend: !!ST.showLegend, legend: legendBox(hv.legendPos, fs), annotations,
     margin: { l: 10 * z, r: right, t: top, b: xLines * fs * 1.25 + 10 * z, pad: 0 },
-    xaxis: { ...axb, range: xr, tickmode: "array", tickvals: xs.map((x) => x + 0.09), ticktext: xticktext, fixedrange: true, title: { text: toHtml(hv.xlabel) } },
+    xaxis: { ...axb, range: xr, tickmode: "array", tickvals: xs.map((x) => x + DOT_TICK), ticktext: xticktext, fixedrange: true, title: { text: toHtml(hv.xlabel) } },
     yaxis: { ...axb, type: "log", range: [Math.log10(y0), Math.log10(y1)], tickmode: "array", tickvals: ticks, ticktext: ticks.map(String),
       title: { text: toHtml(hv.ylabel || "Ratio, automated / human count"), standoff: 4 * z } } };
   const plotH = Math.max(H - top - layout.margin.b, 10);
@@ -3465,10 +3635,10 @@ function humanGroupsFigure(z) {
     y: 1 + (top - 6 * z) / plotH, yanchor: "top", showarrow: false, font: { size: fs * 1.1, color: C.text } });
   const fig = { data: traces, layout };
   addSigBars(fig, HV.comps.map((c) => {
-    if (c.kind === "anova") return { x0: gs[0].x + 0.09, x1: gs[gs.length - 1].x + 0.09, p: c.anova ? c.anova.p : NaN, test: "anova" };
+    if (c.kind === "anova") return { x0: gs[0].x + DOT_TICK, x1: gs[gs.length - 1].x + DOT_TICK, p: c.anova ? c.anova.p : NaN, test: "anova" };
     const ps = { model: c.lmm && !c.lmm.error ? c.lmm.p : NaN, welch: c.welch ? c.welch.p : NaN, mwSlides: c.mwSlides ? c.mwSlides.p : NaN,
       mwSections: c.mwSections ? c.mwSections.p : NaN };
-    return { x0: c.a.x + 0.09, x1: c.b.x + 0.09, ...sigPick(ps) };
+    return { x0: c.a.x + DOT_TICK, x1: c.b.x + DOT_TICK, ...sigPick(ps) };
   }), z);
   addMinorTicks(layout, z, { skip: ["xaxis"], force: true });
   return fig;
@@ -3592,6 +3762,7 @@ function updateHuman() {
     const gd = $("plot4");
     panelEdits(gd, ST.hv, () => BUSY4, hvAutoStats);
     gd.on("plotly_click", (ev) => {
+      if (ev.event && ev.event.button === 2) return;
       const p = ev.points && ev.points[0], id = p && p.customdata && p.customdata[1];
       if (id) window.open("section_browser.html#" + encodeURIComponent(id), "_blank");
     });
@@ -3911,11 +4082,21 @@ function diffFromDefaults() {
 // The settings are also kept in this browser (localStorage), so they come back after closing the window or
 // visiting the section browser; a link with settings after # still wins over them.
 const STORE_KEY = "argus.figure_builder.settings";
+// 2: the counting method became gauss-8 (November 2026). Settings saved before that hold gauss-5 only as the old
+// default (a whole settings dump, an old preset link), so it is dropped from them once and the new default applies.
+const SETTINGS_VERSION = 2;
+function migrate(h) {
+  if (!h || typeof h !== "object") return h;
+  const v = +h.v || 1;
+  delete h.v;
+  if (v < 2 && h.method === "gauss-5") delete h.method;
+  return h;
+}
 
 function saveHash() {
-  const text = JSON.stringify(diffFromDefaults());
+  const text = JSON.stringify({ v: SETTINGS_VERSION, ...diffFromDefaults() });
   try { localStorage.setItem(STORE_KEY, text); } catch (e) { /* storage blocked (private window): the link still works */ }
-  if (document.activeElement !== $("settings")) $("settings").value = JSON.stringify(ST, null, 1);
+  if (document.activeElement !== $("settings")) $("settings").value = JSON.stringify({ v: SETTINGS_VERSION, ...ST }, null, 1);
   try { history.replaceState(null, "", "#" + encodeURIComponent(text)); } catch (e) { /* file:// in some browsers */ }
 }
 
@@ -4016,6 +4197,23 @@ function nText(gs) {
   return "n = " + sec + " sections from " + sl + " slides (" + parts.join("; ") + ")";
 }
 
+// what the dot plot draws, in a sentence or two
+function dotLayerWords() {
+  const kind = ST.dotKind || "dots", dots = kind !== "violin", out = [];
+  if (kind !== "dots") {
+    const sc = ST.scale === "log" ? ", estimated on log₁₀ of the values (the log axis)" : ST.scale === "symlog" ? ", estimated on the symmetric-log scale of the axis" : "";
+    out.push("Violins show the distribution of the section values (Gaussian kernel density, bandwidth by Silverman's rule of thumb as Plotly.js computes it" + sc +
+      ", cut at the smallest and largest value" + (ST.violinInner === "box" ? "; the box inside marks the quartiles and the median" : ST.violinInner === "mean"
+        ? "; the line inside marks the mean" + (ST.scale === "log" ? " of the log values (the geometric mean)" : ST.scale === "symlog" ? " on the axis's scale" : "") : "") + ").");
+  }
+  const marks = [];
+  if (dots && ST.showSections) marks.push("each small marker is one section");
+  if (dots && ST.showSlides) marks.push(dots && ST.showSections ? "larger markers are slide means" : "each marker is one slide mean");
+  if (ST.showMean) marks.push("bars are mean ± SEM over sections");
+  if (marks.length) out.push(marks.join("; ").replace(/^./, (c) => c.toUpperCase()) + ".");
+  return out.join(" ");
+}
+
 function methodsText() {
   if (!LAST) return "";
   const meth = METHODS.find((m) => ST.method.startsWith(m.key + "-"));
@@ -4027,7 +4225,7 @@ function methodsText() {
       "redrawn by hand where it was wrong, and a junction region (counting band) was built along it. " + positivityMethods(ST.method) +
       " To give every point of a section a side, the junction line was extended straight past both ends (along the direction of its " +
       "last 60 µm) and each cell's signed distance to the extended line was computed. The home side of a section was the side holding " +
-      "more AF488 mask-object area (AF488 mask, Gaussian 20 µm background, median + 5 robust SD), the same side for every positivity " +
+      "more AF488 mask-object area (the counting method's mask), the same side for every positivity " +
       "method; AF488⁺ cells on the other side were classed as crossed, all others as home.");
   }
   if ($("mOutcome").checked) {
@@ -4050,7 +4248,7 @@ function methodsText() {
   }
   if ($("mStats").checked) {
     const scaleWords = { none: "the values", log1p: "log(1 + y)", log: "log y" }[ST.testScale];
-    out.push("Statistics shown. Each marker is one section; larger markers are slide means; bars are mean ± SEM over sections. WT3 " +
+    out.push("Statistics shown. " + dotLayerWords() + " WT3 " +
       "and GD1 were compared " + (ST.group === "geno_exp" ? "within each experiment " : "") + "by the " +
       (ST.effect === "fold" ? "ratio of the section means (WT3 ÷ GD1)" : "difference of the section means (WT3 − GD1)") +
       ", by the two-sided Mann–Whitney U test on sections (normal approximation with tie and continuity correction when both groups " +
@@ -4083,6 +4281,172 @@ function updateMethods() {
   if (box) { const text = methodsText(); box.textContent = text; box.value = text; }
 }
 
+// ------------------------------------------------------------------ right-click menus
+// Each plot has its own menu, opened by a right-click on the plot (or the link under it). An entry with ▸ opens a
+// panel of controls beside the menu: the panes of #paneStore, moved in while it is open and back when it closes, so
+// every control keeps its id, its wiring and its value. Escape, a click outside or another right-click closes it.
+const SHARED_TAIL = [
+  { label: "Colours", panes: ["pane-colors"] },
+  "-",
+];
+const MENUS = {
+  dot: { title: "Dot plot", frame: "plotwrap", items: [
+    { label: "Layers and markers", panes: ["pane-dot-layers", "pane-markers", "pane-legend"] },
+    { label: "Axes", panes: ["pane-dot-axes", "pane-minor"] },
+    { label: "Statistics", panes: ["pane-dot-stats", "pane-sig"] },
+    { label: "Text", panes: ["pane-dot-text"] },
+    { label: "Size and font", panes: ["pane-dot-size", "pane-font"] },
+    ...SHARED_TAIL,
+    { label: "Export", panes: ["pane-dot-export"] },
+    { label: "Reset", panes: ["pane-reset"] },
+  ] },
+  scatter: { title: "Scatter", frame: "plotwrap2", on: "scOn", items: [
+    { label: "What to plot", panes: ["pane-sc-data"] },
+    { label: "Layers and markers", panes: ["pane-sc-layers", "pane-legend"] },
+    { label: "Axes", panes: ["pane-sc-axes", "pane-minor"] },
+    { label: "Text", panes: ["pane-sc-text"] },
+    { label: "Size and font", panes: ["pane-sc-size", "pane-font"] },
+    ...SHARED_TAIL,
+    { label: "Export", panes: ["pane-sc-export"] },
+    { label: "Reset", panes: ["pane-reset"] },
+  ] },
+  dist: { title: "Distribution", frame: "plotframe3", on: "dsOn", items: [
+    { label: "What to plot", panes: ["pane-ds-data"] },
+    { label: "Layers and statistics", panes: ["pane-ds-layers", "pane-legend"] },
+    { label: "Axes", panes: ["pane-ds-axes", "pane-minor"] },
+    { label: "Text", panes: ["pane-ds-text"] },
+    { label: "Size and font", panes: ["pane-ds-size", "pane-font"] },
+    ...SHARED_TAIL,
+    { label: "Export", panes: ["pane-ds-export"] },
+    { label: "Reset", panes: ["pane-reset"] },
+  ] },
+  human: { title: "Human against automated", frame: "plotframe4", on: "hvOn", items: [
+    { label: "What to plot", panes: ["pane-hv-data"] },
+    { label: "Layers and markers", panes: ["pane-hv-layers", "pane-markers", "pane-legend"] },
+    { label: "Axes", panes: ["pane-minor"] },
+    { label: "Statistics", panes: ["pane-sig"] },
+    { label: "Text", panes: ["pane-hv-text"] },
+    { label: "Size and font", panes: ["pane-hv-size", "pane-font"] },
+    ...SHARED_TAIL,
+    { label: "Export", panes: ["pane-hv-export"] },
+    { label: "Reset", panes: ["pane-reset"] },
+  ] },
+};
+for (const spec of Object.values(MENUS)) if (spec.on) spec.items.push({ label: "Hide this panel", action: () => { $(spec.on).click(); } });
+const HOVER_OPEN_MS = 180;
+let MENU = null;              // { panel, el, fly, item, timer }
+
+function closeFlyout() {
+  if (!MENU || !MENU.fly) return;
+  for (const p of [...MENU.fly.querySelectorAll(".pane")]) $("paneStore").appendChild(p);
+  MENU.fly.remove();
+  MENU.fly = null; MENU.item = null;
+  for (const it of MENU.el.querySelectorAll(".item.on")) it.classList.remove("on");
+}
+function closeMenu() {
+  if (!MENU) return;
+  clearTimeout(MENU.timer);
+  closeFlyout();
+  MENU.el.remove();
+  MENU = null;
+}
+// put a fixed element at (x, y), inside the window; alt: the x to end at when it does not fit to the right
+function placeAt(el, x, y, alt) {
+  const r = el.getBoundingClientRect(), W = document.documentElement.clientWidth, H = window.innerHeight, m = 8;
+  let left = x, top = y;
+  if (left + r.width > W - m) left = alt !== undefined && alt - r.width >= m ? alt - r.width : W - m - r.width;
+  if (top + r.height > H - m) top = H - m - r.height;
+  el.style.left = Math.max(m, left) + "px";
+  el.style.top = Math.max(m, top) + "px";
+}
+function openFlyout(item, focus) {
+  const spec = MENUS[MENU.panel].items[+item.dataset.i];
+  if (!spec || !spec.panes) return;
+  if (MENU.fly && MENU.item === item) return;
+  closeFlyout();
+  MENU.item = item;
+  item.classList.add("on");
+  const fly = document.createElement("div");
+  fly.className = "flyout";
+  fly.setAttribute("role", "dialog");
+  fly.setAttribute("aria-label", MENUS[MENU.panel].title + ": " + spec.label);
+  fly.innerHTML = "<h3>" + spec.label + "</h3>";
+  for (const id of spec.panes) fly.appendChild($(id));
+  document.body.appendChild(fly);
+  MENU.fly = fly;
+  const r = item.getBoundingClientRect(), m = MENU.el.getBoundingClientRect(), fw = fly.getBoundingClientRect().width, W = document.documentElement.clientWidth;
+  if (m.right + fw <= W - 8 || m.left - fw >= 8) placeAt(fly, m.right - 1, r.top - 7, m.left + 1);
+  else placeAt(fly, m.left, m.bottom + 2);           // a narrow window: below the menu
+  if (focus) { const first = fly.querySelector("input, select, textarea, button"); if (first) first.focus(); }
+}
+function openMenu(panel, x, y) {
+  closeMenu();
+  const spec = MENUS[panel];
+  const el = document.createElement("div");
+  el.className = "ctx";
+  el.setAttribute("role", "menu");
+  el.dataset.panel = panel;
+  el.innerHTML = '<div class="head">' + spec.title + "</div>" + spec.items.map((it, i) => (it === "-" ? '<div class="sep" role="separator"></div>'
+    : '<div class="item" role="menuitem" tabindex="-1" data-i="' + i + '"' + (it.panes ? ' aria-haspopup="dialog"' : "") + "><span>" + it.label +
+      "</span>" + (it.panes ? '<span class="arrow" aria-hidden="true">▸</span>' : "") + "</div>")).join("");
+  document.body.appendChild(el);
+  MENU = { panel, el, fly: null, item: null, timer: 0 };
+  placeAt(el, x, y);
+  el.addEventListener("click", (ev) => {
+    const item = ev.target.closest(".item");
+    if (!item) return;
+    const it = spec.items[+item.dataset.i];
+    if (it.action) { closeMenu(); it.action(); return; }
+    openFlyout(item, false);
+  });
+  el.addEventListener("mouseover", (ev) => {
+    const item = ev.target.closest(".item");
+    if (!item || !MENU) return;
+    clearTimeout(MENU.timer);
+    MENU.timer = setTimeout(() => { if (MENU && MENU.el === el && item.isConnected) { if (spec.items[+item.dataset.i].panes) openFlyout(item, false); else closeFlyout(); } }, HOVER_OPEN_MS);
+  });
+  el.addEventListener("mouseout", () => { if (MENU) clearTimeout(MENU.timer); });
+  el.addEventListener("keydown", (ev) => {
+    const items = [...el.querySelectorAll(".item")], i = items.indexOf(document.activeElement);
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      items[(i + (ev.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+    } else if ((ev.key === "ArrowRight" || ev.key === "Enter" || ev.key === " ") && i >= 0) {
+      ev.preventDefault();
+      const it = spec.items[+items[i].dataset.i];
+      if (it.action) { closeMenu(); it.action(); } else openFlyout(items[i], true);
+    }
+  });
+  const first = el.querySelector(".item");
+  if (first) first.focus({ preventScroll: true });
+}
+function buildMenus() {
+  for (const [panel, spec] of Object.entries(MENUS)) {
+    const frame = $(spec.frame);
+    frame.addEventListener("contextmenu", (ev) => {
+      if (ev.target.isContentEditable || ev.target.closest("[contenteditable]")) return;   // Plotly's text editing: the browser's menu (copy, paste)
+      ev.preventDefault();
+      openMenu(panel, ev.clientX, ev.clientY);
+    });
+    // a right button never reaches Plotly: no zoom box, no annotation drag or text editing, no click on a point
+    for (const type of ["mousedown", "pointerdown", "mouseup", "pointerup", "click"]) frame.addEventListener(type, (ev) => { if (ev.button === 2) ev.stopPropagation(); }, true);
+  }
+  for (const b of document.querySelectorAll("[data-menu]")) b.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const r = b.getBoundingClientRect();
+    openMenu(b.dataset.menu, r.left, r.bottom + 2);
+  });
+  document.addEventListener("mousedown", (ev) => {
+    if (MENU && !MENU.el.contains(ev.target) && !(MENU.fly && MENU.fly.contains(ev.target))) closeMenu();
+  }, true);
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && MENU) { closeMenu(); ev.preventDefault(); }
+  });
+  window.addEventListener("resize", closeMenu);
+}
+// every pane a menu shows (the checks list them; a pane in no menu would be a setting nobody can reach)
+const menuPanes = () => [...new Set(Object.values(MENUS).flatMap((s) => s.items.flatMap((it) => (it.panes || []))))];
+
 // ------------------------------------------------------------------ start
 function start() {
   try {
@@ -4093,10 +4457,12 @@ function start() {
     buildDistControls();
     buildHumanControls();
     buildDataControls();
+    buildMenus();
     let h = readHash();
     if (!h) {                         // no settings in the link: the ones this browser remembers
       try { const kept = localStorage.getItem(STORE_KEY); if (kept) h = JSON.parse(kept); } catch (e) { h = null; }
     }
+    h = migrate(h);
     if (h && h.preset && Object.keys(h).every((k) => ["preset", "method", "group", "scale"].includes(k))) {
       ST = JSON.parse(JSON.stringify(DEFAULTS));
       if (h.method) ST.method = h.method;
