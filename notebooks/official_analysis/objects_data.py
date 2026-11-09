@@ -1,7 +1,8 @@
 """Every counted AF488⁺ object, for the figure builder's distribution panel: ``section_browser/objects.js``.
 
-One row per object of the counting method (AF488 mask, Gaussian 20 µm background, median + 5 robust SD: the
-stored ``af488_mask/<section>/objects.parquet`` rows with ``mask`` == "kmad5") of every section in the section
+One row per object of the counting method (AF488 mask, Gaussian 20 µm background, median + 8 robust SD of the
+section's own tissue: the stored ``af488_mask/<section>/objects.parquet`` rows with ``mask`` == "kmad8") of every
+section in the section
 browser's ``data.json`` (WT3 and GD1), with:
 
 - ``away`` — signed distance past the junction line (µm, ``sides.py``: the line extended past both ends; > 0
@@ -50,7 +51,8 @@ RUN = DATA / "cells_analysis" / "2026-10-28_090440 re-scored"     # the cells-an
 OUT = DATA / "run_analysis_20261028"
 MASKS = OUT / "af488_mask"
 BROWSER = OUT / "section_browser"
-METHOD_MASK = "kmad5"                     #: the counting method's stored objects
+METHOD_MASK = "kmad8"                     #: the counting method's stored objects (median + 8 robust SD)
+METHOD_KEY = "gauss-8"                    #: the same method's key in the section browser (data.js)
 EDGE_COLUMN = "Distance to the tissue edge (µm)"
 WIDTH_STEP_UM, WIDTH_MIN_CELLS = 25.0, 20  #: local half-width per 25 µm step past the line (02_biology)
 # --------------------------------------------------------------------------
@@ -126,7 +128,7 @@ def main(argv: list[str]) -> int:
         parts.append(frame)
     table = pd.concat(parts, ignore_index=True)
     payload = {
-        "generated": time.strftime("%Y-%m-%d %H:%M"), "method": "gauss-5", "mask": METHOD_MASK,
+        "generated": time.strftime("%Y-%m-%d %H:%M"), "method": METHOD_KEY, "mask": METHOD_MASK,
         "sections": ids, "home_depth": rounded(depths, 1),
         "sec": table["sec"].astype(int).tolist(), "away": rounded(table["away"], 1),
         "area": rounded(table["area"], 1), "reg": table["reg"].astype(int).tolist(),

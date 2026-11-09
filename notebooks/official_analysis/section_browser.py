@@ -16,8 +16,9 @@ The methods:
 
 - **AF488 mask, Gaussian 20 µm background** (3, 5, 8 SD) — the mask of ``notebooks/dataset/af488_masks.py``:
   AF488 smoothed 0.5 µm, less its 20 µm Gaussian, cut inside the tissue at the median + k robust SD,
-  objects < 20 µm² dropped, holes < 10 µm² filled. One object = one AF488⁺ cell body. 5 SD is the
-  counting method of the official analysis (the page's default).
+  objects < 20 µm² dropped, holes < 10 µm² filled. One object = one AF488⁺ cell body. 8 SD is the
+  counting method of the official analysis (the page's default; until 9 Nov 2026 it was 5 SD). The median and
+  robust SD are each section's own, from its tissue pixels, so the threshold is set per section.
 - **AF488 mask, local median 45 µm background** (3, 5, 7, 8 SD) — as ``notebooks/dataset/james_masks.py``:
   AF488 less its 45 µm local median (``junction_analysis.less_local_median``), smoothed 0.5 µm, the
   same threshold and cleanup.
@@ -27,8 +28,9 @@ The methods:
 
 Sides (``sides.py``): crossed = on the far side of the junction line extended past both ends, in the
 organoid where AF488 is not at home, at any distance; home = every other. Home is the side holding
-more of the Gaussian 5 SD mask's object area (the stored ``af488_masks.py`` objects), so a section's
-side is the same for every method. Objects and cells are placed by their centroid.
+more of the Gaussian 8 SD mask's object area (the stored ``af488_masks.py`` objects), so a section's
+side is the same for every method. (With the 5 SD mask's area, the rule before 9 Nov 2026, every one of the 614
+sections has the same home side.) Objects and cells are placed by their centroid.
 
 Writes into *out* (default ``run_analysis_20261028/section_browser``) ``data.json``, the same as
 ``data.js`` (so the page opens from disk too), ``img/`` and ``parts/`` (one file per section, so a
@@ -78,17 +80,17 @@ DESIGN_CSV = DATA / "Image_File_List.csv"
 BROWSER = OUT / "section_browser"
 GENOTYPES = ("WT3", "GD1")
 CHANNEL = "AF488"
-SIDE_MASK = "kmad5"               #: the stored mask whose object area decides the home side
+SIDE_MASK = "kmad8"               #: the stored mask whose object area decides the home side (the counting method's)
 #: The positivity methods: key → label, kind ("mask" or "cell"), the k of median + k robust SD, the default k.
 METHODS = {
-    "gauss": {"label": "AF488 mask, Gaussian 20 µm background", "kind": "mask", "ks": (3, 5, 8), "default": 5},
+    "gauss": {"label": "AF488 mask, Gaussian 20 µm background", "kind": "mask", "ks": (3, 5, 8), "default": 8},
     "median": {"label": "AF488 mask, local median 45 µm background", "kind": "mask", "ks": (3, 5, 7, 8), "default": 5},
     "cellmf": {"label": "Per-nucleus rule, median-filtered mean", "kind": "cell", "ks": (3, 5, 7), "default": 7,
                "column": "AF488 mean (median filter)"},
     "cellraw": {"label": "Per-nucleus rule, raw mean", "kind": "cell", "ks": (3, 5, 7), "default": 7,
                 "column": "AF488 mean"},
 }
-DEFAULT = "gauss-5"               #: the counting method of the official analysis
+DEFAULT = "gauss-8"               #: the counting method of the official analysis (median + 8 robust SD)
 MEDIAN_BACKGROUND_UM = 45.0       #: junction_analysis.less_local_median's window (for the label only)
 SIMPLIFY_PX = 0.5                 #: outlines simplified to within this many picture pixels
 AREA_2_UM = -50.0                 #: annotator 2 counted from 50 µm before the line to the far edge
@@ -109,7 +111,7 @@ def short(name: str) -> str:
 
 
 def method_keys() -> list[str]:
-    """Every method-threshold key, e.g. ``gauss-5``."""
+    """Every method-threshold key, e.g. ``gauss-8``."""
     return [f"{m}-{k}" for m, spec in METHODS.items() for k in spec["ks"]]
 
 
@@ -272,7 +274,7 @@ def run_red(name: str, out: str) -> str:
 
 # ---------------------------------------------------------------- outlines and counts per method
 def section_sign(name: str, line) -> float | None:
-    """The section's home sign (``sides.home_sign``) from the stored Gaussian 5 SD objects' area; None without a line."""
+    """The section's home sign (``sides.home_sign``) from the stored Gaussian 8 SD objects' area; None without a line."""
     if line is None:
         return None
     o = pd.read_parquet(MASKS / name / "objects.parquet")
@@ -478,9 +480,9 @@ def run_masks(name: str, out: str) -> str:
     summary = {"version": MASK_VERSION, "id": sid, "name": name, "sign": sign, "counts": counts, "check": check,
                "seconds": {**seconds, "total": round(time.perf_counter() - started, 1)}}
     methods_file(out, name).write_text(json.dumps(_clean(summary), separators=(",", ":")), encoding="utf-8")
-    g5 = check["gauss-5"]
+    g = check[DEFAULT]
     return (f"{sid}: {summary['seconds']['total']:.0f} s ({', '.join(f'{k} {v:.0f}' for k, v in seconds.items())}); "
-            f"gauss-5 {g5['objects']} objects (stored {g5['stored_objects']}), crossed {counts['gauss-5']['crossed']}")
+            f"{DEFAULT} {g['objects']} objects (stored {g['stored_objects']}), crossed {counts[DEFAULT]['crossed']}")
 
 
 # ---------------------------------------------------------------- the table and data.js

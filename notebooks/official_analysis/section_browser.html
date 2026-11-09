@@ -793,7 +793,7 @@ function info(s) {
     legendItem('<rect x="3" y="4" width="12" height="10" fill="none" stroke="#d9d9d9" stroke-dasharray="3 2" stroke-width="1.5"/>', "junction region") +
     '<div style="color:' + DARK + ';margin-top:6px">AF488 (green), brightest plane over z, display ' + s.display[0] + "–" + s.display[1] +
     (s.red ? "; " + s.red.channel + " (red), display " + s.red.display[0] + "–" + s.red.display[1] : "; no AF555 picture") +
-    " (tissue 1st–99.7th percentile). Home is the side of the line holding more of the Gaussian 5 SD mask's area, the same side for every method; " +
+    " (tissue 1st–99.7th percentile). Home is the side of the line holding more of the Gaussian 8 SD mask's area, the same side for every method; " +
     n + " are placed by their centroid. Wheel to zoom, drag to pan, ←/→ previous/next, 0 to fit.</div></div>";
   $("info").innerHTML = html;
 }

@@ -8,7 +8,9 @@ The definitions of the official analysis (5 Nov 2026):
 
 The line is the run's junction line (``RUN/cells/<name>.json`` ``line``, µm, (y, x)), **extended straight past
 both ends** (along its end segments) so that every point of the section lies on one side or the other, not only
-the points beside the line. The AF488 organoid — home — is the side holding more of the AF488 mask objects' area.
+the points beside the line. The AF488 organoid — home — is the side holding more of the AF488 mask objects' area:
+those of the counting method, the Gaussian 20 µm mask at median + 8 robust SD (``kmad8``; the 5 SD mask, used
+before 9 Nov 2026, gives the same side in all 614 sections).
 
 The side is worked out here from the line itself, for every table the same way. (The stored distance columns of
 the run's cells and of ``af488_masks.py``'s objects each take their sign from their own points through
