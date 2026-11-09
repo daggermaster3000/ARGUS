@@ -1378,6 +1378,7 @@ const DEFAULTS = {
   dotKind: "dots", violinInner: "none",   // the dot plot: dots, violin or violin + dots; inside the violin: nothing, box, mean line
   secSize: 2.5, slideSize: 5, secOpacity: 0.8, jitter: 0.16,
   scale: "symlog", linthresh: 1, ymin: 0, ymax: null, yticks: "", yticklabels: "",
+  labelSig: null,        // what each panel plotted when its titles were set (labels follow the variable)
   title: "", ylabel: L.crossed, xlabel: "", xticks: "", legendNames: {}, legendPos: null, statsText: {}, statsPos: {},
   widthMm: 62, heightMm: 75, fontPt: 7, zoom: 2.5, effect: "fold", testScale: "log1p",
   model: "lmm", mCount: "crossed", mExposure: "junction_mm", mSucc: "crossed", mTrials: "crossed+home", mOlre: true, mNodes: 15,
@@ -1580,6 +1581,7 @@ function onInput(id) {
 function writeControls() {
   for (const id of INPUTS) {
     const el = $(id), v = ST[id];
+    if (el === document.activeElement && el.type !== "checkbox" && el.tagName !== "SELECT") continue;   // not under the cursor of someone typing
     if (el.type === "checkbox") el.checked = !!v;
     else el.value = v === null || v === undefined ? "" : v;
   }
@@ -2386,8 +2388,43 @@ function autoWidth() {
   else if (ST.group === "genotype" && ST.widthMm === WIDE_MM) { ST.widthMm = DEFAULTS.widthMm; writeControls(); }
 }
 
+// ------------------------------------------------------------------ titles follow the plotted variable
+// Each panel's titles belong to what it plots. When that changes (another formula, x or y variable, value, plot
+// type), the titles typed or edited on that panel go back to automatic, so an axis never keeps the name of a
+// variable that is no longer plotted. Other changes (filters, colours, size, method) keep them.
+function autoYLabel(formula) {
+  const f = String(formula || "").replace(/\s+/g, "");
+  const p = Object.values(PRESETS).find((x) => x.formula && x.formula.replace(/\s+/g, "") === f);
+  return p ? p.ylabel : formulaTitle(formula);
+}
+function labelSigs() {
+  return {
+    dot: String(ST.formula).replace(/\s+/g, ""),
+    scX: String(ST.sc.x).replace(/\s+/g, "") + "|" + ST.sc.unit, scY: String(ST.sc.y).replace(/\s+/g, "") + "|" + ST.sc.unit,
+    ds: [ST.ds.unit, ST.ds.unit === "object" ? ST.ds.of : String(ST.ds.f).replace(/\s+/g, ""), ST.ds.kind].join("|"),
+    hv: ST.hv.plot + "|" + ST.hv.group,
+  };
+}
+function syncLabels() {
+  const now = labelSigs(), was = ST.labelSig;
+  ST.labelSig = now;
+  if (!was) return false;                   // first time (older saved settings): keep what is there
+  let changed = false;
+  if (was.dot !== now.dot) {
+    if (ST.preset === "custom" || !PRESETS[ST.preset] || PRESETS[ST.preset].formula.replace(/\s+/g, "") !== now.dot) ST.ylabel = autoYLabel(ST.formula);
+    ST.title = ""; ST.xlabel = ""; ST.statsText = {};
+    changed = true;
+  }
+  if (was.scX !== now.scX) { ST.sc.xlabel = ""; ST.sc.title = ""; changed = true; }
+  if (was.scY !== now.scY) { ST.sc.ylabel = ""; ST.sc.title = ""; changed = true; }
+  if (was.ds !== now.ds) { Object.assign(ST.ds, { xlabel: "", ylabel: "", title: "" }); changed = true; }
+  if (was.hv !== now.hv) { Object.assign(ST.hv, { xlabel: "", ylabel: "", title: "" }); changed = true; }
+  return changed;
+}
+
 function update() {
   autoWidth();
+  if (syncLabels()) writeControls();
   // formula
   const msg = $("formulaMsg");
   try {
@@ -2608,6 +2645,7 @@ function buildScatterControls() {
 function writeScatterControls() {
   for (const [id, key] of Object.entries(SC_INPUTS)) {
     const el = $(id), v = ST.sc[key];
+    if (el === document.activeElement && el.type !== "checkbox" && el.tagName !== "SELECT") continue;
     if (el.type === "checkbox") el.checked = !!v;
     else el.value = v === null || v === undefined ? "" : v;
   }
