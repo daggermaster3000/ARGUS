@@ -6,8 +6,8 @@ traces the objects of the Gaussian 20 µm background mask (:data:`KEYS`: 3, 5 an
 again, at ~0.325 µm per pixel, without simplifying (only points on a straight run are dropped), so an outline
 follows the pixels of the mask that was counted.
 
-The mask is made exactly as in ``section_browser.run_masks`` (the stored threshold of ``af488_mask/<section>``),
-so the objects come in the same order as in ``parts/masks/<id>__<key>.js``; the page takes side, region, area and
+The mask is made exactly as in ``section_browser.run_masks`` (the stored threshold of ``af488_mask/<section>``,
+objects outside the section dropped by ``section_outline``), so the objects come in the same order as in ``parts/masks/<id>__<key>.js``; the page takes side, region, area and
 distance from that file and only the rings from this one. A section whose object count differs from the stored
 one is reported and not written.
 
@@ -45,7 +45,7 @@ BROWSER = DATA / "run_analysis_20261028" / "section_browser"      # section_brow
 KEYS = ("gauss-3", "gauss-5", "gauss-8")   #: the Gaussian mask's thresholds traced at full resolution
 STRAIGHT_PX = 0.05                #: points within this many scan pixels of a straight run are dropped
 WORKERS = 4                       #: each holds a slide scan's planes (~2 GB)
-VERSION = 1
+VERSION = 2                       #: 2: objects outside the section dropped
 # --------------------------------------------------------------------------
 
 
@@ -54,7 +54,10 @@ def fine_file(out: Path, sid: str, key: str) -> Path:
 
 
 def fine_done(out: Path, sid: str) -> bool:
-    return all(fine_file(out, sid, k).exists() for k in KEYS)
+    try:
+        return all(f'"version":{VERSION},' in fine_file(out, sid, k).read_text(encoding="utf-8")[:200] for k in KEYS)
+    except OSError:
+        return False
 
 
 def fine_rings(crop: np.ndarray, top: int, left: int) -> list[list[int]]:
@@ -97,6 +100,8 @@ def run_fine(name: str, out: str) -> str:
     f = max(1, int(round(sb.TARGET_UM / voxel)))
     tissue = cv.tissue_mask(nuclear)
     del nuclear
+    outline = sb.section_outline.outline_for(sb.MASKS / name, Path(info["file"]))
+    line_um = sb.section_outline.line_um(info)
     # as section_browser.run_masks: smoothed, less the 20 µm Gaussian, cut at the stored threshold in the tissue
     smooth = ndimage.gaussian_filter(af488, cv.SMOOTH_UM / voxel)
     del af488
@@ -109,7 +114,8 @@ def run_fine(name: str, out: str) -> str:
     for key in KEYS:
         k = int(key.split("-")[1])
         cut = float(stored.get(f"kmad{k:g}", cuts[k]))
-        labelled = label(sb.cleaned((signal > cut) & tissue, voxel), connectivity=2)
+        mask = sb.section_outline.drop_outside(sb.cleaned((signal > cut) & tissue, voxel), outline, line_um, voxel)[0]
+        labelled = label(mask, connectivity=2)
         rings = [fine_rings(p.image, p.bbox[0], p.bbox[1]) for p in regionprops(labelled)]
         if len(rings) != stored_counts[key]["n"]:
             said.append(f"{key} MISMATCH {len(rings)} vs {stored_counts[key]['n']}")

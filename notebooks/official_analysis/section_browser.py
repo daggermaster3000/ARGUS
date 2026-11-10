@@ -26,6 +26,11 @@ The methods:
   (3, 5, 7 SD) — a cell is AF488⁺ above the median + k robust SD of the junction region's cells; the
   median-filtered 7 SD rule is the run's own. A cell is drawn as the outline of its grown region.
 
+Every method counts only what lies in the section (``notebooks/dataset/section_outline.py``): an object or cell
+whose centroid is more than 10 µm outside the run's outline of the section, or in a piece of it the junction line
+does not pass through (debris, bubble rims, a neighbouring organoid, a bright strip at the scan's edge), is not
+counted nor drawn.
+
 Sides (``sides.py``): crossed = on the far side of the junction line extended past both ends, in the
 organoid where AF488 is not at home, at any distance; home = every other. Home is the side holding
 more of the Gaussian 8 SD mask's object area (the stored ``af488_masks.py`` objects), so a section's
@@ -69,8 +74,10 @@ import pandas as pd
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT / "notebooks" / "validation"))
+sys.path.insert(0, str(ROOT / "notebooks" / "dataset"))
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
+import section_outline  # noqa: E402
 import sides  # noqa: E402
 
 # ---------------------------------------------------------------- Settings
@@ -103,7 +110,7 @@ DISPLAY_PCT = (1.0, 99.7)         #: display range: these percentiles of AF488 i
 JPEG_QUALITY = 85
 WORKERS = 4                       #: each holds a slide scan's planes and one mask at a time (~2 GB)
 VERSION = 1                       #: of the pictures (parts/<id>.json)
-MASK_VERSION = 1                  #: of the outlines and counts (parts/methods/<id>.json, parts/masks/)
+MASK_VERSION = 2                  #: of the outlines and counts (parts/methods/<id>.json, parts/masks/); 2: in the section only
 PREFIX = "2025_09_26_Asssembloid_"
 # --------------------------------------------------------------------------
 
@@ -381,6 +388,13 @@ def run_masks(name: str, out: str) -> str:
     f = max(1, int(round(TARGET_UM / voxel)))
     tissue = cv.tissue_mask(nuclear)
     del nuclear
+    # objects and cells outside the section are not counted (section_outline; the outline af488_masks.py cached)
+    section = section_outline.outline_for(MASKS / name, Path(info["file"]))     # not `outline`: that is the ring tracer
+    line_um = section_outline.line_um(info)
+
+    def in_section(mask: np.ndarray) -> np.ndarray:
+        return section_outline.drop_outside(mask, section, line_um, voxel)[0]
+
     seconds["read"] = round(time.perf_counter() - tick, 1)
     stored_summary = json.loads((MASKS / name / "summary.json").read_text(encoding="utf-8"))
     stored_objects = pd.read_parquet(MASKS / name / "objects.parquet", columns=["mask"])["mask"].value_counts()
@@ -420,7 +434,7 @@ def run_masks(name: str, out: str) -> str:
     stored = stored_summary["thresholds"]
     for k in METHODS["gauss"]["ks"]:
         cut = float(stored.get(f"kmad{k:g}", cuts[k]))            # the stored threshold (equal to the recomputed one)
-        shapes = place(mask_objects(cleaned((signal > cut) & tissue, voxel), voxel, f))
+        shapes = place(mask_objects(in_section(cleaned((signal > cut) & tissue, voxel)), voxel, f))
         record(f"gauss-{k}", shapes, cut)
         check[f"gauss-{k}"] = {"recomputed_threshold": cuts[k], "stored_threshold": stored.get(f"kmad{k:g}"),
                                "objects": len(shapes), "stored_objects": int(stored_objects.get(f"kmad{k:g}", -1))}
@@ -433,7 +447,7 @@ def run_masks(name: str, out: str) -> str:
     del af488
     cuts, _c, _s = robust_cuts(signal, tissue, METHODS["median"]["ks"])
     for k in METHODS["median"]["ks"]:
-        shapes = place(mask_objects(cleaned((signal > cuts[k]) & tissue, voxel), voxel, f))
+        shapes = place(mask_objects(in_section(cleaned((signal > cuts[k]) & tissue, voxel)), voxel, f))
         record(f"median-{k}", shapes, cuts[k])
     del signal, tissue
     seconds["median"] = round(time.perf_counter() - tick, 1)
@@ -444,13 +458,15 @@ def run_masks(name: str, out: str) -> str:
         METHODS[m]["column"] for m in ("cellmf", "cellraw")]
     cells = pd.read_csv(RUN / "cells" / f"{name}.csv", usecols=columns)
     region = cells[ja.IN_REGION_COLUMN].fillna(False).astype(bool).to_numpy()
+    counted = section_outline.in_section(section, line_um, cells[["Centroid Y (µm)", "Centroid X (µm)"]].to_numpy(float),
+                                         voxel)
     positive, cell_cuts = {}, {}
     for m in ("cellmf", "cellraw"):
         values = cells[METHODS[m]["column"]].to_numpy(float)
         centre, spread = ja.robust_centre_and_spread(values[region])
         for k in METHODS[m]["ks"]:
             cell_cuts[f"{m}-{k}"] = centre + k * spread
-            positive[f"{m}-{k}"] = values > centre + k * spread
+            positive[f"{m}-{k}"] = (values > centre + k * spread) & counted     # outside the section: not counted
     wanted = np.zeros(len(cells), bool)
     for p in positive.values():
         wanted |= p
@@ -645,6 +661,8 @@ def main(argv: list[str]) -> int:
     print(f"written {out / 'data.json'}: {n} sections", flush=True)
     import objects_data                         # every counted object, for the figure builder (objects.js)
     objects_data.main(["--out", str(out)])
+    import browser_cellpose                     # the retrained Cellpose's cells on the human-counted sections
+    browser_cellpose.main(["--out", str(out)])
     return 0
 
 

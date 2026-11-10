@@ -5,7 +5,11 @@ The mask is the one ``notebooks/validation/04_classical_vs_cellpose.ipynb`` vali
 its local background (a 20 µm Gaussian) taken away, and cut inside the tissue at
 the median + k robust SDs of what is left, for k = 3, 5 and 8 (``kmad3`` …);
 objects under 20 µm² dropped, holes under 10 µm² filled. On 39 scans ``kmad5``
-called almost the same cells as the run's rule (κ 0.79).
+called almost the same cells as the run's rule (κ 0.79). Objects outside the section are then taken out of each
+mask (``section_outline.drop_outside``: centroid more than 10 µm outside the run's outline of the section, or in a
+piece of it the junction line does not pass through: debris, bubble rims, a neighbouring organoid, a bright strip at
+the scan's edge), so the cover and the objects below count only what lies in the assembloid. The threshold is still
+taken over the coarse tissue mask, as before.
 
 Per section, into ``OUT/<sample>/``:
 
@@ -15,7 +19,8 @@ Per section, into ``OUT/<sample>/``:
 * ``objects.parquet`` — every object of each ``kmad`` mask, the mask's own cells:
   area, centroid, distance to the junction line (positive on the region's side,
   as the run's cells) and whether it is beside the line or past its ends;
-* ``summary.json`` — the thresholds and the noise SD.
+* ``summary.json`` — the thresholds, the noise SD and the objects dropped as outside the section (``outside``);
+* ``outline.npz`` — the run's outline of the section (``section_outline``), for the scripts that make the masks again.
 
 Run from the repository root (CPU only, ~20 s a section, a few sections at a time)::
 
@@ -36,7 +41,9 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "validation"))
 sys.path.insert(0, str(HERE.parents[1]))
+sys.path.insert(0, str(HERE))
 import classical_vs_cellpose as cv  # noqa: E402
+import section_outline  # noqa: E402
 
 from microscopy_viewer import junction_analysis as ja  # noqa: E402
 
@@ -46,7 +53,7 @@ OUT = Path(r"D:\Slidescanner extracted\run_analysis_20261028\af488_mask")
 METHODS = tuple(f"kmad{k:g}" for k in cv.K_MADS)
 #: Processes at a time: each holds a slide scan's planes and masks (~2 GB).
 WORKERS = 4
-VERSION = 1
+VERSION = 2                       #: 2: objects outside the section dropped (section_outline)
 
 
 def run_one(name: str) -> str:
@@ -63,6 +70,12 @@ def run_one(name: str) -> str:
     del nuclear
     masks, meta = cv.classical_masks(af488, tissue, voxel)
     del af488
+    folder = OUT / name
+    outline = section_outline.outline_for(folder, Path(info["file"]))
+    outside = {}
+    for method in METHODS:
+        masks[method], outside[method] = section_outline.drop_outside(masks[method], outline,
+                                                                      section_outline.line_um(info), voxel)
     grown = ja.read_labels(RUN / info["grown_file"])
     ids = np.unique(grown[grown > 0]).astype(np.int64)
     size = np.asarray(ndimage.sum(grown > 0, grown, ids), dtype=float)
@@ -88,16 +101,16 @@ def run_one(name: str) -> str:
             table[ja.IN_REGION_COLUMN] = band[rows, cols]
         objects.append(table)
 
-    folder = OUT / name
     folder.mkdir(parents=True, exist_ok=True)
     cells.to_parquet(folder / "cells.parquet", index=False)
     (pd.concat(objects, ignore_index=True) if objects else pd.DataFrame()).to_parquet(folder / "objects.parquet",
                                                                                        index=False)
     summary = {"version": VERSION, "sample": name, "file": info["file"], "voxel_um": voxel,
                "thresholds": {m: meta["thresholds"][m] for m in METHODS}, "noise_sd": meta["noise_sd"],
-               "background_centre": meta["background_centre"], "seconds": round(time.perf_counter() - started, 1)}
+               "background_centre": meta["background_centre"], "outside": outside,
+               "seconds": round(time.perf_counter() - started, 1)}
     (folder / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
-    return f"{name}: {summary['seconds']:.0f} s"
+    return f"{name}: {summary['seconds']:.0f} s, outside the section {outside}"
 
 
 def done(name: str) -> bool:
