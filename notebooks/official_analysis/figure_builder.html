@@ -4168,16 +4168,26 @@ function positivityMethods(key) {
     "(8-connectivity) was counted as one AF488⁺ cell, at its centroid.";
   const nuclei = "Nuclei were segmented over the whole section with Cellpose (cpsam) on the nuclear stain and grown by 6 µm to " +
     "approximate cells.";
+  // since 10 Nov 2026 (section_outline.py): nothing outside the section is counted, whatever the method
+  const inSection = " " +
+    "{what} whose centroid lay more than 10 µm outside the section's outline, or in a part of the outline that the " +
+    "junction line did not pass within 50 µm of, were not counted (debris, air-bubble rims, neighbouring organoids, " +
+    "artefacts at the edge of the scan). The outline was the one used to find the junction: tissue standing above " +
+    "the slide background in any channel on a 5 µm overview (smoothed by 10 µm, a fifth of the way from background " +
+    "to tissue), opened (10 µm) and closed (15 µm), pieces smaller than a tenth of the largest dropped, holes " +
+    "filled.";
+  const outside = (what) => inSection.replace("{what}", what);
   if (m === "gauss") return "AF488⁺ cells were counted as objects of a mask of the AF488 channel: the brightest plane over z, " +
     "smoothed with a Gaussian (σ = 0.5 µm), less its local background (Gaussian, σ = 20 µm), and thresholded inside the tissue " +
-    "(Otsu mask of the nuclear stain at 1/8 resolution, closed and hole-filled) at the median + " + sd + " of the section's tissue. " + cleanup;
+    "(Otsu mask of the nuclear stain at 1/8 resolution, closed and hole-filled) at the median + " + sd + " of the section's tissue. " + cleanup +
+    outside("Objects");
   if (m === "median") return "AF488⁺ cells were counted as objects of a mask of the AF488 channel: the brightest plane over z, " +
     "less its local median (45 µm window, computed at 1/8 resolution), smoothed with a Gaussian (σ = 0.5 µm) and thresholded inside " +
-    "the tissue (Otsu mask of the nuclear stain) at the median + " + sd + " of the section's tissue. " + cleanup;
+    "the tissue (Otsu mask of the nuclear stain) at the median + " + sd + " of the section's tissue. " + cleanup + outside("Objects");
   const value = m === "cellmf" ? "mean AF488 intensity over the grown nucleus, measured on the AF488 image less its local median " +
     "(45 µm window)" : "mean AF488 intensity over the grown nucleus (raw image)";
   return nuclei + " A cell was called AF488⁺ when its " + value + ", exceeded the median + " + sd + " of all cells in the junction " +
-    "region of the same section; each positive cell was placed at its centroid.";
+    "region of the same section; each positive cell was placed at its centroid." + outside("Positive cells");
 }
 
 const WORDS = {   // variable → plain words for the outcome sentence
