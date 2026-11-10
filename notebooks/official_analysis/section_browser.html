@@ -19,6 +19,8 @@ header .method { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; }
 header .method label { display: inline-flex; gap: 4px; align-items: baseline; }
 #maskStatus { position: absolute; right: 12px; bottom: 12px; color: #fff; font-size: 12px; background: rgba(0,0,0,.6); padding: 2px 6px; pointer-events: none; }
 #maskStatus:empty { display: none; }
+#cpStatus { position: absolute; right: 12px; bottom: 34px; color: #fff; font-size: 12px; background: rgba(0,0,0,.6); padding: 2px 6px; pointer-events: none; }
+#cpStatus:empty { display: none; }
 button, select, input[type=search] { font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--ink); padding: 3px 8px; border-radius: 0; }
 button.on { background: var(--ink); color: var(--paper); }
 button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
@@ -159,6 +161,7 @@ body.gallery #gallery { display: grid; }
           <g id="gRegion" fill="none" stroke="#d9d9d9" stroke-width="1.5" stroke-dasharray="5 4"></g>
           <g id="gLine" fill="none" stroke="#ffffff" stroke-width="2"></g>
           <g id="gObjects" fill="#ffffff" fill-opacity="0" stroke-width="1.2" stroke-linejoin="round"></g>
+          <g id="gCellpose" fill="#ffffff" fill-opacity="0" stroke-width="1.2" stroke-linejoin="round"></g>
           <g id="gHumans" fill="none" stroke="#ffffff" stroke-width="1.3"></g>
         </svg>
         <div id="toggles">
@@ -166,6 +169,8 @@ body.gallery #gallery { display: grid; }
           <label><input type="checkbox" id="tRegion" checked> junction region</label>
           <label><input type="checkbox" id="tObjects" checked> automated outlines</label>
           <label><input type="checkbox" id="tHumans" checked> human dots</label>
+          <label title="Cellpose fine-tuned on the annotators' AF488+ dots (cellpose488_retrain.py), on the 27 human-counted sections only. Yellow at home, orange crossed, grey dashed outside the section (not counted). Drawn over the chosen method's outlines."><input type="checkbox" id="tCellpose"> retrained Cellpose
+            <select id="tCpModel"><option value="cv">cross-validated</option><option value="other">trained on the other annotator</option></select></label>
           <label><input type="checkbox" id="tImage" checked> image</label>
           <label>channel <select id="tChannel"><option value="g">AF488 (green)</option><option value="r">AF555 (red)</option><option value="rg">both</option></select></label>
           <button id="tContrast" title="Contrast limits and gamma of each channel, as in napari">brightness</button>
@@ -186,6 +191,7 @@ body.gallery #gallery { display: grid; }
         <div id="nav"><button id="prev" title="previous (left arrow)">&larr;</button><button id="fit" title="fit (0)">fit</button><button id="next" title="next (right arrow)">&rarr;</button></div>
         <div id="scalebar"><div></div><span></span><em id="tileStatus"></em></div>
         <div id="maskStatus"></div>
+        <div id="cpStatus"></div>
       </div>
       <aside id="info"></aside>
     </div>
@@ -196,6 +202,8 @@ body.gallery #gallery { display: grid; }
 <!-- data.js (written by section_browser.py) sets window.SECTION_DATA, so the page also opens straight from disk;
      without it the page fetches data.json, which needs a web server. -->
 <script src="data.js"></script>
+<!-- parts/cellpose/index.js (browser_cellpose.py): which sections have the retrained Cellpose's outlines -->
+<script src="parts/cellpose/index.js" onerror="window.CP_INDEX = {}"></script>
 <script>
 "use strict";
 const INK = "#000000", DARK = "#4d4d4d", MID = "#8c8c8c", LIGHT = "#d9d9d9", MAGENTA = "#ff00ff";
@@ -628,10 +636,11 @@ function draw(s) {
   $("tilesG").innerHTML = ""; $("tilesR").innerHTML = "";
   scheduleTiles();
   const gL = $("gLine"), gR = $("gRegion"), gO = $("gObjects"), gH = $("gHumans");
-  for (const g of [gL, gR, gO, gH]) g.innerHTML = "";
+  for (const g of [gL, gR, gO, gH, $("gCellpose")]) g.innerHTML = "";
   if (s.line && s.line.length) gL.appendChild(el("polyline", { points: s.line.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
   for (const c of s.region || []) gR.appendChild(el("polygon", { points: c.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
   drawObjects(s);
+  drawCellpose(s);
   const arm = 4;
   for (const h of s.humans || []) {
     const d = h.dots;
@@ -680,6 +689,64 @@ function loadFine(id, key) {
     document.head.appendChild(tag);
   });
   return FINE_WAIT[k];
+}
+
+// The retrained Cellpose's cells (browser_cellpose.py): parts/cellpose/<id>__<model>.js calls window.CP_LOADED(id, model,
+// {q, rings, side, reg, area, away}), rings as the full-resolution outlines (first point, then steps, 1/q overview px).
+const CP = {}, CP_WAIT = {};
+const CP_MODEL = { cv: "cross-validated", other: "trained on the other annotator" };
+const CP_SIDE = { 1: { c: "#ff9f1c", n: "crossed" }, 0: { c: "#ffe14d", n: "home" }, "-1": { c: "#ffe14d", n: "no junction line" },
+  "-2": { c: MID, n: "outside the section, not counted", dash: "3 3" } };
+window.CP_LOADED = (id, model, d) => { CP[id + "__" + model] = d; };
+function loadCellpose(id, model) {
+  const k = id + "__" + model;
+  if (k in CP) return Promise.resolve(CP[k]);
+  if (CP_WAIT[k]) return CP_WAIT[k];
+  CP_WAIT[k] = new Promise((resolve) => {
+    const tag = document.createElement("script");
+    tag.src = "parts/cellpose/" + encodeURIComponent(k) + ".js";
+    tag.onload = () => { tag.remove(); delete CP_WAIT[k]; if (!(k in CP)) CP[k] = null; resolve(CP[k]); };
+    tag.onerror = () => { tag.remove(); delete CP_WAIT[k]; CP[k] = null; resolve(null); };
+    document.head.appendChild(tag);
+  });
+  return CP_WAIT[k];
+}
+function drawCellpose(s) {
+  const g = $("gCellpose"), model = $("tCpModel").value, on = $("tCellpose").checked;
+  g.innerHTML = "";
+  $("cpStatus").textContent = "";
+  if (!on || !s) return;
+  const have = (window.CP_INDEX || {})[s.id];
+  if (!have || !have[model]) { $("cpStatus").textContent = "no retrained Cellpose here (only the 27 human-counted sections)"; return; }
+  $("cpStatus").textContent = "retrained Cellpose loading…";
+  loadCellpose(s.id, model).then((d) => {
+    if (CUR !== s || $("tCpModel").value !== model || !$("tCellpose").checked) return;
+    if (!d) { $("cpStatus").textContent = "retrained Cellpose: file missing"; return; }
+    const frag = document.createDocumentFragment();
+    const order = d.side.map((_, i) => i).sort((a, b) => d.side[a] - d.side[b]);
+    for (const i of order) {
+      let path = "";
+      for (const r of d.rings[i]) {
+        if (r.length < 2) continue;
+        path += "M" + r[0] + " " + r[1];
+        for (let j = 2; j < r.length; j += 2) path += "l" + r[j] + " " + r[j + 1];
+        path += "Z";
+      }
+      if (!path) continue;
+      const side = CP_SIDE[d.side[i]] || CP_SIDE["-1"];
+      const a = { d: path, stroke: side.c, "vector-effect": "non-scaling-stroke", transform: "scale(" + 1 / d.q + ")" };
+      if (side.dash) a["stroke-dasharray"] = side.dash;
+      const p = el("path", a);
+      const t = el("title", {});
+      t.textContent = "Retrained Cellpose (" + CP_MODEL[model] + "), " + side.n + (d.away[i] !== null ? ", " + d.away[i].toFixed(0) + " µm from the line (+ past it)" : "") +
+        ", area " + d.area[i] + " µm²" + (d.reg[i] ? ", in the junction region" : "");
+      p.appendChild(t);
+      frag.appendChild(p);
+    }
+    g.appendChild(frag);
+    const n = d.side.filter((v) => v >= -1).length, crossed = d.side.filter((v) => v === 1).length, out = d.side.length - n;
+    $("cpStatus").textContent = "retrained Cellpose (" + CP_MODEL[model] + "): " + n + " cells, " + crossed + " crossed" + (out ? ", " + out + " outside the section" : "");
+  });
 }
 
 const SIDE = { 1: { c: MAGENTA, n: "crossed" }, 0: { c: "#ffffff", n: "home" }, "-1": { c: MID, n: "no junction line" } };
@@ -883,6 +950,7 @@ function setupStage() {
   svg.addEventListener("pointercancel", end);
   window.addEventListener("resize", () => { scaleBar(); scheduleTiles(); });
   for (const id of ["tLine", "tRegion", "tObjects", "tHumans", "tImage", "tChannel"]) $(id).onchange = applyToggles;
+  for (const id of ["tCellpose", "tCpModel"]) $(id).onchange = () => { drawCellpose(CUR); saveUI(); };
   $("prev").onclick = () => step(-1);
   $("next").onclick = () => step(1);
   $("fit").onclick = fit;
@@ -918,7 +986,8 @@ function saveUI() {
   const ui = {
     filters: { geno: $("fGeno").value, exp: $("fExp").value, qc: $("fQc").value, human: $("fHuman").checked, name: $("fName").value },
     sort: [sortKey, sortDir], method: KEY,
-    toggles: Object.fromEntries(["tLine", "tRegion", "tObjects", "tHumans", "tImage"].map((id) => [id, $(id).checked])),
+    toggles: Object.fromEntries(["tLine", "tRegion", "tObjects", "tHumans", "tImage", "tCellpose"].map((id) => [id, $(id).checked])),
+    cpModel: $("tCpModel").value,
     channel: $("tChannel").value, contrast: CONTRAST,
     size: { x: $("sizeX").value, y: $("sizeY").value, logX: $("logX").checked, logY: $("logY").checked },
     logStrip: $("logStrip").checked, section: CUR ? CUR.id : null, gallery: document.body.classList.contains("gallery"),
@@ -972,6 +1041,7 @@ function init(d) {
   if (kept.sort) { sortKey = kept.sort[0]; sortDir = kept.sort[1]; }
   for (const [id, on] of Object.entries(kept.toggles || {})) setValue(id, on);
   setValue("tChannel", kept.channel);
+  setValue("tCpModel", kept.cpModel);
   if (kept.contrast) for (const ch of ["g", "r"]) {
     const c = kept.contrast[ch] || {};
     const lo = Math.round(+c.lo), hi = Math.round(+c.hi), g = +c.g;
