@@ -664,28 +664,57 @@ function loadMasks(id, key) {
   return WAITING[k];
 }
 
+// The same objects traced at the scan's pixels (browser_outlines.py, Gaussian mask only): parts/fine/<id>__<key>.js
+// calls window.FINE_LOADED(id, key, {q, rings}); each ring is [x0, y0, dx, dy, …] in 1/q overview pixels. Missing → null.
+const FINE = {}, FINE_WAIT = {};
+window.FINE_LOADED = (id, key, d) => { FINE[id + "__" + key] = d; };
+function loadFine(id, key) {
+  const k = id + "__" + key;
+  if (k in FINE) return Promise.resolve(FINE[k]);
+  if (FINE_WAIT[k]) return FINE_WAIT[k];
+  FINE_WAIT[k] = new Promise((resolve) => {
+    const tag = document.createElement("script");
+    tag.src = "parts/fine/" + encodeURIComponent(k) + ".js";
+    tag.onload = () => { tag.remove(); delete FINE_WAIT[k]; if (!(k in FINE)) FINE[k] = null; resolve(FINE[k]); };
+    tag.onerror = () => { tag.remove(); delete FINE_WAIT[k]; FINE[k] = null; resolve(null); };
+    document.head.appendChild(tag);
+  });
+  return FINE_WAIT[k];
+}
+
 const SIDE = { 1: { c: MAGENTA, n: "crossed" }, 0: { c: "#ffffff", n: "home" }, "-1": { c: MID, n: "no junction line" } };
 function drawObjects(s) {
   const gO = $("gObjects"), key = KEY;
   gO.innerHTML = "";
   $("maskStatus").textContent = "outlines loading…";
-  loadMasks(s.id, key).then((d) => {
+  Promise.all([loadMasks(s.id, key), loadFine(s.id, key)]).then(([d, fine]) => {
     if (CUR !== s || KEY !== key) return;          // another section or method was chosen meanwhile
+    if (fine && fine.rings.length !== d.rings.length) fine = null;    // not the same objects: the overview's outlines
     const frag = document.createDocumentFragment();
     const what = METHOD.kind === "cell" ? "AF488⁺ cell (grown region)" : "AF488⁺ object";
     // home first, crossed on top
     const order = d.side.map((_, i) => i).sort((a, b) => d.side[a] - d.side[b]);
     for (const i of order) {
       let path = "";
-      for (const r of d.rings[i]) {
-        if (r.length < 2) continue;
-        path += "M" + r[0] + " " + r[1];
-        for (let j = 2; j < r.length; j += 2) path += "L" + r[j] + " " + r[j + 1];
-        path += "Z";
+      if (fine) {
+        for (const r of fine.rings[i]) {             // first point, then steps
+          if (r.length < 2) continue;
+          path += "M" + r[0] + " " + r[1];
+          for (let j = 2; j < r.length; j += 2) path += "l" + r[j] + " " + r[j + 1];
+          path += "Z";
+        }
+      } else {
+        for (const r of d.rings[i]) {
+          if (r.length < 2) continue;
+          path += "M" + r[0] + " " + r[1];
+          for (let j = 2; j < r.length; j += 2) path += "L" + r[j] + " " + r[j + 1];
+          path += "Z";
+        }
       }
       if (!path) continue;
       const side = SIDE[d.side[i]] || SIDE["-1"];
       const p = el("path", { d: path, stroke: side.c, "vector-effect": "non-scaling-stroke" });
+      if (fine) p.setAttribute("transform", "scale(" + 1 / fine.q + ")");
       const t = el("title", {});
       t.textContent = what + ", " + side.n + (d.away[i] !== null ? ", " + d.away[i].toFixed(0) + " µm from the line (+ past it)" : "") +
         ", area " + d.area[i] + " µm²" + (d.reg[i] ? ", in the junction region" : "");

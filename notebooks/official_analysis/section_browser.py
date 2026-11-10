@@ -49,7 +49,9 @@ http://localhost:8000/section_browser.html. No Qt.
 
 Full resolution when zoomed in: ``python notebooks/official_analysis/browser_tiles.py`` afterwards writes
 ``tiles/`` (512 px tiles of each channel at the scan's pixels and halved, ~7 GB for the 614 sections); without it
-the page shows the ~1.3 µm overview only.
+the page shows the ~1.3 µm overview only. ``python notebooks/official_analysis/browser_outlines.py`` writes
+``parts/fine/``: the Gaussian mask's outlines traced at the scan's pixels, which the page uses instead of the
+simplified ones here.
 """
 from __future__ import annotations
 
