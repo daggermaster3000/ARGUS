@@ -66,6 +66,18 @@ input[type=color] { width: 34px; height: 22px; padding: 0 1px; }
 .axisf { display: grid; grid-template-columns: auto 1fr; gap: 4px 6px; align-items: center; }
 .axisf textarea { font-family: Consolas, "Courier New", monospace; }
 #settings { font-family: Consolas, "Courier New", monospace; font-size: 11px; height: 90px; }
+#gName { flex: 1; min-width: 120px; padding: 2px 4px; }
+#gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 8px; margin: 6px 0; }
+#gallery:empty::before { content: "No saved figures yet."; color: var(--dark); font-size: 12px; }
+.gcard { border: 1px solid var(--light); padding: 4px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.gcard.current { border-color: var(--ink); }
+.gcard img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: var(--soft); cursor: pointer; display: block; }
+.gcard .gname { font-weight: bold; font-size: 12px; overflow-wrap: anywhere; }
+.gcard small { color: var(--dark); font-size: 11px; }
+.gcard .gbtns { display: flex; gap: 3px; flex-wrap: wrap; }
+.gcard .gbtns button { padding: 1px 5px; font-size: 11px; }
+.filebtn { border: 1px solid var(--ink); padding: 3px 8px; cursor: pointer; }
+.filebtn:hover { background: var(--soft); }
 #err { padding: 20px; display: none; }
 .statText { margin: 4px 0; }
 #dataBox { margin-top: 18px; border-top: 1px solid var(--ink); padding: 6px 0 0; }
@@ -156,6 +168,13 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
     <summary>Panels</summary>
     <div class="row"><span>Show</span><label><input type="checkbox" id="scOn">scatter</label><label><input type="checkbox" id="dsOn">distribution</label><label><input type="checkbox" id="hvOn">human against automated</label></div>
     <p class="hint">Everything else is on the plots: <b>right-click a plot</b> for its layers, axes, statistics, text, size and font, colours and export.</p>
+  </details>
+  <details open id="galleryBox">
+    <summary>Saved figures</summary>
+    <div class="row"><input type="text" id="gName" placeholder="name of this figure" aria-label="name of the figure to save"><button id="gSave">Save this figure</button></div>
+    <div id="gallery" aria-label="saved figures"></div>
+    <div class="row"><button id="gExport" title="Download every saved figure as one file: to keep them safe, move them to another computer or share them">Export all</button><label class="filebtn" title="Add the figures of an exported file to this gallery">Import…<input type="file" id="gImport" accept=".json,application/json" hidden></label><span id="gMsg" class="hint" role="status"></span></div>
+    <p class="hint">A saved figure keeps every setting of the page (all panels) and a thumbnail; <b>Load</b> brings it back exactly, on the data the page has now. They are kept in this browser: <b>Export all</b> to keep them safe or use them elsewhere.</p>
   </details>
   <details>
     <summary>Link and settings</summary>
@@ -4136,6 +4155,8 @@ function saveHash() {
   try { localStorage.setItem(STORE_KEY, text); } catch (e) { /* storage blocked (private window): the link still works */ }
   if (document.activeElement !== $("settings")) $("settings").value = JSON.stringify({ v: SETTINGS_VERSION, ...ST }, null, 1);
   try { history.replaceState(null, "", "#" + encodeURIComponent(text)); } catch (e) { /* file:// in some browsers */ }
+  // a saved figure stops being "shown" once anything changes
+  if (GALLERY_CURRENT && GALLERY_CURRENT.settings !== text) { GALLERY_CURRENT = null; renderGallery(); }
 }
 
 function copyLink() {
@@ -4143,6 +4164,144 @@ function copyLink() {
   const done = () => { $("bLink").textContent = "Link copied"; setTimeout(() => { $("bLink").textContent = "Copy link to this figure"; }, 1500); };
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(done, () => prompt("Copy this link:", url));
   else prompt("Copy this link:", url);
+}
+
+// ------------------------------------------------------------------ saved figures
+// A gallery in this browser (localStorage, beside the remembered settings): each figure is the page's settings that
+// differ from the defaults (as in the link) with a small JPEG of the main plot. Export / import move them as one file.
+const GALLERY_KEY = STORE_KEY.replace(/settings$/, "gallery");
+let GALLERY_CURRENT = null;                 // the saved figure last loaded or saved, while nothing has changed since
+function galleryRead() {
+  try { const g = JSON.parse(localStorage.getItem(GALLERY_KEY) || "[]"); return Array.isArray(g) ? g : []; } catch (e) { return []; }
+}
+function galleryWrite(g) {
+  try { localStorage.setItem(GALLERY_KEY, JSON.stringify(g)); return true; } catch (e) {
+    galleryMsg("Not saved: this browser's storage is full or blocked. Export all, then delete some figures.");
+    return false;
+  }
+}
+function galleryMsg(text) {
+  $("gMsg").textContent = text;
+  if (text) setTimeout(() => { if ($("gMsg").textContent === text) $("gMsg").textContent = ""; }, 4000);
+}
+function figureName() {
+  const p = PRESETS[ST.preset];
+  const words = ST.title || (p && p.name) || String(ST.ylabel || "").replace(/\n/g, " ") || ST.formula || "figure";
+  return String(words).replace(/<[^>]*>/g, "").slice(0, 70);
+}
+async function figureThumbnail() {
+  const gd = $("plot");
+  try {
+    const full = gd._fullLayout || {}, w = full.width || 600, h = full.height || 450;
+    return await Plotly.toImage(gd, { format: "jpeg", width: w, height: h, scale: Math.min(1, 320 / w) });
+  } catch (e) { return ""; }
+}
+const settingsNow = () => JSON.stringify({ v: SETTINGS_VERSION, ...diffFromDefaults() });
+async function saveFigure() {
+  const name = $("gName").value.trim() || figureName();
+  const g = galleryRead();
+  const same = g.findIndex((f) => f.name === name);
+  if (same >= 0 && !confirm("A saved figure is already called “" + name + "”. Replace it?")) return;
+  const entry = { id: same >= 0 ? g[same].id : Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    name, saved: new Date().toISOString(), method: ST.method, settings: JSON.parse(settingsNow()),
+    thumb: await figureThumbnail() };
+  if (same >= 0) g[same] = entry; else g.unshift(entry);
+  if (!galleryWrite(g)) return;
+  $("gName").value = "";
+  GALLERY_CURRENT = { id: entry.id, settings: settingsNow() };
+  galleryMsg("Saved “" + name + "”");
+  renderGallery();
+}
+function loadFigure(id) {
+  const f = galleryRead().find((x) => x.id === id);
+  if (!f) return;
+  setState(migrate(JSON.parse(JSON.stringify(f.settings))));
+  GALLERY_CURRENT = { id: f.id, settings: settingsNow() };
+  galleryMsg("Loaded “" + f.name + "”");
+  renderGallery();
+}
+function renameFigure(id) {
+  const g = galleryRead(), f = g.find((x) => x.id === id);
+  if (!f) return;
+  const name = prompt("New name of the figure:", f.name);
+  if (name === null || !name.trim()) return;
+  f.name = name.trim();
+  if (galleryWrite(g)) renderGallery();
+}
+function deleteFigure(id) {
+  const g = galleryRead(), f = g.find((x) => x.id === id);
+  if (!f || !confirm("Delete the saved figure “" + f.name + "”? (Export all first to keep a copy.)")) return;
+  if (galleryWrite(g.filter((x) => x.id !== id))) { galleryMsg("Deleted “" + f.name + "”"); renderGallery(); }
+}
+function renderGallery() {
+  const box = $("gallery");
+  box.innerHTML = "";
+  const current = GALLERY_CURRENT && GALLERY_CURRENT.settings === settingsNow() ? GALLERY_CURRENT.id : null;
+  for (const f of galleryRead()) {
+    const card = document.createElement("div");
+    card.className = "gcard" + (f.id === current ? " current" : "");
+    const img = document.createElement("img");
+    img.alt = f.name; img.title = "Load “" + f.name + "”";
+    if (f.thumb) img.src = f.thumb;
+    img.onclick = () => loadFigure(f.id);
+    const name = document.createElement("span");
+    name.className = "gname"; name.textContent = f.name;
+    const when = document.createElement("small");
+    const d = new Date(f.saved);
+    when.textContent = (isNaN(d) ? "" : d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })) +
+      (f.id === current ? " · shown" : "");
+    const btns = document.createElement("div");
+    btns.className = "gbtns";
+    for (const [label, fn, tip] of [["Load", loadFigure, "Show this figure (replaces the settings on screen)"],
+      ["Rename", renameFigure, "Change its name"], ["Delete", deleteFigure, "Remove it from this browser"]]) {
+      const b = document.createElement("button");
+      b.textContent = label; b.title = tip; b.onclick = () => fn(f.id);
+      btns.appendChild(b);
+    }
+    card.append(img, name, when, btns);
+    box.appendChild(card);
+  }
+}
+function exportGallery() {
+  const g = galleryRead();
+  if (!g.length) { galleryMsg("Nothing saved yet."); return; }
+  const blob = new Blob([JSON.stringify({ kind: "figure builder gallery", version: 1, exported: new Date().toISOString(),
+    figures: g }, null, 1)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "figure_builder_gallery_" + new Date().toISOString().slice(0, 10) + ".json";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function importGallery(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let incoming;
+    try {
+      const data = JSON.parse(reader.result);
+      incoming = Array.isArray(data) ? data : data.figures;
+      if (!Array.isArray(incoming)) throw new Error("no figures in it");
+    } catch (e) { galleryMsg("Not imported: " + e.message); return; }
+    const g = galleryRead(), have = new Set(g.map((f) => f.id));
+    let added = 0;
+    for (const f of incoming) {
+      if (!f || typeof f !== "object" || !f.settings || typeof f.settings !== "object") continue;
+      if (have.has(f.id)) continue;                                   // the same figure is here already
+      g.push({ id: String(f.id || Date.now().toString(36) + Math.random().toString(36).slice(2, 6)),
+        name: String(f.name || "imported figure"), saved: f.saved || new Date().toISOString(), method: f.method || "",
+        settings: f.settings, thumb: typeof f.thumb === "string" && f.thumb.startsWith("data:image/") ? f.thumb : "" });
+      added++;
+    }
+    if (galleryWrite(g)) { galleryMsg(added ? "Imported " + added + " figure" + (added > 1 ? "s" : "") : "Nothing new to import"); renderGallery(); }
+  };
+  reader.readAsText(file);
+}
+function buildGallery() {
+  $("gSave").onclick = saveFigure;
+  $("gName").onkeydown = (ev) => { if (ev.key === "Enter") { ev.preventDefault(); saveFigure(); } };
+  $("gExport").onclick = exportGallery;
+  $("gImport").onchange = (ev) => { const file = ev.target.files && ev.target.files[0]; if (file) importGallery(file); ev.target.value = ""; };
+  renderGallery();
 }
 
 function readHash() {
@@ -4506,6 +4665,7 @@ function start() {
     buildHumanControls();
     buildDataControls();
     buildMenus();
+    buildGallery();
     let h = readHash();
     if (!h) {                         // no settings in the link: the ones this browser remembers
       try { const kept = localStorage.getItem(STORE_KEY); if (kept) h = JSON.parse(kept); } catch (e) { h = null; }
