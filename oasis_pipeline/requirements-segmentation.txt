@@ -1,0 +1,4 @@
+# Only for `python run.py --segment` (re-making the Cellpose segmentation). The shipped segmentation was made with
+# cellpose 4.2.1.1 and torch 2.13 (CUDA 13.0) on an NVIDIA RTX 4090; install torch for your GPU first
+# (https://pytorch.org), then:
+cellpose==4.2.1.1

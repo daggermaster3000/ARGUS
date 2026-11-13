@@ -2340,6 +2340,9 @@ looking at is read.
 launch_viewer.py            what the shortcut points at; puts the project on sys.path
 install_shortcut.py         creates/removes the desktop shortcut
 requirements.txt
+oasis_pipeline/             the OASIS paper's analysis as a standalone package (no viewer code), shipped in the
+                            paper's data package as pipeline/: run.py re-makes every result from the raw scans,
+                            check.py compares with the shipped ones (oasis/ package, notebooks/, README.md)
 microscopy_viewer/
   __main__.py               CLI entry point; opens argv paths, reports startup failures
   app.py                    assembles the viewer: docks, toolbar, shortcuts, file opening

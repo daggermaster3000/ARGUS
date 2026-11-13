@@ -1,0 +1,1075 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Section browser</title>
+<style>
+:root {
+  --ink: #000; --dark: #4d4d4d; --mid: #8c8c8c; --light: #d9d9d9; --paper: #fff; --soft: #f4f4f4;
+  --magenta: #ff00ff;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--paper); color: var(--ink); font-family: Arial, Helvetica, sans-serif; font-size: 13px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; padding: 10px 16px; border-bottom: 1px solid var(--ink); }
+header h1 { font-size: 16px; margin: 0; font-weight: bold; }
+header .sub { color: var(--dark); }
+header .modes { margin-left: auto; display: flex; gap: 4px; }
+header .method { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; }
+header .method label { display: inline-flex; gap: 4px; align-items: baseline; }
+#maskStatus { position: absolute; right: 12px; bottom: 12px; color: #fff; font-size: 12px; background: rgba(0,0,0,.6); padding: 2px 6px; pointer-events: none; }
+#maskStatus:empty { display: none; }
+#cpStatus { position: absolute; right: 12px; bottom: 34px; color: #fff; font-size: 12px; background: rgba(0,0,0,.6); padding: 2px 6px; pointer-events: none; }
+#cpStatus:empty { display: none; }
+button, select, input[type=search] { font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--ink); padding: 3px 8px; border-radius: 0; }
+button.on { background: var(--ink); color: var(--paper); }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+main { display: grid; grid-template-columns: minmax(340px, 560px) minmax(0, 1fr); min-height: calc(100vh - 44px); }
+#left { border-right: 1px solid var(--ink); display: flex; flex-direction: column; min-width: 0; max-height: calc(100vh - 44px); }
+#filters { display: flex; flex-wrap: wrap; gap: 6px 10px; padding: 10px 12px; border-bottom: 1px solid var(--light); align-items: center; }
+#filters label { display: inline-flex; gap: 4px; align-items: center; }
+#filters input[type=search] { width: 140px; }
+#count { color: var(--dark); width: 100%; }
+#tablewrap { overflow: auto; flex: 1; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { padding: 3px 6px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--light); }
+th { position: sticky; top: 0; background: var(--paper); border-bottom: 1px solid var(--ink); cursor: pointer; user-select: none; font-weight: bold; }
+th:first-child, td:first-child, th.txt, td.txt { text-align: left; }
+th .arrow { color: var(--dark); font-weight: normal; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--soft); }
+tbody tr.sel { background: var(--ink); color: var(--paper); }
+#right { min-width: 0; display: flex; flex-direction: column; }
+#plots { display: grid; grid-template-columns: 1fr 1.25fr 1.25fr; border-bottom: 1px solid var(--light); }
+.axes { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; margin: 2px 0 4px; }
+.axes select { font: inherit; }
+.plot { height: 270px; min-width: 0; }
+.plotbox { position: relative; min-width: 0; padding: 4px 6px 0; }
+.plotbox h2, #info h2 { font-size: 13px; margin: 4px 4px 0; font-weight: bold; }
+.plotbox .note { font-size: 11px; color: var(--dark); margin: 0 4px; }
+.plotbox .opt { position: absolute; right: 10px; top: 6px; font-size: 11px; }
+#viewerrow { display: grid; grid-template-columns: minmax(0, 1fr) 280px; flex: 1; min-height: 420px; }
+#stage { position: relative; background: #000; min-height: 420px; overflow: hidden; touch-action: none; }
+#svg { width: 100%; height: 100%; position: absolute; inset: 0; cursor: grab; display: block; }
+#svg.drag { cursor: grabbing; }
+#scalebar { position: absolute; left: 14px; bottom: 12px; color: #fff; font-size: 12px; pointer-events: none; }
+#scalebar div { height: 3px; background: #fff; margin-bottom: 3px; }
+#scalebar em { font-style: normal; margin-left: 10px; color: #ccc; }
+#toggles { position: absolute; top: 8px; left: 8px; display: flex; flex-wrap: wrap; gap: 4px 10px; color: #fff; background: rgba(0,0,0,.6); padding: 4px 8px; font-size: 12px; }
+#toggles label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+#toggles button { background: transparent; color: #fff; border: 1px solid #fff; font-size: 12px; padding: 0 6px; cursor: pointer; }
+#contrast { position: absolute; top: 40px; left: 8px; color: #fff; background: rgba(0,0,0,.75); padding: 6px 10px; font-size: 12px; display: none; }
+#contrast.open { display: block; }
+#contrast .ch { display: grid; grid-template-columns: 44px 120px 36px; gap: 2px 6px; align-items: center; margin-bottom: 6px; }
+#contrast .ch b { grid-column: 1 / -1; font-weight: 600; }
+#contrast input[type=range] { width: 120px; margin: 0; }
+#contrast output { font-variant-numeric: tabular-nums; text-align: right; }
+#contrast button { background: transparent; color: #fff; border: 1px solid #fff; font-size: 11px; padding: 0 6px; cursor: pointer; }
+#contrast .hint { color: #bbb; max-width: 260px; margin: 2px 0 0; }
+#nav { position: absolute; top: 8px; right: 8px; display: flex; gap: 4px; }
+#nav button { background: rgba(0,0,0,.6); color: #fff; border-color: #fff; }
+#info { padding: 8px 12px; overflow: auto; border-left: 1px solid var(--light); }
+#info dl { display: grid; grid-template-columns: auto auto; gap: 2px 10px; margin: 6px 0 12px; font-variant-numeric: tabular-nums; }
+#info dt { color: var(--dark); }
+#info dd { margin: 0; text-align: right; }
+#info .name { font-weight: bold; word-break: break-all; }
+#legend { font-size: 12px; line-height: 1.7; }
+#legend svg { vertical-align: middle; background: #000; margin-right: 4px; }
+#gallery { display: none; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; padding: 12px; overflow: auto; }
+#gallery figure { margin: 0; cursor: pointer; border: 1px solid var(--light); }
+#gallery figure:hover { border-color: var(--ink); }
+#gallery figure.sel { outline: 3px solid var(--ink); }
+#gallery img { width: 100%; aspect-ratio: 1; object-fit: contain; background: #000; display: block; }
+#gallery figcaption { padding: 3px 5px; font-size: 11px; display: flex; justify-content: space-between; gap: 6px; }
+body.gallery #plots, body.gallery #viewerrow { display: none; }
+body.gallery #gallery { display: grid; }
+#err { padding: 20px; display: none; }
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; }
+  #left { max-height: 45vh; border-right: 0; border-bottom: 1px solid var(--ink); }
+  #plots { grid-template-columns: 1fr; }
+  #viewerrow { grid-template-columns: 1fr; }
+  #stage { height: 70vh; }
+  header, #filters { padding-left: 16px; padding-right: 16px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Section browser</h1>
+  <span class="sub" id="subtitle">AF488 and what the counting method labelled, every analysed section</span>
+  <span class="method">
+    <label title="How a cell is called AF488-positive. The mask methods outline bright AF488 in the image itself; the per-nucleus rules call each segmented cell from its mean AF488.">Positivity <select id="mMethod"></select></label>
+    <label title="Median + k robust SD (1.4826 × MAD): of the background-subtracted AF488 inside the tissue for the masks, of the junction region's cells for the per-nucleus rules. Higher: fewer, brighter cells.">Threshold <select id="mK"></select></label>
+  </span>
+  <span class="modes"><a href="figure_builder.html" style="color: var(--ink); align-self: center; margin-right: 8px;" title="The biology notebook's graphs, with your own normalisation, for publication">Figure builder &rarr;</a><button id="mViewer" class="on">Viewer</button><button id="mGallery">Gallery</button></span>
+</header>
+<div id="err"></div>
+<main>
+  <section id="left">
+    <div id="filters">
+      <label>Genotype <select id="fGeno"><option value="">all</option></select></label>
+      <label>Experiment <select id="fExp"><option value="">all</option></select></label>
+      <label>QC <select id="fQc"><option value="">all</option></select></label>
+      <label><input type="checkbox" id="fHuman"> human-counted only</label>
+      <input type="search" id="fName" placeholder="search name" aria-label="search by name">
+      <span id="count"></span>
+    </div>
+    <div id="tablewrap"><table><thead><tr id="head"></tr></thead><tbody id="rows"></tbody></table></div>
+  </section>
+  <section id="right">
+    <div id="plots">
+      <div class="plotbox">
+        <h2>Automated against human count</h2>
+        <p class="note">Human-counted sections, in the area each human counted. Circles annotator 1, squares annotator 2; WT3 filled, GD1 open.</p>
+        <div id="p1" class="plot"></div>
+      </div>
+      <div class="plotbox">
+        <h2 id="stripTitle">Crossed AF488⁺ objects per mm of junction</h2>
+        <p class="note">One point per section; the line is the median. Click a point to open the section.</p>
+        <label class="opt"><input type="checkbox" id="logStrip"> log axis</label>
+        <div id="p2" class="plot"></div>
+      </div>
+      <div class="plotbox">
+        <h2>Size against outcome</h2>
+        <p class="note">Does the size of the assembloid or the junction drive the numbers? Sections in the filtered table; lines are least-squares fits per genotype (on the axes as drawn), ρ is Spearman's.</p>
+        <div class="axes">
+          <label>x <select id="sizeX"></select></label>
+          <label>y <select id="sizeY"></select></label>
+          <label><input type="checkbox" id="logX" checked> log x</label>
+          <label><input type="checkbox" id="logY"> log y</label>
+        </div>
+        <div id="p3" class="plot"></div>
+      </div>
+    </div>
+    <div id="viewerrow">
+      <div id="stage">
+        <svg id="svg" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+          <defs>
+            <!-- each channel's contrast limits and gamma (the brightness panel): a lookup table on the displayed values -->
+            <filter id="fltG" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="identity"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer></filter>
+            <filter id="fltR" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="identity"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer></filter>
+            <!-- the full-resolution tiles are grey: the same contrast, then only the channel's colour -->
+            <filter id="fltGt" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="identity"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer>
+              <feColorMatrix type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0"/></filter>
+            <filter id="fltRt" color-interpolation-filters="sRGB"><feComponentTransfer><feFuncR type="identity"/><feFuncG type="identity"/><feFuncB type="identity"/></feComponentTransfer>
+              <feColorMatrix type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/></filter>
+          </defs>
+          <!-- each channel: its overview (~1.3 µm) and, zoomed in, its full-resolution tiles over it; the red layer is added onto the green one -->
+          <g id="chG"><image id="img" x="0" y="0"></image><g id="tilesG" filter="url(#fltGt)"></g></g>
+          <g id="chR" style="mix-blend-mode: screen"><image id="imgR" x="0" y="0"></image><g id="tilesR" filter="url(#fltRt)"></g></g>
+          <g id="gRegion" fill="none" stroke="#d9d9d9" stroke-width="1.5" stroke-dasharray="5 4"></g>
+          <g id="gLine" fill="none" stroke="#ffffff" stroke-width="2"></g>
+          <g id="gObjects" fill="#ffffff" fill-opacity="0" stroke-width="1.2" stroke-linejoin="round"></g>
+          <g id="gCellpose" fill="#ffffff" fill-opacity="0" stroke-width="1.2" stroke-linejoin="round"></g>
+          <g id="gHumans" fill="none" stroke="#ffffff" stroke-width="1.3"></g>
+        </svg>
+        <div id="toggles">
+          <label><input type="checkbox" id="tLine" checked> junction line</label>
+          <label><input type="checkbox" id="tRegion" checked> junction region</label>
+          <label><input type="checkbox" id="tObjects" checked> automated outlines</label>
+          <label><input type="checkbox" id="tHumans" checked> human dots</label>
+          <label title="Cellpose fine-tuned on the annotators' AF488+ dots (cellpose488_retrain.py), on the 27 human-counted sections only. Yellow at home, orange crossed, grey dashed outside the section (not counted). Drawn over the chosen method's outlines."><input type="checkbox" id="tCellpose"> retrained Cellpose
+            <select id="tCpModel"><option value="cv">cross-validated</option><option value="other">trained on the other annotator</option></select></label>
+          <label><input type="checkbox" id="tImage" checked> image</label>
+          <label>channel <select id="tChannel"><option value="g">AF488 (green)</option><option value="r">AF555 (red)</option><option value="rg">both</option></select></label>
+          <button id="tContrast" title="Contrast limits and gamma of each channel, as in napari">brightness</button>
+        </div>
+        <div id="contrast">
+          <div class="ch" data-ch="g"><b>AF488 (green)</b>
+            <span>min</span><input type="range" min="0" max="255" step="1" data-k="lo"><output data-o="lo"></output>
+            <span>max</span><input type="range" min="0" max="255" step="1" data-k="hi"><output data-o="hi"></output>
+            <span>gamma</span><input type="range" min="-1" max="1" step="0.01" data-k="gamma"><output data-o="gamma"></output>
+            <span></span><button data-reset="g">reset</button><span></span></div>
+          <div class="ch" data-ch="r"><b>AF555 (red)</b>
+            <span>min</span><input type="range" min="0" max="255" step="1" data-k="lo"><output data-o="lo"></output>
+            <span>max</span><input type="range" min="0" max="255" step="1" data-k="hi"><output data-o="hi"></output>
+            <span>gamma</span><input type="range" min="-1" max="1" step="0.01" data-k="gamma"><output data-o="gamma"></output>
+            <span></span><button data-reset="r">reset</button><span></span></div>
+          <p class="hint">Contrast limits on the image as displayed (0–255): below min is black, above max full brightness; gamma &lt; 1 brightens the dim cells. The pictures are already stretched 8-bit copies, so detail clipped in them cannot come back. Applies to every section; the outlines and counts do not change.</p>
+        </div>
+        <div id="nav"><button id="prev" title="previous (left arrow)">&larr;</button><button id="fit" title="fit (0)">fit</button><button id="next" title="next (right arrow)">&rarr;</button></div>
+        <div id="scalebar"><div></div><span></span><em id="tileStatus"></em></div>
+        <div id="maskStatus"></div>
+        <div id="cpStatus"></div>
+      </div>
+      <aside id="info"></aside>
+    </div>
+    <div id="gallery"></div>
+  </section>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.34.0/plotly.min.js"></script>
+<!-- data.js (written by section_browser.py) sets window.SECTION_DATA, so the page also opens straight from disk;
+     without it the page fetches data.json, which needs a web server. -->
+<script src="data.js"></script>
+<!-- parts/cellpose/index.js (browser_cellpose.py): which sections have the retrained Cellpose's outlines -->
+<script src="parts/cellpose/index.js" onerror="window.CP_INDEX = {}"></script>
+<script>
+"use strict";
+const INK = "#000000", DARK = "#4d4d4d", MID = "#8c8c8c", LIGHT = "#d9d9d9", MAGENTA = "#ff00ff";
+const FACE = { WT3: DARK, GD1: "#ffffff" };
+const SVGNS = "http://www.w3.org/2000/svg";
+const $ = (id) => document.getElementById(id);
+
+let DATA = null, S = [], BYID = {}, VIEW = [], CUR = null;
+let sortKey = "crossed_per_mm", sortDir = -1;
+let vb = { x: 0, y: 0, w: 1, h: 1 };
+let METHOD = null, KEY = null;            // the positivity method shown ({key, label, kind, ks}) and "<method>-<k>"
+
+// Table columns: key, header, how to show, text or number
+const COLS = [
+  { k: "id", h: "Section", txt: true },
+  { k: "genotype", h: "Gt", txt: true },
+  { k: "experiment", h: "Exp", txt: true },
+  { k: "n_objects", h: "AF488⁺", f: 0 },
+  { k: "n_region", h: "In region", f: 0 },
+  { k: "n_crossed", h: "Crossed", f: 0 },
+  { k: "n_home", h: "Home", f: 0 },
+  { k: "crossed_per_mm", h: "Crossed/mm", f: 2 },
+  { k: "share_crossed", h: "Share crossed", f: 2 },
+  { k: "length_um", h: "Junction (µm)", f: 0 },
+  { k: "area_mm2", h: "Area (mm²)", f: 2 },
+  { k: "assembloid_um", h: "Assembloid length (µm)", f: 0 },
+  { k: "n_nuclei", h: "Nuclei", f: 0 },
+  { k: "objects_per_mm2", h: "AF488⁺/mm²", f: 0 },
+  { k: "human", h: "Human", f: 0 },
+  { k: "automated_area", h: "Auto (human area)", f: 0 },
+  { k: "ratio", h: "Auto ÷ human", f: 2 },
+  { k: "qc", h: "QC", txt: true },
+];
+
+function fmt(v, d) {
+  if (v === null || v === undefined || (typeof v === "number" && !isFinite(v))) return "–";
+  if (typeof v !== "number") return String(v);
+  return d === undefined ? String(v) : v.toFixed(d);
+}
+
+function loadData() {
+  if (window.SECTION_DATA) return Promise.resolve(window.SECTION_DATA);
+  return fetch("data.json").then((r) => { if (!r.ok) throw new Error("data.json: " + r.status); return r.json(); });
+}
+
+function prepare(d) {
+  DATA = d;
+  S = d.sections;
+  for (const s of S) {
+    BYID[s.id] = s;
+    // one human per section (none is counted by both); the first if there were two
+    const h = s.humans && s.humans.length ? s.humans[0] : null;
+    s.human = h ? h.human : null;
+    s.annotator = h ? h.label : null;
+    s.qc = s.qc || "–";
+  }
+}
+
+// ------------------------------------------------------------------ positivity method
+const noun = () => (METHOD && METHOD.kind === "cell" ? "cells" : "objects");
+const methodText = () => METHOD.label + ", " + KEY.split("-")[1] + " SD";
+const perMm = (v, s) => (v !== null && v !== undefined && s.length_um > 0 ? v / (s.length_um / 1000) : null);
+
+// Copy the chosen method-threshold's numbers into each section's own fields (what the table and plots read).
+function applyNumbers() {
+  for (const s of S) {
+    const c = (s.counts && s.counts[KEY]) || {};
+    const v = (x) => (x === undefined ? null : x);
+    s.n_objects = v(c.n); s.n_region = v(c.reg); s.n_crossed = v(c.crossed); s.n_home = v(c.home); s.thr = v(c.thr);
+    s.crossed_per_mm = perMm(s.n_crossed, s);
+    s.region_per_mm = perMm(s.n_region, s);
+    s.home_per_mm = perMm(s.n_home, s);
+    s.share_crossed = s.n_crossed !== null && s.n_home !== null && s.n_crossed + s.n_home > 0 ? s.n_crossed / (s.n_crossed + s.n_home) : null;
+    s.objects_per_mm2 = s.n_objects !== null && s.area_mm2 > 0 ? s.n_objects / s.area_mm2 : null;
+    s.objects_per_1000_nuclei = s.n_objects !== null && s.n_nuclei > 0 ? 1000 * s.n_objects / s.n_nuclei : null;
+    const h = s.humans && s.humans.length ? s.humans[0] : null;
+    s.automated_area = h && h.automated ? v(h.automated[KEY]) : null;
+    s.ratio = s.automated_area !== null && s.human ? s.automated_area / s.human : null;
+  }
+}
+
+function fillMethodSelects() {
+  $("mMethod").innerHTML = DATA.methods.map((m) => '<option value="' + m.key + '">' + m.label + "</option>").join("");
+  $("mMethod").value = METHOD.key;
+  $("mK").innerHTML = METHOD.ks.map((k) => '<option value="' + k + '">' + k + " SD" + (METHOD.key + "-" + k === DATA.default ? " (counting method)" : "") +
+    (METHOD.key === "cellmf" && k === 7 ? " (the run's rule)" : "") + "</option>").join("");
+  $("mK").value = KEY.split("-")[1];
+}
+
+function setMethod(key, redraw) {
+  const [m, k] = key.split("-");
+  METHOD = DATA.methods.find((x) => x.key === m) || DATA.methods[0];
+  const kk = METHOD.ks.map(String).includes(k) ? k : String(METHOD.default);
+  KEY = METHOD.key + "-" + kk;
+  fillMethodSelects();
+  applyNumbers();
+  $("subtitle").textContent = S.length + " sections · " + methodText() + " · crossed = past the junction line (extended past its ends), home = not crossed · built " + DATA.generated;
+  $("stripTitle").textContent = "Crossed AF488⁺ " + noun() + " per mm of junction";
+  const keep = $("sizeY").value;
+  $("sizeY").innerHTML = Object.entries(SIZE_Y).map(([k2, h]) => '<option value="' + k2 + '">' + h() + "</option>").join("");
+  $("sizeY").value = keep || "crossed_per_mm";
+  if (!redraw) return;
+  refresh();
+  if (window.Plotly) { plotHuman(); plotStrip(); plotSize(); }
+  if (CUR) { drawObjects(CUR); info(CUR); markPlots(CUR); }
+}
+
+// ------------------------------------------------------------------ table and filters
+function fillSelect(id, values) {
+  const sel = $(id);
+  for (const v of values) { const o = document.createElement("option"); o.value = v; o.textContent = v; sel.appendChild(o); }
+}
+
+function buildHead() {
+  const tr = $("head");
+  tr.innerHTML = "";
+  for (const c of COLS) {
+    const th = document.createElement("th");
+    if (c.txt) th.className = "txt";
+    th.innerHTML = c.h + (c.k === sortKey ? ' <span class="arrow">' + (sortDir > 0 ? "▲" : "▼") + "</span>" : "");
+    th.onclick = () => {
+      if (sortKey === c.k) sortDir = -sortDir; else { sortKey = c.k; sortDir = c.txt ? 1 : -1; }
+      refresh();
+      saveUI();
+    };
+    tr.appendChild(th);
+  }
+}
+
+function compare(a, b) {
+  const x = a[sortKey], y = b[sortKey];
+  const xn = x === null || x === undefined || x === "–", yn = y === null || y === undefined || y === "–";
+  if (xn && yn) return a.id < b.id ? -1 : 1;
+  if (xn) return 1;          // missing values always last
+  if (yn) return -1;
+  if (x < y) return -sortDir;
+  if (x > y) return sortDir;
+  return a.id < b.id ? -1 : 1;
+}
+
+function refresh() {
+  const g = $("fGeno").value, e = $("fExp").value, q = $("fQc").value, hum = $("fHuman").checked;
+  const text = $("fName").value.trim().toLowerCase();
+  VIEW = S.filter((s) => (!g || s.genotype === g) && (!e || s.experiment === e) && (!q || s.qc === q)
+    && (!hum || s.human !== null) && (!text || s.name.toLowerCase().includes(text) || (s.slide || "").toLowerCase().includes(text)));
+  VIEW.sort(compare);
+  buildHead();
+  const body = $("rows");
+  const frag = document.createDocumentFragment();
+  for (const s of VIEW) {
+    const tr = document.createElement("tr");
+    tr.dataset.id = s.id;
+    if (CUR && s.id === CUR.id) tr.className = "sel";
+    tr.innerHTML = COLS.map((c) => "<td" + (c.txt ? ' class="txt"' : "") + ">" + fmt(s[c.k], c.f) + "</td>").join("");
+    tr.onclick = () => open(s.id);
+    frag.appendChild(tr);
+  }
+  body.innerHTML = "";
+  body.appendChild(frag);
+  if (window.Plotly && $("p3").data !== undefined) plotSize();      // the size plot follows the filters
+  $("count").textContent = VIEW.length + " of " + S.length + " sections";
+  if (document.body.classList.contains("gallery")) buildGallery();
+}
+
+// ------------------------------------------------------------------ plots
+const PLOT_LAYOUT = {
+  font: { family: "Arial, Helvetica, sans-serif", size: 11, color: INK },
+  paper_bgcolor: "#fff", plot_bgcolor: "#fff", margin: { l: 56, r: 12, t: 8, b: 44 }, showlegend: false,
+  hoverlabel: { bgcolor: "#fff", bordercolor: INK, font: { family: "Arial", color: INK } },
+};
+const AXIS = { showline: true, linecolor: INK, linewidth: 1, ticks: "outside", tickcolor: INK, zeroline: false, showgrid: false, mirror: false };
+
+function hoverText(s) {
+  return "<b>" + s.id + "</b> (" + s.genotype + ", exp " + s.experiment + ")<br>" +
+    "AF488⁺ " + noun() + " " + fmt(s.n_objects) + ", in region " + fmt(s.n_region) + "<br>crossed " + fmt(s.n_crossed) + " (" + fmt(s.crossed_per_mm, 2) + "/mm), home " + fmt(s.n_home) +
+    (s.human !== null ? "<br>" + s.annotator + ": human " + s.human + ", automated " + s.automated_area + " (×" + fmt(s.ratio, 2) + ")" : "");
+}
+
+function plotHuman() {
+  const traces = [];
+  const counted = S.filter((s) => s.human !== null && s.automated_area !== null);
+  const vals = counted.flatMap((s) => [Math.max(s.human, 0.5), Math.max(s.automated_area, 0.5)]);
+  const lo = Math.pow(10, Math.floor(Math.log10(Math.min(...vals, 10)) * 2) / 2), hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...vals, 10)) * 4) / 4);
+  traces.push({ x: [lo, hi], y: [lo, hi], mode: "lines", line: { color: MID, dash: "dash", width: 1 }, hoverinfo: "skip" });
+  for (const ann of ["human annotator 1", "human annotator 2"]) {
+    for (const g of ["WT3", "GD1"]) {
+      const part = counted.filter((s) => s.annotator === ann && s.genotype === g);
+      traces.push({
+        x: part.map((s) => Math.max(s.human, 0.5)), y: part.map((s) => Math.max(s.automated_area, 0.5)),
+        customdata: part.map((s) => s.id), text: part.map(hoverText), hovertemplate: "%{text}<extra></extra>",
+        mode: "markers", name: g + ", " + ann,
+        marker: { symbol: ann.endsWith("1") ? "circle" : "square", size: 9, color: FACE[g], line: { color: INK, width: 1 } },
+      });
+    }
+  }
+  traces.push(selTrace());
+  const ticks = [1, 3, 10, 30, 100, 300, 1000, 3000, 10000];
+  Plotly.newPlot("p1", traces, {
+    ...PLOT_LAYOUT,
+    xaxis: { ...AXIS, type: "log", range: [Math.log10(lo), Math.log10(hi)], tickvals: ticks, title: { text: "Human count (AF488⁺ cells)" } },
+    yaxis: { ...AXIS, type: "log", range: [Math.log10(lo), Math.log10(hi)], tickvals: ticks, title: { text: "Automated count (" + noun() + ")" } },
+  }, { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
+  $("p1").on("plotly_click", (ev) => { const id = ev.points[0].customdata; if (id) open(id); });
+}
+
+let STRIP_GROUPS = [];
+function plotStrip() {
+  const exps = [...new Set(S.map((s) => s.experiment))].sort((a, b) => Number(a) - Number(b) || (a < b ? -1 : 1));
+  STRIP_GROUPS = [];
+  for (const g of ["WT3", "GD1"]) for (const e of exps) if (S.some((s) => s.genotype === g && s.experiment === e)) STRIP_GROUPS.push([g, e]);
+  const traces = [];
+  // deterministic jitter so the points stay put between redraws
+  const jitter = (id) => { let h = 0; for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return ((h % 1000) / 1000 - 0.5) * 0.5; };
+  STRIP_GROUPS.forEach(([g, e], i) => {
+    const part = S.filter((s) => s.genotype === g && s.experiment === e && s.crossed_per_mm !== null);
+    for (const s of part) s._sx = i + jitter(s.id);
+    traces.push({
+      x: part.map((s) => s._sx), y: part.map((s) => s.crossed_per_mm), customdata: part.map((s) => s.id),
+      text: part.map(hoverText), hovertemplate: "%{text}<extra></extra>", mode: "markers",
+      marker: { symbol: g === "WT3" ? "circle" : "square", size: 6, color: FACE[g], line: { color: INK, width: 0.8 } },
+    });
+    const ys = part.map((s) => s.crossed_per_mm).sort((a, b) => a - b);
+    const med = ys.length ? (ys.length % 2 ? ys[(ys.length - 1) / 2] : (ys[ys.length / 2 - 1] + ys[ys.length / 2]) / 2) : null;
+    if (med !== null) traces.push({ x: [i - 0.32, i + 0.32], y: [med, med], mode: "lines", line: { color: INK, width: 2 }, hoverinfo: "skip" });
+  });
+  traces.push(selTrace());
+  Plotly.newPlot("p2", traces, {
+    ...PLOT_LAYOUT, margin: { l: 56, r: 12, t: 8, b: 56 },
+    xaxis: { ...AXIS, tickvals: STRIP_GROUPS.map((_, i) => i), ticktext: STRIP_GROUPS.map(([g, e]) => g + "<br>exp " + e), range: [-0.6, STRIP_GROUPS.length - 0.4] },
+    yaxis: { ...AXIS, type: $("logStrip").checked ? "log" : "linear", title: { text: "Crossed " + noun() + " per mm" } },
+  }, { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
+  $("p2").on("plotly_click", (ev) => { const id = ev.points[0].customdata; if (id) open(id); });
+}
+
+function selTrace() {
+  return { x: [], y: [], mode: "markers", hoverinfo: "skip", marker: { size: 18, color: "rgba(0,0,0,0)", line: { color: INK, width: 2.5 } } };
+}
+
+// ------------------------------------------------------------------ size against outcome
+const SIZE_X = {
+  area_mm2: "Assembloid area (mm²)", assembloid_um: "Assembloid length across the line (µm)",
+  length_um: "Junction length (µm)", n_nuclei: "Nuclei in the section",
+};
+// y options: labels follow the method's noun (objects or cells)
+const SIZE_Y = {
+  crossed_per_mm: () => "Crossed AF488⁺ " + noun() + " per mm of junction", n_crossed: () => "Crossed AF488⁺ " + noun(),
+  region_per_mm: () => "AF488⁺ " + noun() + " in the junction region per mm", home_per_mm: () => "Home-side AF488⁺ " + noun() + " per mm",
+  share_crossed: () => "Share crossed", n_objects: () => "AF488⁺ " + noun() + ", whole section",
+  objects_per_mm2: () => "AF488⁺ " + noun() + " per mm² of assembloid", objects_per_1000_nuclei: () => "AF488⁺ " + noun() + " per 1,000 nuclei",
+};
+
+function ranks(v) {
+  const order = v.map((x, i) => [x, i]).sort((a, b) => a[0] - b[0]), r = new Array(v.length);
+  for (let i = 0; i < order.length;) {
+    let j = i; while (j + 1 < order.length && order[j + 1][0] === order[i][0]) j++;
+    for (let k = i; k <= j; k++) r[order[k][1]] = (i + j) / 2;
+    i = j + 1;
+  }
+  return r;
+}
+function pearson(a, b) {
+  const n = a.length; if (n < 3) return NaN;
+  const ma = a.reduce((x, y) => x + y, 0) / n, mb = b.reduce((x, y) => x + y, 0) / n;
+  let sab = 0, saa = 0, sbb = 0;
+  for (let i = 0; i < n; i++) { sab += (a[i] - ma) * (b[i] - mb); saa += (a[i] - ma) ** 2; sbb += (b[i] - mb) ** 2; }
+  return sab / Math.sqrt(saa * sbb);
+}
+function spearman(a, b) { return pearson(ranks(a), ranks(b)); }
+
+// Log axes: ticks at 1, 2 and 5 of each power of ten in the data's range (plotly's own crowd the labels).
+function logTicks(values) {
+  const v = values.filter((x) => x > 0);
+  if (!v.length) return undefined;
+  const lo = Math.floor(Math.log10(Math.min(...v))), hi = Math.ceil(Math.log10(Math.max(...v)));
+  const out = [];
+  for (let e = lo; e <= hi; e++) for (const m of [1, 2, 5]) out.push(m * Math.pow(10, e));
+  return out;
+}
+
+function plotSize() {
+  const kx = $("sizeX").value, ky = $("sizeY").value, lx = $("logX").checked, ly = $("logY").checked;
+  const ok = (v, log) => v !== null && v !== undefined && isFinite(v) && (!log || v > 0);
+  const traces = [], rhos = [];
+  for (const g of ["WT3", "GD1"]) {
+    const part = VIEW.filter((s) => s.genotype === g && ok(s[kx], lx) && ok(s[ky], ly));
+    if (!part.length) continue;
+    traces.push({
+      x: part.map((s) => s[kx]), y: part.map((s) => s[ky]), customdata: part.map((s) => s.id),
+      text: part.map(hoverText), hovertemplate: "%{text}<extra></extra>", mode: "markers", name: g,
+      marker: { symbol: g === "WT3" ? "circle" : "square", size: 6, color: FACE[g], line: { color: INK, width: 0.8 } },
+    });
+    // least-squares line on the axes as drawn (log axes: on the logs)
+    const tx = part.map((s) => (lx ? Math.log10(s[kx]) : s[kx])), ty = part.map((s) => (ly ? Math.log10(s[ky]) : s[ky]));
+    const n = tx.length, mx = tx.reduce((a, b) => a + b, 0) / n, my = ty.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0, sxx = 0; for (let i = 0; i < n; i++) { sxy += (tx[i] - mx) * (ty[i] - my); sxx += (tx[i] - mx) ** 2; }
+    if (n >= 3 && sxx > 0) {
+      const slope = sxy / sxx, a = Math.min(...tx), b = Math.max(...tx);
+      const back = (v, log) => (log ? Math.pow(10, v) : v);
+      traces.push({ x: [back(a, lx), back(b, lx)], y: [back(my + slope * (a - mx), ly), back(my + slope * (b - mx), ly)],
+        mode: "lines", hoverinfo: "skip", showlegend: false, line: { color: g === "WT3" ? INK : MID, width: 2, dash: g === "WT3" ? "solid" : "dash" } });
+    }
+    rhos.push(g + " ρ = " + fmt(spearman(part.map((s) => s[kx]), part.map((s) => s[ky])), 2) + " (n = " + n + ")");
+  }
+  traces.push(selTrace());
+  Plotly.newPlot("p3", traces, {
+    ...PLOT_LAYOUT, margin: { l: 56, r: 12, t: 26, b: 48 }, showlegend: false,
+    title: { text: rhos.join("   ·   "), font: { size: 11 }, x: 0.02, xanchor: "left", y: 0.98 },
+    xaxis: { ...AXIS, type: lx ? "log" : "linear", title: { text: SIZE_X[kx] },
+             tickvals: lx ? logTicks(VIEW.map((s) => s[kx])) : undefined },
+    yaxis: { ...AXIS, type: ly ? "log" : "linear", title: { text: SIZE_Y[ky]() },
+             tickvals: ly ? logTicks(VIEW.map((s) => s[ky])) : undefined },
+  }, { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
+  $("p3").on("plotly_click", (ev) => { const id = ev.points[0].customdata; if (id) open(id); });
+  if (CUR) markPlots(CUR);
+}
+
+function markPlots(s) {
+  const p3 = $("p3");
+  if (p3 && p3.data) {
+    const kx = $("sizeX").value, ky = $("sizeY").value;
+    const on = s[kx] !== null && s[kx] !== undefined && s[ky] !== null && s[ky] !== undefined;
+    Plotly.restyle(p3, { x: [on ? [s[kx]] : []], y: [on ? [s[ky]] : []] }, [p3.data.length - 1]);
+  }
+  const p1 = $("p1"), p2 = $("p2");
+  if (p1 && p1.data) {
+    const on = s.human !== null;
+    Plotly.restyle(p1, { x: [on ? [Math.max(s.human, 0.5)] : []], y: [on ? [Math.max(s.automated_area, 0.5)] : []] }, [p1.data.length - 1]);
+  }
+  if (p2 && p2.data) {
+    const on = s.crossed_per_mm !== null && s._sx !== undefined;
+    Plotly.restyle(p2, { x: [on ? [s._sx] : []], y: [on ? [s.crossed_per_mm] : []] }, [p2.data.length - 1]);
+  }
+}
+
+// ------------------------------------------------------------------ viewer
+function el(tag, attrs) { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
+
+function setViewBox() { $("svg").setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); scaleBar(); scheduleTiles(); }
+
+// ------------------------------------------------------------------ full-resolution tiles (browser_tiles.py)
+// tiles/<id>/tiles.js lists a section's tiles: per level (d = 1 the scan's pixels, 2 halved), per channel, [row, col, w, h]
+// of TILE-px greyscale JPEGs. Once the overview's pixels are larger than ~1.5 screen pixels, the coarsest level that
+// is fine enough is shown, only the tiles in view. A <script> tag, not fetch(), so the page works from file:// too.
+const TILES = {}, TILES_WAIT = {};
+window.TILES_LOADED = (id, d) => { TILES[id] = d; };
+function loadTiles(id) {
+  if (id in TILES) return Promise.resolve(TILES[id]);
+  if (TILES_WAIT[id]) return TILES_WAIT[id];
+  TILES_WAIT[id] = new Promise((resolve) => {
+    const tag = document.createElement("script");
+    tag.src = "tiles/" + encodeURIComponent(id) + "/tiles.js";
+    tag.onload = () => { tag.remove(); delete TILES_WAIT[id]; if (!(id in TILES)) TILES[id] = null; resolve(TILES[id]); };
+    tag.onerror = () => { tag.remove(); delete TILES_WAIT[id]; TILES[id] = null; resolve(null); };     // not tiled: the overview only
+    document.head.appendChild(tag);
+  });
+  return TILES_WAIT[id];
+}
+let TILE_TIMER = 0;
+function scheduleTiles() { clearTimeout(TILE_TIMER); TILE_TIMER = setTimeout(updateTiles, 80); }
+function updateTiles() {
+  const s = CUR;
+  if (!s) return;
+  if (!(s.id in TILES)) { loadTiles(s.id).then(() => { if (CUR === s) updateTiles(); }); return; }
+  const d = TILES[s.id], groups = { g: $("tilesG"), r: $("tilesR") };
+  let level = null;
+  const r = $("svg").getBoundingClientRect(), sc = screenScale(), dpr = window.devicePixelRatio || 1;
+  if (d && r.width > 0) {
+    const perOverview = sc * dpr;                            // device pixels per overview pixel
+    if (perOverview > 1.5) {
+      const levels = d.levels.slice().sort((a, b) => b.d - a.d);   // coarse first
+      level = levels.find((lv) => perOverview * lv.d / d.f <= 1.5) || levels[levels.length - 1];
+    }
+  }
+  const status = $("tileStatus");
+  if (status) status.textContent = !d ? "" : level ? (level.d === 1 ? "full resolution" : "½ resolution") + " (" + (s.um_per_px / d.f * level.d).toFixed(2) + " µm/px)" : "";
+  // the area in view, in overview pixels (the stage may show more than the viewBox on one side)
+  const cx = vb.x + vb.w / 2, cy = vb.y + vb.h / 2, hw = r.width / sc / 2, hh = r.height / sc / 2;
+  const ch = $("tChannel").value, shown = $("tImage").checked;
+  for (const c of ["g", "r"]) {
+    const g = groups[c], want = new Map();
+    if (level && shown && ch.includes(c) && level.have[c]) {
+      const k = level.d / d.f, T = level.tile;               // overview pixels per level pixel; tile side
+      const x0 = (cx - hw) / k / T, x1 = (cx + hw) / k / T, y0 = (cy - hh) / k / T, y1 = (cy + hh) / k / T;
+      for (const [row, col, w, h] of level.have[c]) {
+        if (col + 1 < x0 || col > x1 || row + 1 < y0 || row > y1) continue;
+        want.set(level.d + "/" + row + "_" + col, { x: col * T * k, y: row * T * k, w: w * k, h: h * k });
+      }
+    }
+    for (const im of [...g.children]) if (!want.has(im.dataset.k)) im.remove();
+    const have = new Set([...g.children].map((im) => im.dataset.k));
+    for (const [key, t] of want) {
+      if (have.has(key)) continue;
+      // a hair wider than the tile, so no seam shows between neighbours
+      const im = el("image", { href: "tiles/" + encodeURIComponent(s.id) + "/" + c + "/" + key + ".jpg", x: t.x, y: t.y,
+        width: t.w + 0.02, height: t.h + 0.02, preserveAspectRatio: "none" });
+      im.dataset.k = key;
+      g.appendChild(im);
+    }
+  }
+}
+
+function fit() {
+  if (!CUR) return;
+  vb = { x: 0, y: 0, w: CUR.width, h: CUR.height };
+  setViewBox();
+}
+
+function screenScale() {          // screen px per image px (preserveAspectRatio meet)
+  const r = $("svg").getBoundingClientRect();
+  return Math.min(r.width / vb.w, r.height / vb.h) || 1;
+}
+
+function scaleBar() {
+  if (!CUR) return;
+  const umPerScreen = CUR.um_per_px / screenScale();
+  const nice = [5, 10, 20, 50, 100, 200, 500, 1000, 2000];
+  let len = nice[0];
+  for (const n of nice) if (n / umPerScreen <= 160) len = n;
+  $("scalebar").querySelector("div").style.width = (len / umPerScreen).toFixed(1) + "px";
+  $("scalebar").querySelector("span").textContent = len + " µm";
+}
+
+function draw(s) {
+  $("img").setAttribute("href", "img/" + s.id + ".jpg");
+  $("img").setAttribute("width", s.width);
+  $("img").setAttribute("height", s.height);
+  $("imgR").setAttribute("href", s.red ? "img/" + s.id + "_r.jpg" : "");
+  $("imgR").setAttribute("width", s.width);
+  $("imgR").setAttribute("height", s.height);
+  $("tilesG").innerHTML = ""; $("tilesR").innerHTML = "";
+  scheduleTiles();
+  const gL = $("gLine"), gR = $("gRegion"), gO = $("gObjects"), gH = $("gHumans");
+  for (const g of [gL, gR, gO, gH, $("gCellpose")]) g.innerHTML = "";
+  if (s.line && s.line.length) gL.appendChild(el("polyline", { points: s.line.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
+  for (const c of s.region || []) gR.appendChild(el("polygon", { points: c.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
+  drawObjects(s);
+  drawCellpose(s);
+  const arm = 4;
+  for (const h of s.humans || []) {
+    const d = h.dots;
+    let path = "", pathOut = "";
+    for (let i = 0; i < d.x.length; i++) {
+      const p = "M" + (d.x[i] - arm) + " " + d.y[i] + "h" + 2 * arm + "M" + d.x[i] + " " + (d.y[i] - arm) + "v" + 2 * arm;
+      if (d.in[i]) path += p; else pathOut += p;
+    }
+    gH.appendChild(el("path", { d: path, "vector-effect": "non-scaling-stroke" }));
+    if (pathOut) gH.appendChild(el("path", { d: pathOut, opacity: 0.45, "vector-effect": "non-scaling-stroke" }));
+  }
+  applyToggles();
+}
+
+// The outlines of one section and method-threshold: parts/masks/<id>__<key>.js, which calls
+// window.MASKS_LOADED(id, key, data). A <script> tag, not fetch(), so the page works from file:// too.
+const MASKS = {}, WAITING = {};
+window.MASKS_LOADED = (id, key, d) => { MASKS[id + "__" + key] = d; };
+function loadMasks(id, key) {
+  const k = id + "__" + key;
+  if (MASKS[k]) return Promise.resolve(MASKS[k]);
+  if (WAITING[k]) return WAITING[k];
+  WAITING[k] = new Promise((resolve, reject) => {
+    const tag = document.createElement("script");
+    tag.src = "parts/masks/" + encodeURIComponent(k) + ".js";
+    tag.onload = () => { tag.remove(); delete WAITING[k]; MASKS[k] ? resolve(MASKS[k]) : reject(new Error("empty")); };
+    tag.onerror = () => { tag.remove(); delete WAITING[k]; reject(new Error("missing")); };
+    document.head.appendChild(tag);
+  });
+  return WAITING[k];
+}
+
+// The same objects traced at the scan's pixels (browser_outlines.py, Gaussian mask only): parts/fine/<id>__<key>.js
+// calls window.FINE_LOADED(id, key, {q, rings}); each ring is [x0, y0, dx, dy, …] in 1/q overview pixels. Missing → null.
+const FINE = {}, FINE_WAIT = {};
+window.FINE_LOADED = (id, key, d) => { FINE[id + "__" + key] = d; };
+function loadFine(id, key) {
+  const k = id + "__" + key;
+  if (k in FINE) return Promise.resolve(FINE[k]);
+  if (FINE_WAIT[k]) return FINE_WAIT[k];
+  FINE_WAIT[k] = new Promise((resolve) => {
+    const tag = document.createElement("script");
+    tag.src = "parts/fine/" + encodeURIComponent(k) + ".js";
+    tag.onload = () => { tag.remove(); delete FINE_WAIT[k]; if (!(k in FINE)) FINE[k] = null; resolve(FINE[k]); };
+    tag.onerror = () => { tag.remove(); delete FINE_WAIT[k]; FINE[k] = null; resolve(null); };
+    document.head.appendChild(tag);
+  });
+  return FINE_WAIT[k];
+}
+
+// The retrained Cellpose's cells (browser_cellpose.py): parts/cellpose/<id>__<model>.js calls window.CP_LOADED(id, model,
+// {q, rings, side, reg, area, away}), rings as the full-resolution outlines (first point, then steps, 1/q overview px).
+const CP = {}, CP_WAIT = {};
+const CP_MODEL = { cv: "cross-validated", other: "trained on the other annotator" };
+const CP_SIDE = { 1: { c: "#ff9f1c", n: "crossed" }, 0: { c: "#ffe14d", n: "home" }, "-1": { c: "#ffe14d", n: "no junction line" },
+  "-2": { c: MID, n: "outside the section, not counted", dash: "3 3" } };
+window.CP_LOADED = (id, model, d) => { CP[id + "__" + model] = d; };
+function loadCellpose(id, model) {
+  const k = id + "__" + model;
+  if (k in CP) return Promise.resolve(CP[k]);
+  if (CP_WAIT[k]) return CP_WAIT[k];
+  CP_WAIT[k] = new Promise((resolve) => {
+    const tag = document.createElement("script");
+    tag.src = "parts/cellpose/" + encodeURIComponent(k) + ".js";
+    tag.onload = () => { tag.remove(); delete CP_WAIT[k]; if (!(k in CP)) CP[k] = null; resolve(CP[k]); };
+    tag.onerror = () => { tag.remove(); delete CP_WAIT[k]; CP[k] = null; resolve(null); };
+    document.head.appendChild(tag);
+  });
+  return CP_WAIT[k];
+}
+function drawCellpose(s) {
+  const g = $("gCellpose"), model = $("tCpModel").value, on = $("tCellpose").checked;
+  g.innerHTML = "";
+  $("cpStatus").textContent = "";
+  if (!on || !s) return;
+  const have = (window.CP_INDEX || {})[s.id];
+  if (!have || !have[model]) { $("cpStatus").textContent = "no retrained Cellpose here (only the 27 human-counted sections)"; return; }
+  $("cpStatus").textContent = "retrained Cellpose loading…";
+  loadCellpose(s.id, model).then((d) => {
+    if (CUR !== s || $("tCpModel").value !== model || !$("tCellpose").checked) return;
+    if (!d) { $("cpStatus").textContent = "retrained Cellpose: file missing"; return; }
+    const frag = document.createDocumentFragment();
+    const order = d.side.map((_, i) => i).sort((a, b) => d.side[a] - d.side[b]);
+    for (const i of order) {
+      let path = "";
+      for (const r of d.rings[i]) {
+        if (r.length < 2) continue;
+        path += "M" + r[0] + " " + r[1];
+        for (let j = 2; j < r.length; j += 2) path += "l" + r[j] + " " + r[j + 1];
+        path += "Z";
+      }
+      if (!path) continue;
+      const side = CP_SIDE[d.side[i]] || CP_SIDE["-1"];
+      const a = { d: path, stroke: side.c, "vector-effect": "non-scaling-stroke", transform: "scale(" + 1 / d.q + ")" };
+      if (side.dash) a["stroke-dasharray"] = side.dash;
+      const p = el("path", a);
+      const t = el("title", {});
+      t.textContent = "Retrained Cellpose (" + CP_MODEL[model] + "), " + side.n + (d.away[i] !== null ? ", " + d.away[i].toFixed(0) + " µm from the line (+ past it)" : "") +
+        ", area " + d.area[i] + " µm²" + (d.reg[i] ? ", in the junction region" : "");
+      p.appendChild(t);
+      frag.appendChild(p);
+    }
+    g.appendChild(frag);
+    const n = d.side.filter((v) => v >= -1).length, crossed = d.side.filter((v) => v === 1).length, out = d.side.length - n;
+    $("cpStatus").textContent = "retrained Cellpose (" + CP_MODEL[model] + "): " + n + " cells, " + crossed + " crossed" + (out ? ", " + out + " outside the section" : "");
+  });
+}
+
+const SIDE = { 1: { c: MAGENTA, n: "crossed" }, 0: { c: "#ffffff", n: "home" }, "-1": { c: MID, n: "no junction line" } };
+function drawObjects(s) {
+  const gO = $("gObjects"), key = KEY;
+  gO.innerHTML = "";
+  $("maskStatus").textContent = "outlines loading…";
+  Promise.all([loadMasks(s.id, key), loadFine(s.id, key)]).then(([d, fine]) => {
+    if (CUR !== s || KEY !== key) return;          // another section or method was chosen meanwhile
+    if (fine && fine.rings.length !== d.rings.length) fine = null;    // not the same objects: the overview's outlines
+    const frag = document.createDocumentFragment();
+    const what = METHOD.kind === "cell" ? "AF488⁺ cell (grown region)" : "AF488⁺ object";
+    // home first, crossed on top
+    const order = d.side.map((_, i) => i).sort((a, b) => d.side[a] - d.side[b]);
+    for (const i of order) {
+      let path = "";
+      if (fine) {
+        for (const r of fine.rings[i]) {             // first point, then steps
+          if (r.length < 2) continue;
+          path += "M" + r[0] + " " + r[1];
+          for (let j = 2; j < r.length; j += 2) path += "l" + r[j] + " " + r[j + 1];
+          path += "Z";
+        }
+      } else {
+        for (const r of d.rings[i]) {
+          if (r.length < 2) continue;
+          path += "M" + r[0] + " " + r[1];
+          for (let j = 2; j < r.length; j += 2) path += "L" + r[j] + " " + r[j + 1];
+          path += "Z";
+        }
+      }
+      if (!path) continue;
+      const side = SIDE[d.side[i]] || SIDE["-1"];
+      const p = el("path", { d: path, stroke: side.c, "vector-effect": "non-scaling-stroke" });
+      if (fine) p.setAttribute("transform", "scale(" + 1 / fine.q + ")");
+      const t = el("title", {});
+      t.textContent = what + ", " + side.n + (d.away[i] !== null ? ", " + d.away[i].toFixed(0) + " µm from the line (+ past it)" : "") +
+        ", area " + d.area[i] + " µm²" + (d.reg[i] ? ", in the junction region" : "");
+      p.appendChild(t);
+      frag.appendChild(p);
+    }
+    gO.appendChild(frag);
+    $("maskStatus").textContent = "";
+  }).catch(() => {
+    if (CUR === s && KEY === key) $("maskStatus").textContent = "no outlines for this section and method";
+  });
+}
+
+// ------------------------------------------------------------------ brightness (contrast limits and gamma per channel)
+// lo / hi on the displayed 0–255 values; gamma from the slider g in −1 … 1 as 10^(0.7·g), so 0.2 … 5 with 1 in the middle.
+const CONTRAST_DEFAULT = { lo: 0, hi: 255, g: 0 };
+let CONTRAST = { g: { ...CONTRAST_DEFAULT }, r: { ...CONTRAST_DEFAULT } };
+const gammaOf = (g) => Math.pow(10, 0.7 * g);
+function contrastTable(c) {
+  const lo = c.lo / 255, hi = Math.max(c.hi, c.lo + 1) / 255, gm = gammaOf(c.g), n = 128, v = [];
+  for (let i = 0; i < n; i++) {
+    const x = i / (n - 1), t = Math.min(1, Math.max(0, (x - lo) / (hi - lo)));
+    v.push(Math.pow(t, gm).toFixed(4));
+  }
+  return v.join(" ");
+}
+function applyContrast() {
+  for (const ch of ["g", "r"]) {
+    const c = CONTRAST[ch], plain = c.lo === 0 && c.hi === 255 && Math.abs(c.g) < 1e-9;
+    const funcs = [...$(ch === "g" ? "fltG" : "fltR").querySelectorAll("feFuncR, feFuncG, feFuncB"),
+      ...$(ch === "g" ? "fltGt" : "fltRt").querySelectorAll("feFuncR, feFuncG, feFuncB")];
+    for (const f of funcs) {
+      if (plain) { f.setAttribute("type", "identity"); f.removeAttribute("tableValues"); }
+      else { f.setAttribute("type", "table"); f.setAttribute("tableValues", contrastTable(c)); }
+    }
+    $(ch === "g" ? "img" : "imgR").style.filter = plain ? "" : "url(#" + (ch === "g" ? "fltG" : "fltR") + ")";
+    const box = document.querySelector('#contrast .ch[data-ch="' + ch + '"]');
+    for (const inp of box.querySelectorAll("input")) inp.value = c[inp.dataset.k === "gamma" ? "g" : inp.dataset.k];
+    box.querySelector('[data-o="lo"]').textContent = c.lo;
+    box.querySelector('[data-o="hi"]').textContent = c.hi;
+    box.querySelector('[data-o="gamma"]').textContent = gammaOf(c.g).toFixed(2);
+  }
+}
+function setupContrast() {
+  $("tContrast").onclick = () => {
+    const t = $("toggles");
+    $("contrast").style.top = (t.offsetTop + t.offsetHeight + 4) + "px";        // under the toolbar, however many lines it takes
+    $("contrast").classList.toggle("open");
+  };
+  for (const box of document.querySelectorAll("#contrast .ch")) {
+    const ch = box.dataset.ch;
+    for (const inp of box.querySelectorAll("input")) inp.addEventListener("input", () => {
+      const c = CONTRAST[ch], k = inp.dataset.k, v = +inp.value;
+      if (k === "lo") { c.lo = Math.min(v, 254); if (c.hi <= c.lo) c.hi = c.lo + 1; }
+      else if (k === "hi") { c.hi = Math.max(v, 1); if (c.lo >= c.hi) c.lo = c.hi - 1; }
+      else c.g = v;
+      applyContrast();
+      saveUI();
+    });
+    box.querySelector("[data-reset]").onclick = () => { CONTRAST[ch] = { ...CONTRAST_DEFAULT }; applyContrast(); saveUI(); };
+  }
+  applyContrast();
+}
+
+function applyToggles() {
+  $("gLine").style.display = $("tLine").checked ? "" : "none";
+  $("gRegion").style.display = $("tRegion").checked ? "" : "none";
+  $("gObjects").style.display = $("tObjects").checked ? "" : "none";
+  $("gHumans").style.display = $("tHumans").checked ? "" : "none";
+  const ch = $("tChannel").value, shown = $("tImage").checked;
+  $("chG").style.display = shown && ch.includes("g") ? "" : "none";
+  $("chR").style.display = shown && ch.includes("r") ? "" : "none";
+  scheduleTiles();
+  saveUI();
+}
+
+function row(k, v) { return "<dt>" + k + "</dt><dd>" + v + "</dd>"; }
+
+function info(s) {
+  const i = VIEW.findIndex((x) => x.id === s.id);
+  let html = '<div class="name">' + s.name + "</div>" +
+    '<div style="color:' + DARK + '">' + (i >= 0 ? (i + 1) + " of " + VIEW.length + " in the table" : "not in the filtered table") + "</div>";
+  html += "<h2>Section</h2><dl>" + row("Genotype", s.genotype) + row("Experiment", s.experiment) + row("Slide", s.slide) +
+    row("Junction length", fmt(s.length_um, 0) + " µm") + row("Assembloid area", fmt(s.area_mm2, 2) + " mm²") +
+    row("Assembloid length", fmt(s.assembloid_um, 0) + " µm") + row("Nuclei", fmt(s.n_nuclei, 0)) + row("Region drawn", fmt(s.region_by)) + row("QC", fmt(s.qc)) +
+    row("Review", fmt(s.review) + (s.decision ? " (" + s.decision + ")" : "")) + row("Pixel", fmt(s.um_per_px, 2) + " µm") + "</dl>";
+  const n = noun();
+  html += '<h2>Automated</h2><div style="color:' + DARK + '">' + methodText() + "</div><dl>" + row("AF488⁺ " + n + ", whole section", fmt(s.n_objects)) +
+    row("In junction region", fmt(s.n_region)) +
+    row("Crossed (past the line)", fmt(s.n_crossed)) + row("Home (not crossed)", fmt(s.n_home)) + row("Crossed per mm", fmt(s.crossed_per_mm, 2)) +
+    row("Share crossed", fmt(s.share_crossed, 2)) + row("Threshold", fmt(s.thr, 1)) + "</dl>";
+  for (const h of s.humans || []) {
+    const auto = h.automated ? h.automated[KEY] : null;
+    html += "<h2>" + h.label.charAt(0).toUpperCase() + h.label.slice(1) + "</h2><dl>" + row("Counted area", '<span style="white-space:normal">' + h.area + "</span>") +
+      row("Human count", h.human) + row("Automated, same area", fmt(auto)) + row("Automated ÷ human", fmt(auto !== null && auto !== undefined && h.human ? auto / h.human : null, 2)) +
+      row("Dots shown", h.dots.x.length) + "</dl>";
+  }
+  const blob = (c) => '<path d="M4 9C4 5 7 3 10 4S15 7 14 11 9 15 6 13 4 11 4 9Z" fill="none" stroke="' + c + '" stroke-width="1.5"/>';
+  const one = METHOD.kind === "cell" ? "AF488⁺ cell (its grown region)" : "AF488⁺ object (mask outline)";
+  html += '<h2>Overlays</h2><div id="legend">' +
+    legendItem(blob("#ffffff"), one + " at home: not past the junction line") +
+    legendItem(blob(MAGENTA), one + " crossed: past the junction line, extended straight past its ends") +
+    legendItem('<path d="M5 9h8M9 5v8" stroke="#ffffff" stroke-width="1.5"/>', "human dot (faint: outside the counted area)") +
+    legendItem('<path d="M2 14L16 4" stroke="#ffffff" stroke-width="2"/>', "junction line") +
+    legendItem('<rect x="3" y="4" width="12" height="10" fill="none" stroke="#d9d9d9" stroke-dasharray="3 2" stroke-width="1.5"/>', "junction region") +
+    '<div style="color:' + DARK + ';margin-top:6px">AF488 (green), brightest plane over z, display ' + s.display[0] + "–" + s.display[1] +
+    (s.red ? "; " + s.red.channel + " (red), display " + s.red.display[0] + "–" + s.red.display[1] : "; no AF555 picture") +
+    " (tissue 1st–99.7th percentile). Home is the side of the line holding more of the Gaussian 8 SD mask's area, the same side for every method; " +
+    n + " are placed by their centroid. Wheel to zoom, drag to pan, ←/→ previous/next, 0 to fit.</div></div>";
+  $("info").innerHTML = html;
+}
+
+function legendItem(svg, text) { return '<div><svg width="18" height="18" viewBox="0 0 18 18">' + svg + "</svg>" + text + "</div>"; }
+
+function open(id) {
+  const s = BYID[id];
+  if (!s) return;
+  const same = CUR && CUR.id === id;
+  CUR = s;
+  if (document.body.classList.contains("gallery")) setMode(false);
+  if (!same) { draw(s); fit(); }
+  info(s);
+  markPlots(s);
+  for (const tr of $("rows").querySelectorAll("tr.sel")) tr.classList.remove("sel");
+  const tr = $("rows").querySelector('tr[data-id="' + id + '"]');
+  if (tr) { tr.classList.add("sel"); tr.scrollIntoView({ block: "nearest" }); }
+  if (location.hash.slice(1) !== id) history.replaceState(null, "", "#" + id);
+  saveUI();
+}
+
+function step(d) {
+  if (!VIEW.length) return;
+  const i = CUR ? VIEW.findIndex((s) => s.id === CUR.id) : -1;
+  const j = i < 0 ? 0 : Math.min(Math.max(i + d, 0), VIEW.length - 1);
+  open(VIEW[j].id);
+}
+
+// zoom and pan
+function svgPoint(ev) {
+  const svg = $("svg"), pt = svg.createSVGPoint();
+  pt.x = ev.clientX; pt.y = ev.clientY;
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+
+function setupStage() {
+  const svg = $("svg");
+  svg.addEventListener("wheel", (ev) => {
+    if (!CUR) return;
+    ev.preventDefault();
+    const p = svgPoint(ev);
+    const k = Math.exp(ev.deltaY * 0.0015);
+    const w = Math.min(Math.max(vb.w * k, 30), CUR.width * 4), f = w / vb.w;
+    vb = { x: p.x - (p.x - vb.x) * f, y: p.y - (p.y - vb.y) * f, w: w, h: vb.h * f };
+    setViewBox();
+  }, { passive: false });
+  let drag = null;
+  svg.addEventListener("pointerdown", (ev) => { drag = { x: ev.clientX, y: ev.clientY, vb: { ...vb } }; svg.setPointerCapture(ev.pointerId); svg.classList.add("drag"); });
+  svg.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const k = 1 / screenScale();
+    vb = { ...drag.vb, x: drag.vb.x - (ev.clientX - drag.x) * k, y: drag.vb.y - (ev.clientY - drag.y) * k };
+    setViewBox();
+  });
+  const end = () => { drag = null; svg.classList.remove("drag"); };
+  svg.addEventListener("pointerup", end);
+  svg.addEventListener("pointercancel", end);
+  window.addEventListener("resize", () => { scaleBar(); scheduleTiles(); });
+  for (const id of ["tLine", "tRegion", "tObjects", "tHumans", "tImage", "tChannel"]) $(id).onchange = applyToggles;
+  for (const id of ["tCellpose", "tCpModel"]) $(id).onchange = () => { drawCellpose(CUR); saveUI(); };
+  $("prev").onclick = () => step(-1);
+  $("next").onclick = () => step(1);
+  $("fit").onclick = fit;
+  document.addEventListener("keydown", (ev) => {
+    if (ev.target.tagName === "INPUT" && ev.target.type === "search") return;
+    if (ev.target.tagName === "SELECT") return;
+    if (ev.target.tagName === "INPUT" && ev.target.type === "range") return;
+    if (ev.key === "ArrowRight") { step(1); ev.preventDefault(); }
+    else if (ev.key === "ArrowLeft") { step(-1); ev.preventDefault(); }
+    else if (ev.key === "0") fit();
+  });
+}
+
+// ------------------------------------------------------------------ gallery
+function buildGallery() {
+  const col = COLS.find((c) => c.k === sortKey);
+  const g = $("gallery");
+  g.innerHTML = VIEW.map((s) =>
+    '<figure data-id="' + s.id + '"' + (CUR && CUR.id === s.id ? ' class="sel"' : "") + '><img loading="lazy" src="img/' + s.id + '_t.jpg" alt="' + s.id + '">' +
+    "<figcaption><span>" + s.id + " · " + s.genotype + "</span><span>" + (col && !col.txt ? col.h + " " + fmt(s[sortKey], col.f) : "crossed/mm " + fmt(s.crossed_per_mm, 2)) +
+    "</span></figcaption></figure>").join("");
+  for (const f of g.querySelectorAll("figure")) f.onclick = () => open(f.dataset.id);
+}
+
+// ------------------------------------------------------------------ remembered settings
+// Kept in this browser (localStorage), so they come back after closing the window or visiting the figure builder.
+// A section in the address (#id) or a method (?m=…) still wins over them.
+const UI_KEY = "oasis.section_browser.settings";
+let UI_READY = false;              // nothing is saved while the page is still starting
+
+function saveUI() {
+  if (!UI_READY) return;
+  const ui = {
+    filters: { geno: $("fGeno").value, exp: $("fExp").value, qc: $("fQc").value, human: $("fHuman").checked, name: $("fName").value },
+    sort: [sortKey, sortDir], method: KEY,
+    toggles: Object.fromEntries(["tLine", "tRegion", "tObjects", "tHumans", "tImage", "tCellpose"].map((id) => [id, $(id).checked])),
+    cpModel: $("tCpModel").value,
+    channel: $("tChannel").value, contrast: CONTRAST,
+    size: { x: $("sizeX").value, y: $("sizeY").value, logX: $("logX").checked, logY: $("logY").checked },
+    logStrip: $("logStrip").checked, section: CUR ? CUR.id : null, gallery: document.body.classList.contains("gallery"),
+  };
+  try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch (e) { /* storage blocked (private window) */ }
+}
+
+function loadUI() {
+  try { return JSON.parse(localStorage.getItem(UI_KEY)) || null; } catch (e) { return null; }
+}
+
+function setValue(id, value) {           // a select keeps its value only when it is one of its options
+  const el = $(id);
+  if (value === undefined || value === null) return;
+  if (el.type === "checkbox") el.checked = !!value;
+  else if (el.tagName !== "SELECT" || [...el.options].some((o) => o.value === String(value))) el.value = value;
+}
+
+function setMode(gallery) {
+  document.body.classList.toggle("gallery", gallery);
+  $("mGallery").classList.toggle("on", gallery);
+  $("mViewer").classList.toggle("on", !gallery);
+  if (gallery) buildGallery();
+  else { window.dispatchEvent(new Event("resize")); if (CUR) { fit(); } }
+  saveUI();
+}
+
+// ------------------------------------------------------------------ start
+function init(d) {
+  prepare(d);
+  fillSelect("fGeno", ["WT3", "GD1"].filter((g) => S.some((s) => s.genotype === g)));
+  fillSelect("fExp", [...new Set(S.map((s) => s.experiment))].sort());
+  fillSelect("fQc", [...new Set(S.map((s) => s.qc))].sort());
+  for (const id of ["fGeno", "fExp", "fQc", "fHuman"]) $(id).onchange = () => { refresh(); saveUI(); };
+  $("fName").oninput = () => { refresh(); saveUI(); };
+  $("mViewer").onclick = () => setMode(false);
+  $("mGallery").onclick = () => setMode(true);
+  $("logStrip").onchange = () => { Plotly.relayout("p2", { "yaxis.type": $("logStrip").checked ? "log" : "linear" }); saveUI(); };
+  $("sizeX").innerHTML = Object.entries(SIZE_X).map(([k, h]) => '<option value="' + k + '">' + h + "</option>").join("");
+  $("sizeX").value = "area_mm2";
+  for (const id of ["sizeX", "sizeY", "logX", "logY"]) $(id).onchange = () => { if (window.Plotly) plotSize(); saveUI(); };
+  // the method: ?m=<method>-<k> in the address, or the counting method
+  let start_m = null;
+  try { start_m = new URLSearchParams(location.search).get("m"); } catch (e) { /* no query */ }
+  const kept = loadUI() || {};
+  setMethod(start_m || kept.method || d.default, false);
+  if (kept.filters) {
+    setValue("fGeno", kept.filters.geno); setValue("fExp", kept.filters.exp); setValue("fQc", kept.filters.qc);
+    setValue("fHuman", kept.filters.human); setValue("fName", kept.filters.name);
+  }
+  if (kept.sort) { sortKey = kept.sort[0]; sortDir = kept.sort[1]; }
+  for (const [id, on] of Object.entries(kept.toggles || {})) setValue(id, on);
+  setValue("tChannel", kept.channel);
+  setValue("tCpModel", kept.cpModel);
+  if (kept.contrast) for (const ch of ["g", "r"]) {
+    const c = kept.contrast[ch] || {};
+    const lo = Math.round(+c.lo), hi = Math.round(+c.hi), g = +c.g;
+    if (lo >= 0 && hi <= 255 && lo < hi && g >= -1 && g <= 1) CONTRAST[ch] = { lo, hi, g };
+  }
+  if (kept.size) { setValue("sizeX", kept.size.x); setValue("sizeY", kept.size.y); setValue("logX", kept.size.logX); setValue("logY", kept.size.logY); }
+  setValue("logStrip", kept.logStrip);
+  $("mMethod").onchange = () => { setMethod($("mMethod").value + "-" + $("mK").value, true); saveUI(); };
+  $("mK").onchange = () => { setMethod(METHOD.key + "-" + $("mK").value, true); saveUI(); };
+  setupStage();
+  setupContrast();
+  refresh();
+  if (window.Plotly) { plotHuman(); plotStrip(); plotSize(); }
+  else { $("p1").textContent = "The plots need plotly from cdnjs (no internet connection?)."; }
+  const start = location.hash.slice(1);
+  open(BYID[start] ? start : BYID[kept.section] ? kept.section : (VIEW[0] && VIEW[0].id));
+  applyToggles();
+  UI_READY = true;
+  if (new URLSearchParams(location.search).has("gallery") || kept.gallery) setMode(true);    // ?gallery opens on the thumbnails
+  saveUI();
+}
+
+loadData().then(init).catch((e) => {
+  const box = $("err");
+  box.style.display = "block";
+  box.textContent = "Could not load the data (" + e.message + "). Open the page through a web server: run " +
+    "'python -m http.server' in this folder and go to http://localhost:8000/section_browser.html, or keep data.js beside the page.";
+});
+</script>
+</body>
+</html>
