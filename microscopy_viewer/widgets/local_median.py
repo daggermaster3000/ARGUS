@@ -11,7 +11,7 @@ image on screen for any image layer, with the same settings:
   local median (45 µm)** (:func:`install_layer_action`);
 * the Cell counter panel's **Show less local median** button.
 
-A stack is flattened to its brightest plane first, as the analysis does. The
+A stack is flattened to its maximum-intensity projection first, as the analysis does. The
 work runs off the main thread; the new layer, ``<layer> less local median``, has
 the source layer's colour and is tied to its sample.
 """
@@ -47,7 +47,7 @@ _RUNNING: set = set()
 
 
 def finest_plane(layer) -> tuple[np.ndarray, tuple[float, float]]:
-    """The layer's finest level flattened to its brightest plane (as the analysis), and its pixel size (y, x)."""
+    """The layer's finest level flattened to its maximum-intensity projection (as the analysis), and its pixel size (y, x)."""
     pyramid = layer.metadata.get("mv_pyramid")
     data = pyramid[0] if pyramid else (layer.data[0] if getattr(layer, "multiscale", False) else layer.data)
     scale = layer.metadata.get("mv_pyramid_scale") or layer.scale

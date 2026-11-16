@@ -2,7 +2,7 @@
 
 The alternative to the run's nuclei + a positivity rule: Cellpose (``cpsam_v2``,
 the run's model and thresholds, diameter left to the model) segments the AF488
-plane — the brightest plane over z, the whole section — in the run's tiles
+plane — the maximum-intensity projection over z, the whole section — in the run's tiles
 (:data:`junction_analysis.TILE_PX` with :data:`junction_analysis.TILE_OVERLAP_PX`
 of overlap, each object kept in the tile holding its centre; tiles of bare slide
 skipped). Two variants (:data:`VARIANTS`):

@@ -435,7 +435,7 @@ switch to pixels rather than silently reporting wrong micrometres.
 ### Median filter: an image less its local median
 
 Right-click any image layer in the layer list ▸ **Median filter: less the local
-median (45 µm)**. The layer is flattened to its brightest plane (as the cells
+median (45 µm)**. The layer is flattened to its maximum-intensity projection (as the cells
 analysis measures it), the median over 45 µm round each pixel is worked out
 and taken away — the same settings as the analysis' *mean (median filter)*,
 which its positivity rule compares — and the result is added above it as

@@ -145,7 +145,7 @@ class CellCounterWidget(QWidget):
             "Add the chosen image less its local median over 45 µm — the image the cells "
             "analysis compares to call a cell positive (the same settings), so a labelled "
             "cell stands out of a bright patch of tissue the way the analysis sees it. A stack "
-            "is flattened to its brightest plane first. Also: right-click any image layer ▸ "
+            "is flattened to its maximum-intensity projection first. Also: right-click any image layer ▸ "
             "Median filter."
         )
         self._median_button.clicked.connect(self.show_less_local_median)

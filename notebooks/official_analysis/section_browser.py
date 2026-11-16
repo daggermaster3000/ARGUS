@@ -2,7 +2,7 @@
 
 For each of the run's sections (WT3 and GD1 only):
 
-- a picture of the whole section, AF488 (brightest plane over z) at ~1.3 µm per pixel, green on
+- a picture of the whole section, AF488 (maximum-intensity projection over z) at ~1.3 µm per pixel, green on
   black, its display range from the tissue's 1st–99.7th percentile; the AF555 picture (red) on the
   same grid; and a ~300 px thumbnail;
 - the junction line and the junction region's outline, in picture pixels, and the human annotators'
