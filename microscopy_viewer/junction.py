@@ -8,22 +8,26 @@ need two hundred hand-drawn ones — and it scores each sample, because a torn
 section or two organoids that never fused should not reach the statistics just
 because a line could be put through them.
 
-Everything here works on an **overview**: every channel flattened over Z and
-decimated to about 5 µm per pixel. An organoid is millimetres across; nothing
-about where its junction is lives below that scale, and a slide scan is a
-gigabyte at full resolution.
+Everything here works on an **overview** (:func:`build_overview`): every
+channel's maximum-intensity projection over Z, keeping every *step*-th pixel
+(about 5 µm per pixel), plus the nuclear stain averaged over each block. An
+organoid is millimetres across; nothing about where its junction is lives below
+that scale, and a slide scan is a gigabyte at full resolution.
 
-How the junction is found:
+How the junction is found (:func:`find_junction` runs the steps):
 
-1. **Tissue** from the nuclear channel and the others (:func:`tissue_mask`).
+1. **Tissue**: wherever any channel stands above the slide (:func:`tissue_mask`),
+   holes filled for the steps below.
 2. **Where the labelled cells are**: the punctate part of the GFP channel —
    what stands out over its own neighbourhood, which leaves out autofluorescence
-   and folds — smoothed into a density (:func:`cell_density`).
+   and folds — smoothed into a density (:func:`cell_density`). The same for the
+   other organoid's own label (mCherry, the 555 channel) when it holds cells
+   (:func:`has_cells`).
 3. **Two seeds**, one in each organoid (:func:`find_seeds`). The first is the
    dense core of that density. The second is made the same way from the other
-   organoid's own label when it has one (mCherry, the 555 channel): the dense
-   core of *its* cells. Without one, it is the low-density tissue furthest from
-   the first seed going through the tissue.
+   organoid's own label when it has one: the dense core of *its* cells. Without
+   one, it is the low-density tissue furthest from the first seed going through
+   the tissue. Each seed is then cut back to its half furthest from the other.
 4. **A minimum cut** between the seeds (:func:`split_tissue`). This is the
    step that matters. Labelled cells are not spread evenly through their own
    organoid, so thresholding the density draws the line round the brightest
@@ -33,11 +37,21 @@ How the junction is found:
    cheapest way across the tissue between the seeds — short, and cheaper still
    along that line — so it runs through the neck when there is one and along
    the line wherever there is one to follow.
-5. **The interface** between the two halves, ordered end to end and smoothed
+5. **Straightening** (:func:`straighten_cut`, with ``bend_um`` > 0): the cut is
+   found again as a curve across the section that pays for its price *and* for
+   every turn it takes, so it no longer turns a corner to follow a crack.
+6. **No dark line** (``no_seam_price`` > 0): when the mean line price under the
+   cut is above :data:`NO_SEAM_PRICE`, steps 3–5 run again with the ``no_seam_*``
+   settings (dominant seeds, :func:`dominant_seeds`, and a price on cutting
+   where the labels do not change, :func:`edge_cost`).
+7. **The interface** between the two halves, ordered end to end, smoothed
+   (running mean over :data:`JUNCTION_SMOOTH_UM`) and kept every 40 µm
    (:func:`trace_interface`), is the junction line.
-6. **The band** is the part of one organoid within the band width of that line
-   (:func:`_build_band`), so its two ends run along the organoid's own outline
-   rather than being cut straight across it.
+8. **The band** (:func:`_build_band`) is the tissue on one side of that line —
+   by default the organoid the labelled cells migrate *into* — between
+   ``gap_um`` and ``gap_um + width_um`` from it, clipped to the rounded tissue
+   outline plus ``margin_um``. Its two ends therefore run along the organoid's
+   own outline rather than being cut straight across it.
 
 It is a proposal. On a clean pair of lobes it is where a person would draw it;
 on an organoid embedded in the other, or one with labelled cells everywhere, it
@@ -431,6 +445,13 @@ def build_overview(
     whole and every *step*-th pixel kept — not averaged, because the labelled
     cells are a few pixels across at full resolution and averaging a block of
     sixteen would dissolve them into the background they are told apart from.
+    The planes are combined by their maximum over Z (a maximum-intensity
+    projection of the sampled pixels).
+
+    The nuclear channel is also kept *averaged* over each *step* × *step*
+    block (maximum of the block means over Z), for the line cost
+    (:attr:`Overview.nuclear_mean`). Focus and saturation are measured on its
+    middle Z plane.
     """
     options = options or JunctionOptions()
     names = [str(getattr(spec, "channel_name", "") or getattr(spec, "name", "")) for spec in specs]
@@ -447,25 +468,31 @@ def build_overview(
     shape_yx = tuple(int(n) for n in data.shape[-2:])
     voxel_yx = tuple(float(v) for v in first.scale)[-2:]
     pixel = max(voxel_yx) or 1.0
+    # Keep every step-th pixel: 0.325 µm pixels -> step 15, ~4.9 µm per overview pixel.
     step = max(1, int(round(target_um / pixel)))
 
     planes: list[np.ndarray] = []
     focus, saturated = float("nan"), 0.0
     nuclear_mean: np.ndarray | None = None
     for index, spec in enumerate(specs):
+        # Full resolution (level 0 of a pyramid); any leading axes (T, Z) become one Z axis.
         array = spec.data[0] if getattr(spec, "multiscale", False) else spec.data
         stack = array.reshape((-1, *array.shape[-2:]))
         best: np.ndarray | None = None
         for z in range(int(stack.shape[0])):
             plane = np.asarray(stack[z])
             if index == nuclear and z == int(stack.shape[0]) // 2:
+                # Sharpness on a 1536 px crop of the middle plane; saturation =
+                # share of sampled pixels at the dtype's maximum.
                 focus = focus_score(_centre_crop(plane))
                 if np.issubdtype(plane.dtype, np.integer):
                     limit = np.iinfo(plane.dtype).max
                     saturated = float((plane[::step, ::step] >= limit).mean())
+            # Sample every step-th pixel, then the running maximum over Z (the MIP).
             small = plane[::step, ::step].astype(np.float32)
             best = small if best is None else np.maximum(best, small)
             if index == nuclear:
+                # The nuclear stain also as block means, again maximised over Z.
                 pooled = _block_mean(plane, step, small.shape)
                 nuclear_mean = pooled if nuclear_mean is None else np.maximum(nuclear_mean, pooled)
         planes.append(best)
@@ -513,10 +540,13 @@ def _above_background(plane: np.ndarray, valid: np.ndarray, um: float) -> np.nda
     from scipy import ndimage
     from skimage.filters import threshold_otsu
 
+    # Gaussian, sigma 10 µm; only scanned pixels (not the stitching's zero padding) count.
     smooth = ndimage.gaussian_filter(np.asarray(plane, dtype=np.float32), 10.0 / um)
     values = smooth[valid]
     if values.size < 100 or float(values.max()) <= float(values.min()):
         return None
+    # Otsu only splits the pixels into "slide" and "tissue"; the threshold is
+    # 20 % of the way from the slide's median to the tissue's median.
     midpoint = threshold_otsu(values)
     below, above = values[values < midpoint], values[values >= midpoint]
     if below.size == 0 or above.size == 0:
@@ -540,10 +570,12 @@ def tissue_mask(nuclear: np.ndarray, valid: np.ndarray, um: float,
     mask = _above_background(nuclear, valid, um)
     if mask is None:
         return np.zeros(np.shape(nuclear), dtype=bool)
+    # Union: a pixel is tissue when any channel says so.
     for plane in others:
         more = _above_background(plane, valid, um)
         if more is not None:
             mask |= more
+    # Opening (disk of radius 10 µm) drops specks; closing (radius 15 µm) bridges small gaps.
     mask = ndimage.binary_opening(mask, _disk(10.0 / um))
     mask = ndimage.binary_closing(mask, _disk(15.0 / um))
     labels, count = ndimage.label(mask)
@@ -563,7 +595,7 @@ def cell_density(
 
     A cell is a point brighter than its surroundings, so the map is built from
     what is left after a median of the neighbourhood is taken away. Diffuse
-    signal — autofluorescence, a fold, a thick part of the section — goes with
+    signal is due to autofluorescence. a fold disappears with
     the median. The smoothing is normalised by the tissue under the kernel, so
     the edge of the section is not read as a fall in density.
 
@@ -572,11 +604,14 @@ def cell_density(
     """
     from scipy import ndimage
 
+    # Channel less its local median (clipped at 0), scaled 0–1 by its 99.5th percentile in the tissue.
     prominence = cell_prominence(channel, um, median, median_um)
     inside = prominence[tissue]
     if inside.size == 0:
         return np.zeros(prominence.shape, dtype=np.float32)
     prominence = np.clip(prominence / (float(np.percentile(inside, 99.5)) + 1e-6), 0, 1)
+    # Normalised convolution: Gaussian (sigma = radius_um) of the tissue's values
+    # divided by the same Gaussian of the tissue mask, i.e. a local mean over tissue only.
     sigma = radius_um / um
     amount = ndimage.gaussian_filter(np.where(tissue, prominence, 0).astype(np.float32), sigma)
     weight = ndimage.gaussian_filter(tissue.astype(np.float32), sigma)
@@ -594,6 +629,7 @@ def cell_prominence(channel: np.ndarray, um: float, median: bool = True,
     data = np.asarray(channel, dtype=np.float32)
     if not median or median_um <= 0:
         return np.clip(data, 0, None)
+    # Square median window of median_um a side, rounded to an odd number of pixels (>= 3).
     size = max(3, int(round(float(median_um) / um)) | 1)
     return np.clip(data - ndimage.median_filter(data, size), 0, None)
 
@@ -610,10 +646,13 @@ def has_cells(channel: np.ndarray, tissue: np.ndarray, um: float) -> bool:
     from scipy import ndimage
 
     data = np.asarray(channel, dtype=np.float32)
+    # The channel less its 45 µm local median, inside the tissue.
     size = max(3, int(round(45.0 / um)) | 1)
     over = (data - ndimage.median_filter(data, size))[tissue]
     if over.size < 100:
         return False
+    # Robust SD (1.4826 × MAD) of that residual; cells when its 99.9th
+    # percentile is more than CELLS_OVER_NOISE of those SDs.
     spread = float(np.median(np.abs(over - np.median(over)))) * 1.4826
     if spread <= 0:
         return False
@@ -643,8 +682,11 @@ def line_cost(nuclear: np.ndarray, filled: np.ndarray, um: float) -> np.ndarray:
     # Outside the tissue takes the tissue's own level, so the section's edge is
     # not itself a dark line the cut would rather run along.
     data = np.where(filled, data, level)
+    # Local contrast: Gaussian sigma 8 µm over Gaussian sigma 60 µm.
     fine = ndimage.gaussian_filter(data, LINE_SMOOTH_UM / um)
     coarse = ndimage.gaussian_filter(data, LINE_SURROUND_UM / um)
+    # Only darker-than-surroundings lowers the price (brighter is clipped to 1);
+    # the floor of 0.3 caps the discount at 0.3**6 ≈ 0.001.
     ratio = np.clip(fine / np.maximum(coarse, 1e-6), 0.3, 1.0)
     return (ratio ** LINE_POWER).astype(np.float32)
 
@@ -751,6 +793,8 @@ def _min_cut(filled: np.ndarray, hot: np.ndarray, cold: np.ndarray, cost: np.nda
     from scipy import sparse
     from scipy.sparse import csgraph
 
+    # One graph node per tissue pixel, plus a source (joined to the hot seed)
+    # and a sink (joined to the cold seed).
     index = np.full(filled.shape, -1, dtype=np.int64)
     count = int(filled.sum())
     index[filled] = np.arange(count)
@@ -771,12 +815,17 @@ def _min_cut(filled: np.ndarray, hot: np.ndarray, cold: np.ndarray, cost: np.nda
         ca = cost[max(0, -dy): height - max(0, dy), max(0, -dx): width - max(0, dx)] if dx >= 0 \
             else cost[: height - dy, -dx:]
         cb = cost[max(0, dy):, max(0, dx): width + min(0, dx)] if dx >= 0 else cost[max(0, dy):, : width + dx]
+        # a, b: node indices of each pixel and its neighbour at (dy, dx); ca, cb their costs.
         both = (a >= 0) & (b >= 0)
+        # scipy's max flow needs integer capacities: mean cost × weight × 1000, at least 1.
         capacity = np.maximum(((ca[both] + cb[both]) * 0.5 * weight * 1000).astype(np.int32), 1)
+        # Undirected: the same capacity both ways.
         rows.extend((a[both], b[both]))
         cols.extend((b[both], a[both]))
         caps.extend((capacity, capacity))
 
+    # Seed pixels are tied to their terminal with a capacity no cut can afford,
+    # so every seed pixel stays on its own side.
     huge = np.int32(2 ** 30)
     for seed, node, outward in ((hot, source, True), (cold, sink, False)):
         nodes = index[seed & filled]
@@ -791,6 +840,9 @@ def _min_cut(filled: np.ndarray, hot: np.ndarray, cold: np.ndarray, cost: np.nda
         (np.concatenate(caps), (np.concatenate(rows), np.concatenate(cols))),
         shape=(count + 2, count + 2), dtype=np.int32,
     )
+    # Max-flow / min-cut theorem: after the maximum flow, the pixels still
+    # reachable from the source through edges with capacity left are the
+    # source's side of the minimum cut.
     flow = csgraph.maximum_flow(graph, source, sink).flow
     residual = graph - flow
     residual.data = np.maximum(residual.data, 0)
@@ -822,6 +874,8 @@ def _through_tissue(filled: np.ndarray, start: np.ndarray) -> np.ndarray:
     """
     from skimage.graph import MCP
 
+    # Minimum-cost path (8-connected, cost 1 per tissue pixel, prohibitive off it)
+    # from every 7th pixel of *start*: a geodesic distance in overview pixels.
     walk = MCP(np.where(filled, 1.0, 1e9), fully_connected=True)
     costs, _trace = walk.find_costs([tuple(point) for point in np.argwhere(start)[::7]])
     return np.where(filled & (costs < 1e8), costs, 0.0)
@@ -860,6 +914,8 @@ def find_seeds(
 
     ``None`` when there is nothing to seed one of the halves from.
     """
+    # Density scaled 0–1 between its 10th and 98th percentile in the tissue;
+    # the labelled core is the largest connected patch above 0.5.
     normal = _normalised(density, filled)
     if normal is None:
         return None
@@ -880,6 +936,8 @@ def find_seeds(
 
     cold, rule = None, SEED_FAR
     if other_density is not None:
+        # Other organoid's core: its own label above 0.5 (same scaling), not in the
+        # labelled core, and higher than the labelled density there.
         other = _normalised(other_density, filled)
         if other is not None:
             core = (other > 0.5) & filled & ~hot & (other > normal)
@@ -889,6 +947,8 @@ def find_seeds(
                     # The same pulling back the labelled core gets below.
                     cold, rule = _far_part(core, from_hot), SEED_CHANNEL
     if cold is None:
+        # Fallback: tissue more than half the furthest geodesic distance from the
+        # labelled core, where the scaled density is under 0.2.
         cold = filled & (from_hot > 0.5 * float(from_hot.max())) & (normal < 0.2)
         if not cold.any():
             return None
@@ -908,6 +968,8 @@ def find_seeds(
             away = np.where(piece, from_cold, 0.0)
             kept |= piece & (away > 0.5 * float(away.max()))
         return (kept if kept.any() else hot), cold, rule
+    # Default ("core"): keep the part of the labelled core further from the cold
+    # seed than half its furthest pixel (the cold seed was pulled back the same way).
     hot = _far_part(hot, from_cold)
     return hot, cold, rule
 
@@ -934,6 +996,8 @@ def dominant_seeds(
     if normal is None:
         return None
     other = _normalised(other_density, filled) if other_density is not None else None
+    # How far the labelled density leads the other's (both 0–1); with no other
+    # label, its distance from 0.5, doubled (so the same lead means the same).
     margin = (normal - other) if other is not None else (2.0 * normal - 1.0)
     hot = _largest(filled & (margin > lead))
     cold = _largest(filled & (margin < -lead))
@@ -973,6 +1037,7 @@ def split_tissue(
     labelled = _min_cut(filled, hot, cold, price)
     if labelled is None:
         return None
+    # Each side keeps only its largest piece; stray islands become 0 (unassigned).
     halves = np.zeros(filled.shape, dtype=np.uint8)
     halves[_largest(labelled & filled)] = 1
     halves[_largest(~labelled & filled)] = 2
@@ -1010,6 +1075,10 @@ def straighten_cut(
 
     if not hot.any() or not cold.any():
         return halves
+    # A frame from the seeds' centroids: "across" points from the hot centroid to
+    # the cold one, "along" is perpendicular to it. The curve is a function
+    # offset(station): one offset in [0, span] (between the two centroids) at
+    # each station along "along".
     hot_at = np.argwhere(hot & filled).mean(axis=0)
     cold_at = np.argwhere(cold & filled).mean(axis=0)
     axis = cold_at - hot_at
@@ -1036,6 +1105,7 @@ def straighten_cut(
     blocked = ((hot | cold) & filled).astype(np.float32)
 
     def sample(ss):
+        """Price at every (station, offset) on the grid: bilinear, 1e6 inside a seed."""
         points = (start[:, None, None] + along[:, None, None] * ss[None, :, None]
                   + across[:, None, None] * o[None, None, :]).reshape(2, -1)
         shape = (len(ss), n_o)
@@ -1043,9 +1113,12 @@ def straighten_cut(
         seed = ndimage.map_coordinates(blocked, points, order=0, cval=0.0).reshape(shape) > 0
         return np.where(seed, 1e6, values).astype(np.float32)
 
-    at = sample(s)
-    mid = sample(s[:-1] + station / 2)
+    at = sample(s)                       # price at each station
+    mid = sample(s[:-1] + station / 2)   # and halfway to the next one
 
+    # Between two stations the curve moves d offset steps sideways (|d| <= BEND_MAX_STEPS);
+    # d sets the segment's length and heading. The bend price of going from one
+    # heading to the next is bend_um × (change in heading / 90°)².
     shifts = np.arange(-BEND_MAX_STEPS, BEND_MAX_STEPS + 1)
     n_d = len(shifts)
     seg_len_um = np.hypot(BEND_STATION_UM, shifts * BEND_OFFSET_UM)
@@ -1053,6 +1126,9 @@ def straighten_cut(
     turn = (heading[:, None] - heading[None, :]) / (np.pi / 2)
     bend = (float(bend_um) * turn ** 2).astype(np.float32)  # [arriving, leaving]
 
+    # Dynamic programming (Viterbi) over the stations. State: (offset, heading of
+    # the segment that arrived there); value = cheapest total price of a curve
+    # from the first station to that state. The curve may start at any offset.
     big = np.float32(1e12)
     value = np.zeros((n_o, n_d), dtype=np.float32)  # [offset, arriving heading]
     back = np.zeros((n_s - 1, n_o, n_d), dtype=np.int8)
@@ -1062,6 +1138,8 @@ def straighten_cut(
             leave = np.zeros((n_o, n_d), dtype=np.float32)
             choice = np.zeros((n_o, n_d), dtype=np.int8)
         else:
+            # For each offset and leaving heading, the best arriving heading
+            # (price so far + the bend between the two headings).
             totals = value[:, :, None] + bend[None, :, :]  # [offset, arriving, leaving]
             choice = totals.argmin(axis=1).astype(np.int8)
             leave = np.take_along_axis(totals, choice[:, None, :].astype(np.int64), axis=1)[:, 0, :]
@@ -1075,9 +1153,11 @@ def straighten_cut(
             # Segment from offset k to k + d: its two ends and its middle.
             half = k + d / 2.0
             middle = 0.5 * (mid[i, np.floor(half).astype(int)] + mid[i, np.ceil(half).astype(int)])
+            # Mean price along the segment (ends weighted 1, middle 2), times its length in µm.
             per_um = (at[i, k] + 2.0 * middle + at[i + 1, k + d]) / 4.0
             new[k + d, j] = leave[k, j] + per_um * seg_len_um[j]
         value = new
+    # Every curve crosses a seed (price 1e6): nothing to straighten.
     if float(value.min()) >= 1e5:
         return halves
 
@@ -1102,12 +1182,14 @@ def straighten_cut(
     if not in_hot.any() or not in_cold.any():
         return halves
     hot_left, cold_left = float(left[in_hot].mean()), float(left[in_cold].mean())
+    # At least 90 % of each seed must fall on its own side.
     if abs(hot_left - cold_left) < 0.9:
         return halves  # the curve does not keep the seeds apart
     hot_side = left if hot_left > 0.5 else ~left
     labels = np.where(within, np.where(hot_side, 1, 2), halves[rows, cols])
     out = np.zeros(filled.shape, dtype=np.uint8)
     out[rows, cols] = labels
+    # Again only the largest piece of each half is kept.
     straight = np.zeros(filled.shape, dtype=np.uint8)
     straight[_largest(out == 1)] = 1
     straight[_largest(out == 2)] = 2
@@ -1189,12 +1271,15 @@ def trace_interface(halves: np.ndarray, um: float) -> np.ndarray | None:
     curve is walked from one end to the other: the two ends are the pair of
     points furthest apart along it. Smoothed along its length (a running mean
     over :data:`JUNCTION_SMOOTH_UM`) so neither the line nor the band inherits
-    the wander of a cut made pixel by pixel.
+    the wander of a cut made pixel by pixel, then kept every 40 µm. In
+    overview pixels; side branches of the skeleton are dropped.
     """
     from scipy import ndimage
     from skimage.graph import MCP
     from skimage.morphology import skeletonize
 
+    # Pixels of half 1 next to half 2; thickened by one pixel so the boundary is
+    # one connected piece, its largest piece then thinned to a 1-pixel skeleton.
     touching = (halves == 1) & ndimage.binary_dilation(halves == 2)
     if not touching.any():
         return None
@@ -1202,6 +1287,8 @@ def trace_interface(halves: np.ndarray, um: float) -> np.ndarray | None:
     points = np.argwhere(curve)
     if len(points) < 5:
         return None
+    # The ends: from any skeleton pixel the furthest one along the skeleton is one
+    # end; the furthest from that is the other (double sweep). Path between them.
     cost = np.where(curve, 1.0, 1e9)
 
     def furthest(start) -> tuple[tuple[int, int], Any]:
@@ -1215,6 +1302,10 @@ def trace_interface(halves: np.ndarray, um: float) -> np.ndarray | None:
     path = np.asarray(walk.traceback(other_end), dtype=float)
     if len(path) < 5:
         return None
+    # Running mean of y and x over 150 µm worth of path points (ends padded with
+    # the end point, which pulls the ends in a little), then every point 40 µm
+    # worth of path points on. Counted in points, not length: a diagonal step
+    # is 1.4 pixels, so both are approximate.
     window = max(3, int(round(JUNCTION_SMOOTH_UM / um)))
     smooth = np.column_stack([
         ndimage.uniform_filter1d(path[:, axis], window, mode="nearest") for axis in (0, 1)
@@ -1234,6 +1325,7 @@ def find_junction(overview: Overview, options: JunctionOptions | None = None) ->
     options = options or JunctionOptions()
     um = overview.um
     channels = overview.channels
+    # 1. Tissue, its filled outline, and the labelled-cell density.
     valid = (channels > 0).all(axis=0)  # stitched scans pad with exact zeros
     tissue = tissue_mask(channels[overview.nuclear], valid, um, _others(channels, overview.nuclear, options.tissue_all_channels))
     filled = ndimage.binary_fill_holes(tissue)
@@ -1245,6 +1337,8 @@ def find_junction(overview: Overview, options: JunctionOptions | None = None) ->
         result.flags = quality_flags(result.metrics)
         return result
 
+    # 2. The cutting price from the block-averaged nuclear stain, and the other
+    #    organoid's label density when that channel holds cells.
     cost = None
     if options.follow_nuclear_line:
         stain = overview.nuclear_mean if overview.nuclear_mean is not None else channels[overview.nuclear]
@@ -1276,6 +1370,8 @@ def find_junction(overview: Overview, options: JunctionOptions | None = None) ->
         """The halves between *seeds* under the settings *how*, and the figures the cut gives about itself."""
         found: dict[str, float] = {}
         price = cost
+        # Optional extra terms (all off by default for the first search):
+        # tears floored at tear_price, + edge_weight × edge_cost, × label-change factor.
         if how["tear_price"] > 0 or how["edge_weight"] > 0 or how["label_change"] > 0:
             price = np.ones(filled.shape, np.float32) if cost is None else np.asarray(cost, np.float32).copy()
             if how["tear_price"] > 0:
@@ -1312,6 +1408,7 @@ def find_junction(overview: Overview, options: JunctionOptions | None = None) ->
             found = find_seeds(filled, density, other_density, patches=rule)
         return found if found is not None else find_seeds(filled, density, other_density)
 
+    # 3. Seeds and the first split (min cut, then straightened).
     first_how = {"tear_price": options.tear_price, "edge_weight": options.edge_weight,
                  "label_change": options.label_change, "bend_um": options.bend_um}
     seeds = seeds_by(options.seed_rule)
@@ -1320,6 +1417,8 @@ def find_junction(overview: Overview, options: JunctionOptions | None = None) ->
         result.seeds, result.second_seed = seeds[:2], seeds[2]
         halves, found = split(seeds, first_how)
         result.metrics.update(found)
+        # 4. Second search when the mean line price under the first cut says
+        #    there was no dark line to follow.
         if (options.no_seam_price > 0 and halves is not None
                 and found.get("Seam price", 0.0) > options.no_seam_price):
             # No dark line: the second set of settings, made for sections without one.
@@ -1335,6 +1434,8 @@ def find_junction(overview: Overview, options: JunctionOptions | None = None) ->
                     result.seeds, result.second_seed = again[:2], again[2]
                     result.metrics.update(found_again)
                     result.metrics["No-seam fallback"] = 1.0
+    # 5. The junction line (overview px -> µm) and the band; then the figures
+    #    the quality flags are read from.
     if halves is not None:
         result.halves = halves
         line = trace_interface(halves, um)
@@ -1431,10 +1532,14 @@ def _build_band(result: JunctionResult, overview: Overview, options: JunctionOpt
 
     um = overview.um
     shape = result.filled.shape
+    # A natural cubic spline through the 40 µm points, one point per overview pixel, drawn
+    # into the grid; distance (µm) of every pixel to the nearest drawn pixel.
     curve = fu.fit_spline(result.line_um, spacing=um)
     on_line = _draw_curve(curve / um, shape)
     distance = ndimage.distance_transform_edt(~on_line) * um
 
+    # Tissue on the chosen side of the smoothed line (half 2, the receiving
+    # organoid, by default), and the section outline rounded off at 25 µm.
     target = _side_of_line(result, curve / um, options.into_unlabelled)
     tissue = _smooth_mask(result.filled, SMOOTH_UM / um) if options.clip_to_tissue else np.ones(shape, bool)
     if options.clip_to_tissue and float(options.margin_um) > 0:
@@ -1444,8 +1549,11 @@ def _build_band(result: JunctionResult, overview: Overview, options: JunctionOpt
         rim = (ndimage.distance_transform_edt(~target) * um <= float(options.margin_um)) & ~result.filled
         target = target | rim
         tissue = tissue | rim
+    # gap_um ≤ distance ≤ gap_um + width_um (default 2–302 µm), on that side, on tissue.
+    # No caps: the band ends where the tissue does (width_um is the band's depth).
     band = target & tissue & (distance <= float(options.gap_um) + float(options.width_um))
     band &= distance >= float(options.gap_um)
+    # Rounded off (Gaussian at 25 µm, re-thresholded at 0.5), then clipped again.
     band = _smooth_mask(band, SMOOTH_UM / um) & tissue & (distance >= float(options.gap_um))
     # What smoothing leaves of a band is one piece and its crumbs.
     band = _largest(band) if band.any() else band
@@ -1921,6 +2029,8 @@ def store(path: Path, overview: Overview, result: JunctionResult, options: Junct
         "source": "automatic junction",
         "band_width_um": float(options.width_um),
         "start_gap_um": float(options.gap_um),
+        # Recorded for the macro's band (fusion.band_polygon); _build_band has no
+        # caps (it ends at the tissue outline), so this value is not used here.
         "cap_length_um": float(options.cap_um) or float(options.width_um),
         "past_tissue_edge_um": float(options.margin_um),
         "side": result.side,
