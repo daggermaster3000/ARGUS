@@ -325,7 +325,8 @@ Package built {built}.
 
 - **Results, interactive**: open `results/section_browser/section_browser.html` in a web browser (works straight from
   disk; Chrome, Edge or Firefox). Every section with its junction line, junction region, counted AF488⁺ objects
-  (home white, crossed magenta), the human annotators' dots, a table and plots; zoom in for the full-resolution image
+  (home white, crossed magenta), the objects too small to count (≤ 20 µm², a toggle), the human annotators' dots,
+  a table and plots; zoom in for the full-resolution image
   and outlines. `figure_builder.html` beside it re-draws the paper's figures with any normalisation and writes the
   Methods text for them.
 - **Paper figures**: `figures/` (PDF, PNG, SVG); their tables in `results/tables/`.
