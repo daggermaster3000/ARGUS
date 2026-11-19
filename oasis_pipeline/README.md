@@ -29,7 +29,7 @@ python check.py                  # compare rerun/ with the shipped data and resu
 | `counting` | the AF488 mask of every section, the counted objects, each cell's cover (`oasis/counting.py`) | ~1 h | `rerun/counting/` |
 | `sizes` | tissue area, assembloid length, the slim cell cache (`oasis/sizes.py`) | ~10 min | `rerun/derived/` |
 | `notebooks` | `notebooks/01_validation.ipynb` (the count against the hand counts) and `02_biology.ipynb` (WT3 against GD1): every statistic, figure and table | ~15 min | `rerun/figures/`, `rerun/notebooks/` |
-| `browser` | the section browser and figure builder, with full-resolution tiles and outlines | ~2–3 h | `rerun/results/section_browser/` |
+| `browser` | the section browser and figure builder, with full-resolution tiles, outlines and the objects too small to count | ~2.5–3.5 h | `rerun/results/section_browser/` |
 
 `python run.py --steps counting,notebooks` runs some steps only; `--workers 8` processes more sections at a time
 (each needs ~2 GB of memory); `--sections 5` tries the pipeline on the first five sections (the notebooks need all
@@ -74,6 +74,7 @@ oasis/sizes.py           step "sizes"
 oasis/segment.py         step "segment" (optional)
 oasis/glmm.py            generalised linear mixed models (sensitivity analysis in 02_biology)
 oasis/browser/           step "browser": section_browser.py, browser_tiles.py, browser_outlines.py,
-                         objects_data.py, and the two pages (section_browser.html, figure_builder.html)
+                         browser_small.py (objects too small to count), objects_data.py, and the two pages
+                         (section_browser.html, figure_builder.html)
 notebooks/               01_validation.ipynb, 02_biology.ipynb
 ```

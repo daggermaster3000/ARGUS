@@ -21,6 +21,8 @@ header .method label { display: inline-flex; gap: 4px; align-items: baseline; }
 #maskStatus:empty { display: none; }
 #cpStatus { position: absolute; right: 12px; bottom: 34px; color: #fff; font-size: 12px; background: rgba(0,0,0,.6); padding: 2px 6px; pointer-events: none; }
 #cpStatus:empty { display: none; }
+#smallStatus { position: absolute; right: 12px; bottom: 56px; color: #fff; font-size: 12px; background: rgba(0,0,0,.6); padding: 2px 6px; pointer-events: none; }
+#smallStatus:empty { display: none; }
 button, select, input[type=search] { font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--ink); padding: 3px 8px; border-radius: 0; }
 button.on { background: var(--ink); color: var(--paper); }
 button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
@@ -160,6 +162,7 @@ body.gallery #gallery { display: grid; }
           <g id="chR" style="mix-blend-mode: screen"><image id="imgR" x="0" y="0"></image><g id="tilesR" filter="url(#fltRt)"></g></g>
           <g id="gRegion" fill="none" stroke="#d9d9d9" stroke-width="1.5" stroke-dasharray="5 4"></g>
           <g id="gLine" fill="none" stroke="#ffffff" stroke-width="2"></g>
+          <g id="gSmall" fill="none" stroke="#00e5ff" stroke-width="1"></g>
           <g id="gObjects" fill="#ffffff" fill-opacity="0" stroke-width="1.2" stroke-linejoin="round"></g>
           <g id="gCellpose" fill="#ffffff" fill-opacity="0" stroke-width="1.2" stroke-linejoin="round"></g>
           <g id="gHumans" fill="none" stroke="#ffffff" stroke-width="1.3"></g>
@@ -171,6 +174,7 @@ body.gallery #gallery { display: grid; }
           <label><input type="checkbox" id="tHumans" checked> human dots</label>
           <label title="Cellpose fine-tuned on the annotators' AF488+ dots (cellpose488_retrain.py), on the 27 human-counted sections only. Yellow at home, orange crossed, grey dashed outside the section (not counted). Drawn over the chosen method's outlines."><input type="checkbox" id="tCellpose"> retrained Cellpose
             <select id="tCpModel"><option value="cv">cross-validated</option><option value="other">trained on the other annotator</option></select></label>
+          <label title="AF488 mask objects of 20 µm² or smaller, which the size filter removes before counting (browser_small.py). Gaussian mask only, at the chosen threshold. Cyan in the section, grey dashed outside it. Not counted anywhere."><input type="checkbox" id="tSmall"> too small to count</label>
           <label><input type="checkbox" id="tImage" checked> image</label>
           <label>channel <select id="tChannel"><option value="g">AF488 (green)</option><option value="r">AF555 (red)</option><option value="rg">both</option></select></label>
           <button id="tContrast" title="Contrast limits and gamma of each channel, as in napari">brightness</button>
@@ -192,6 +196,7 @@ body.gallery #gallery { display: grid; }
         <div id="scalebar"><div></div><span></span><em id="tileStatus"></em></div>
         <div id="maskStatus"></div>
         <div id="cpStatus"></div>
+        <div id="smallStatus"></div>
       </div>
       <aside id="info"></aside>
     </div>
@@ -204,6 +209,8 @@ body.gallery #gallery { display: grid; }
 <script src="data.js"></script>
 <!-- parts/cellpose/index.js (browser_cellpose.py): which sections have the retrained Cellpose's outlines -->
 <script src="parts/cellpose/index.js" onerror="window.CP_INDEX = {}"></script>
+<!-- parts/small/index.js (browser_small.py): objects the size filter removed, per section and threshold -->
+<script src="parts/small/index.js" onerror="window.SMALL_INDEX = {}"></script>
 <script>
 "use strict";
 const INK = "#000000", DARK = "#4d4d4d", MID = "#8c8c8c", LIGHT = "#d9d9d9", MAGENTA = "#ff00ff";
@@ -308,7 +315,7 @@ function setMethod(key, redraw) {
   if (!redraw) return;
   refresh();
   if (window.Plotly) { plotHuman(); plotStrip(); plotSize(); }
-  if (CUR) { drawObjects(CUR); info(CUR); markPlots(CUR); }
+  if (CUR) { drawObjects(CUR); drawSmall(CUR); info(CUR); markPlots(CUR); }
 }
 
 // ------------------------------------------------------------------ table and filters
@@ -636,10 +643,11 @@ function draw(s) {
   $("tilesG").innerHTML = ""; $("tilesR").innerHTML = "";
   scheduleTiles();
   const gL = $("gLine"), gR = $("gRegion"), gO = $("gObjects"), gH = $("gHumans");
-  for (const g of [gL, gR, gO, gH, $("gCellpose")]) g.innerHTML = "";
+  for (const g of [gL, gR, gO, gH, $("gCellpose"), $("gSmall")]) g.innerHTML = "";
   if (s.line && s.line.length) gL.appendChild(el("polyline", { points: s.line.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
   for (const c of s.region || []) gR.appendChild(el("polygon", { points: c.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
   drawObjects(s);
+  drawSmall(s);
   drawCellpose(s);
   const arm = 4;
   for (const h of s.humans || []) {
@@ -746,6 +754,57 @@ function drawCellpose(s) {
     g.appendChild(frag);
     const n = d.side.filter((v) => v >= -1).length, crossed = d.side.filter((v) => v === 1).length, out = d.side.length - n;
     $("cpStatus").textContent = "retrained Cellpose (" + CP_MODEL[model] + "): " + n + " cells, " + crossed + " crossed" + (out ? ", " + out + " outside the section" : "");
+  });
+}
+
+// The objects the size filter removed (browser_small.py): parts/small/<id>__<key>.js calls window.SMALL_LOADED(id, key,
+// {q, rings, area, in}), rings as the full-resolution outlines. Gaussian mask only (gauss-3, -5, -8).
+const SMALL = {}, SMALL_WAIT = {};
+window.SMALL_LOADED = (id, key, d) => { SMALL[id + "__" + key] = d; };
+function loadSmall(id, key) {
+  const k = id + "__" + key;
+  if (k in SMALL) return Promise.resolve(SMALL[k]);
+  if (SMALL_WAIT[k]) return SMALL_WAIT[k];
+  SMALL_WAIT[k] = new Promise((resolve) => {
+    const tag = document.createElement("script");
+    tag.src = "parts/small/" + encodeURIComponent(k) + ".js";
+    tag.onload = () => { tag.remove(); delete SMALL_WAIT[k]; if (!(k in SMALL)) SMALL[k] = null; resolve(SMALL[k]); };
+    tag.onerror = () => { tag.remove(); delete SMALL_WAIT[k]; SMALL[k] = null; resolve(null); };
+    document.head.appendChild(tag);
+  });
+  return SMALL_WAIT[k];
+}
+function drawSmall(s) {
+  const g = $("gSmall"), key = KEY, on = $("tSmall").checked;
+  g.innerHTML = "";
+  $("smallStatus").textContent = "";
+  if (!on || !s) return;
+  if (!/^gauss-/.test(key)) { $("smallStatus").textContent = "too-small objects: only for the Gaussian mask"; return; }
+  const have = (window.SMALL_INDEX || {})[s.id];
+  if (!have || !(key in have)) { $("smallStatus").textContent = "too-small objects: not traced for this section yet"; return; }
+  $("smallStatus").textContent = "too-small objects loading…";
+  loadSmall(s.id, key).then((d) => {
+    if (CUR !== s || KEY !== key || !$("tSmall").checked) return;
+    if (!d) { $("smallStatus").textContent = "too-small objects: file missing"; return; }
+    let inside = "", outside = "";
+    for (let i = 0; i < d.rings.length; i++) {
+      let path = "";
+      for (const r of d.rings[i]) {
+        if (r.length < 2) continue;
+        path += "M" + r[0] + " " + r[1];
+        for (let j = 2; j < r.length; j += 2) path += "l" + r[j] + " " + r[j + 1];
+        path += "Z";
+      }
+      if (d.in[i]) inside += path; else outside += path;
+    }
+    // one path per kind: hundreds of specks per section, no tooltip each
+    const t = "scale(" + 1 / d.q + ")";
+    if (inside) g.appendChild(el("path", { d: inside, "vector-effect": "non-scaling-stroke", transform: t }));
+    if (outside) g.appendChild(el("path", { d: outside, stroke: MID, "stroke-dasharray": "3 3", "vector-effect": "non-scaling-stroke", transform: t }));
+    const n = d.in.filter((v) => v).length, area = d.area.filter((_, i) => d.in[i]);
+    const median = area.length ? area.slice().sort((a, b) => a - b)[Math.floor(area.length / 2)] : 0;
+    $("smallStatus").textContent = "too small (≤ 20 µm², removed before counting): " + n + " in the section" +
+      (n ? ", median " + median.toFixed(1) + " µm²" : "") + (d.in.length > n ? ", " + (d.in.length - n) + " outside it" : "");
   });
 }
 
@@ -951,6 +1010,7 @@ function setupStage() {
   window.addEventListener("resize", () => { scaleBar(); scheduleTiles(); });
   for (const id of ["tLine", "tRegion", "tObjects", "tHumans", "tImage", "tChannel"]) $(id).onchange = applyToggles;
   for (const id of ["tCellpose", "tCpModel"]) $(id).onchange = () => { drawCellpose(CUR); saveUI(); };
+  $("tSmall").onchange = () => { drawSmall(CUR); saveUI(); };
   $("prev").onclick = () => step(-1);
   $("next").onclick = () => step(1);
   $("fit").onclick = fit;
@@ -986,7 +1046,7 @@ function saveUI() {
   const ui = {
     filters: { geno: $("fGeno").value, exp: $("fExp").value, qc: $("fQc").value, human: $("fHuman").checked, name: $("fName").value },
     sort: [sortKey, sortDir], method: KEY,
-    toggles: Object.fromEntries(["tLine", "tRegion", "tObjects", "tHumans", "tImage", "tCellpose"].map((id) => [id, $(id).checked])),
+    toggles: Object.fromEntries(["tLine", "tRegion", "tObjects", "tHumans", "tImage", "tCellpose", "tSmall"].map((id) => [id, $(id).checked])),
     cpModel: $("tCpModel").value,
     channel: $("tChannel").value, contrast: CONTRAST,
     size: { x: $("sizeX").value, y: $("sizeY").value, logX: $("logX").checked, logY: $("logY").checked },

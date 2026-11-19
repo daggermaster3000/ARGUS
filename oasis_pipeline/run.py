@@ -51,14 +51,15 @@ def run_notebooks() -> int:
 
 
 def run_browser(workers: int, limit: int = 0) -> int:
-    from oasis.browser import browser_outlines, browser_tiles, section_browser
+    from oasis.browser import browser_outlines, browser_small, browser_tiles, section_browser
 
-    for module in (section_browser, browser_tiles, browser_outlines):
+    for module in (section_browser, browser_tiles, browser_outlines, browser_small):
         module.WORKERS = workers
     argv = [str(limit)] if limit else []
     code = section_browser.main(argv)
     code |= browser_tiles.main(argv)
     code |= browser_outlines.main(argv)
+    code |= browser_small.main(argv)
     return code
 
 
