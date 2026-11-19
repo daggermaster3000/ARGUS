@@ -670,7 +670,8 @@ def has_cells(channel: np.ndarray, tissue: np.ndarray, um: float) -> bool:
     from scipy import ndimage
 
     data = np.asarray(channel, dtype=np.float32)
-    # The channel less its 45 µm local median, inside the tissue.
+    # The channel less its 45 µm local median, inside the tissue. Fixed at 45 µm,
+    # not options.median_um (the same as MEDIAN_UM by default).
     size = max(3, int(round(45.0 / um)) | 1)
     over = (data - ndimage.median_filter(data, size))[tissue]
     if over.size < 100:
@@ -961,7 +962,10 @@ def find_seeds(
     cold, rule = None, SEED_FAR
     if other_density is not None:
         # Other organoid's core: its own label above 0.5 (same scaling), not in the
-        # labelled core, and higher than the labelled density there.
+        # labelled core, and higher than the labelled density there. Each map is
+        # scaled on its own (cell_density by its 99.5th percentile, _normalised by
+        # its 10th–98th percentiles), so "higher" compares relative densities,
+        # not raw brightness.
         other = _normalised(other_density, filled)
         if other is not None:
             core = (other > 0.5) & filled & ~hot & (other > normal)
@@ -1367,6 +1371,11 @@ def find_junction(overview: Overview, options: JunctionOptions | None = None) ->
     if options.follow_nuclear_line:
         stain = overview.nuclear_mean if overview.nuclear_mean is not None else channels[overview.nuclear]
         cost = line_cost(stain, filled, um)
+    # The other organoid's density (AF555 here) is made by the same function and
+    # settings as the labelled one above (45 µm median, 99.5th-percentile scaling,
+    # 100 µm Gaussian over tissue), but only when has_cells finds cells in that
+    # channel; the labelled channel is not checked. Without it, the second seed
+    # falls back to low-density tissue far from the labelled core (find_seeds).
     other_density = None
     if (options.seed_from_other_channel and overview.other is not None
             and has_cells(channels[overview.other], tissue, um)):
