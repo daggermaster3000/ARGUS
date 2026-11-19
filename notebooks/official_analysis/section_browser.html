@@ -174,7 +174,7 @@ body.gallery #gallery { display: grid; }
           <label><input type="checkbox" id="tHumans" checked> human dots</label>
           <label title="Cellpose fine-tuned on the annotators' AF488+ dots (cellpose488_retrain.py), on the 27 human-counted sections only. Yellow at home, orange crossed, grey dashed outside the section (not counted). Drawn over the chosen method's outlines."><input type="checkbox" id="tCellpose"> retrained Cellpose
             <select id="tCpModel"><option value="cv">cross-validated</option><option value="other">trained on the other annotator</option></select></label>
-          <label title="AF488 mask objects of 20 µm² or smaller, which the size filter removes before counting (browser_small.py). Gaussian mask only, at the chosen threshold. Cyan in the section, grey dashed outside it. Not counted anywhere."><input type="checkbox" id="tSmall"> too small to count</label>
+          <label title="AF488 mask objects at or below the chosen method's size filter (20, 10 or 5 µm²), which it removes before counting (browser_small.py). Gaussian mask only, at the chosen threshold. Cyan in the section, grey dashed outside it. Not counted anywhere."><input type="checkbox" id="tSmall"> too small to count</label>
           <label><input type="checkbox" id="tImage" checked> image</label>
           <label>channel <select id="tChannel"><option value="g">AF488 (green)</option><option value="r">AF555 (red)</option><option value="rg">both</option></select></label>
           <button id="tContrast" title="Contrast limits and gamma of each channel, as in napari">brightness</button>
@@ -779,7 +779,8 @@ function drawSmall(s) {
   g.innerHTML = "";
   $("smallStatus").textContent = "";
   if (!on || !s) return;
-  if (!/^gauss-/.test(key)) { $("smallStatus").textContent = "too-small objects: only for the Gaussian mask"; return; }
+  if (!(METHOD.key === "gauss" || METHOD.of === "gauss")) { $("smallStatus").textContent = "too-small objects: only for the Gaussian mask"; return; }
+  const limit = METHOD.min_um2 || 20;
   const have = (window.SMALL_INDEX || {})[s.id];
   if (!have || !(key in have)) { $("smallStatus").textContent = "too-small objects: not traced for this section yet"; return; }
   $("smallStatus").textContent = "too-small objects loading…";
@@ -803,7 +804,7 @@ function drawSmall(s) {
     if (outside) g.appendChild(el("path", { d: outside, stroke: MID, "stroke-dasharray": "3 3", "vector-effect": "non-scaling-stroke", transform: t }));
     const n = d.in.filter((v) => v).length, area = d.area.filter((_, i) => d.in[i]);
     const median = area.length ? area.slice().sort((a, b) => a - b)[Math.floor(area.length / 2)] : 0;
-    $("smallStatus").textContent = "too small (≤ 20 µm², removed before counting): " + n + " in the section" +
+    $("smallStatus").textContent = "too small (≤ " + limit + " µm², removed before counting): " + n + " in the section" +
       (n ? ", median " + median.toFixed(1) + " µm²" : "") + (d.in.length > n ? ", " + (d.in.length - n) + " outside it" : "");
   });
 }

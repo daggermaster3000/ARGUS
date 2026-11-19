@@ -2,7 +2,8 @@
 
 ``section_browser.py`` stores every method's outlines simplified to 0.5 overview pixels (~0.65 µm), which is right
 for the overview but cuts corners once the page shows the full-resolution tiles (``browser_tiles.py``). This script
-traces the objects of the Gaussian 20 µm background mask (:data:`KEYS`: 3, 5 and 8 SD; 8 SD is the counting method)
+traces the objects of the Gaussian 20 µm background mask (:data:`KEYS`: 3, 5 and 8 SD; 8 SD is the counting method;
+and its variants with a 10 or 5 µm² size filter)
 again, at ~0.325 µm per pixel, without simplifying (only points on a straight run are dropped), so an outline
 follows the pixels of the mask that was counted.
 
@@ -42,7 +43,8 @@ sys.path.insert(0, str(HERE))
 DATA = Path(r"D:\Slidescanner extracted")
 RUN = DATA / "cells_analysis" / "2026-10-28_090440 re-scored"     # the cells-analysis run
 BROWSER = DATA / "run_analysis_20261028" / "section_browser"      # section_browser.py's folder
-KEYS = ("gauss-3", "gauss-5", "gauss-8")   #: the Gaussian mask's thresholds traced at full resolution
+KEYS = tuple(f"{m}-{k}" for m in ("gauss", "gauss10", "gauss5") for k in (3, 5, 8))   #: the Gaussian mask (and its size variants)
+                                  #: at each threshold, traced at full resolution
 STRAIGHT_PX = 0.05                #: points within this many scan pixels of a straight run are dropped
 WORKERS = 4                       #: each holds a slide scan's planes (~2 GB)
 VERSION = 2                       #: 2: objects outside the section dropped
@@ -53,11 +55,15 @@ def fine_file(out: Path, sid: str, key: str) -> Path:
     return out / "parts" / "fine" / f"{sid}__{key}.js"
 
 
-def fine_done(out: Path, sid: str) -> bool:
+def key_done(out: Path, sid: str, key: str) -> bool:
     try:
-        return all(f'"version":{VERSION},' in fine_file(out, sid, k).read_text(encoding="utf-8")[:200] for k in KEYS)
+        return f'"version":{VERSION},' in fine_file(out, sid, key).read_text(encoding="utf-8")[:200]
     except OSError:
         return False
+
+
+def fine_done(out: Path, sid: str) -> bool:
+    return all(key_done(out, sid, k) for k in KEYS)
 
 
 def fine_rings(crop: np.ndarray, top: int, left: int) -> list[list[int]]:
@@ -111,10 +117,14 @@ def run_fine(name: str, out: str) -> str:
     cuts = sb.robust_cuts(signal, tissue, sb.METHODS["gauss"]["ks"])[0]
     (out / "parts" / "fine").mkdir(parents=True, exist_ok=True)
     said = []
-    for key in KEYS:
+    for key in [k for k in KEYS if not key_done(out, sid, k)]:         # only what is missing
+        if key not in stored_counts:
+            said.append(f"{key} not counted yet (section_browser.py first)")
+            continue
         k = int(key.split("-")[1])
         cut = float(stored.get(f"kmad{k:g}", cuts[k]))
-        mask = sb.section_outline.drop_outside(sb.cleaned((signal > cut) & tissue, voxel), outline, line_um, voxel)[0]
+        mask = sb.section_outline.drop_outside(sb.cleaned((signal > cut) & tissue, voxel, sb.min_um2(key)), outline,
+                                               line_um, voxel)[0]
         labelled = label(mask, connectivity=2)
         rings = [fine_rings(p.image, p.bbox[0], p.bbox[1]) for p in regionprops(labelled)]
         if len(rings) != stored_counts[key]["n"]:
