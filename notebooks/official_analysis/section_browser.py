@@ -56,7 +56,8 @@ Full resolution when zoomed in: ``python notebooks/official_analysis/browser_til
 ``tiles/`` (512 px tiles of each channel at the scan's pixels and halved, ~7 GB for the 614 sections); without it
 the page shows the ~1.3 µm overview only. ``python notebooks/official_analysis/browser_outlines.py`` writes
 ``parts/fine/``: the Gaussian mask's outlines traced at the scan's pixels, which the page uses instead of the
-simplified ones here.
+simplified ones here. ``python notebooks/official_analysis/browser_small.py`` writes ``parts/small/``: the objects the
+size filter removed (≤ 20 µm²), for the page's "too small to count" toggle.
 """
 from __future__ import annotations
 
