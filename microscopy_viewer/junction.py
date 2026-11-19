@@ -591,27 +591,47 @@ def cell_density(
     channel: np.ndarray, tissue: np.ndarray, filled: np.ndarray, um: float,
     radius_um: float = 100.0, median=True, median_um: float = MEDIAN_UM,
 ) -> np.ndarray:
-    """Local density of labelled cells, as a smooth map over the tissue.
+    """Local density of labelled cells, as a smooth map over the tissue (a.u., 0–1).
 
-    A cell is a point brighter than its surroundings, so the map is built from
-    what is left after a median of the neighbourhood is taken away. Diffuse
-    signal is due to autofluorescence. a fold disappears with
-    the median. The smoothing is normalised by the tissue under the kernel, so
-    the edge of the section is not read as a fall in density.
+    Not a count of cells: the local mean, over about *radius_um*, of how far
+    the channel stands above its own neighbourhood. On the overview (one
+    sampled pixel every ~5 µm, maximum over Z), in three steps:
 
-    The median is taken over *median_um* (an odd number of pixels, at least
-    3). With *median* off the channel is used as it is.
+    1. **Prominence** (:func:`cell_prominence`): the channel less its median
+       over a square of *median_um* a side (45 µm, 9 overview pixels, by
+       default), negative values set to 0. A labelled cell is a few µm across
+       and stands above that median. Diffuse signal broader than the window —
+       autofluorescence, a fold, a thicker part of the section — is part of
+       the median and is taken away with it.
+    2. **Scaled**: divided by the prominence's 99.5th percentile inside the
+       tissue and clipped to 0–1, so sections and channels of different
+       brightness are on one scale and a few very bright spots do not dominate.
+    3. **Smoothed over the tissue only**: a Gaussian of sigma *radius_um*
+       (100 µm by default) of the prominence on tissue, divided by the same
+       Gaussian of the tissue mask. This is a weighted mean over tissue pixels,
+       so the slide outside the section and holes inside it do not dilute the
+       density near them, and the section's edge is not read as a fall in density.
+
+    Returned on *filled* (the tissue with its holes filled; holes take the mean
+    of the tissue around them), 0 elsewhere. With *median* off, step 1 uses the
+    channel as it is (clipped at 0).
+
+    Used for the seeds (:func:`find_seeds`, :func:`dominant_seeds`, after
+    rescaling by :func:`_normalised`), :func:`edge_cost`, and the "Density
+    contrast" and band-density figures.
     """
     from scipy import ndimage
 
-    # Channel less its local median (clipped at 0), scaled 0–1 by its 99.5th percentile in the tissue.
+    # 1. Channel less its local median, clipped at 0.
     prominence = cell_prominence(channel, um, median, median_um)
     inside = prominence[tissue]
     if inside.size == 0:
         return np.zeros(prominence.shape, dtype=np.float32)
+    # 2. Scaled 0–1 by its 99.5th percentile in the tissue (brighter is clipped to 1).
     prominence = np.clip(prominence / (float(np.percentile(inside, 99.5)) + 1e-6), 0, 1)
-    # Normalised convolution: Gaussian (sigma = radius_um) of the tissue's values
-    # divided by the same Gaussian of the tissue mask, i.e. a local mean over tissue only.
+    # 3. Normalised convolution: Gaussian (sigma = radius_um) of the tissue's values
+    #    divided by the same Gaussian of the tissue mask, i.e. a local mean over tissue only.
+    #    The weight floor (1e-3) avoids dividing by ~0 far from any tissue.
     sigma = radius_um / um
     amount = ndimage.gaussian_filter(np.where(tissue, prominence, 0).astype(np.float32), sigma)
     weight = ndimage.gaussian_filter(tissue.astype(np.float32), sigma)
@@ -620,9 +640,13 @@ def cell_density(
 
 def cell_prominence(channel: np.ndarray, um: float, median: bool = True,
                     median_um: float = MEDIAN_UM) -> np.ndarray:
-    """What :func:`cell_density` counts: the channel less its local median.
+    """What :func:`cell_density` averages: the channel less its local median, clipped at 0.
 
-    With *median* off, or a size of 0, the channel itself.
+    The median is over a square of *median_um* a side, rounded to an odd
+    number of pixels (at least 3). Bright spots covering less than half the
+    window's area (cells, small clusters) stand out; signal covering more of
+    it (diffuse background) sets the median and is removed.
+    With *median* off, or a size of 0, the channel itself, clipped at 0.
     """
     from scipy import ndimage
 
