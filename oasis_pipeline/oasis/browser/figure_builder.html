@@ -241,7 +241,7 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
       <button id="bAllCsv" title="Every section with every positivity method and threshold (crossed_gauss-8, home_gauss-8, …, threshold_cellraw-7), every section variable and the notebook's per-section outcomes">Download all raw counts (CSV)</button>
       <span id="dataMsg" class="note"></span></div>
     <div id="dataTable"></div>
-    <p class="note">Further data. Every counted object (AF488 mask, counting method) with its position, area, distance to the junction line and side:
+    <p class="note">Further data. Every counted object (AF488 mask, counting method) with its position, area, distance to the junction interface and side:
       <code>af488_mask/&lt;section&gt;/objects.parquet</code> in the run's analysis folder (<code>mask</code> = "<span id="maskName">kmad8</span>"), with the thresholds in
       <code>summary.json</code>. The objects drawn in the section browser, per section: <code>section_browser/parts/&lt;section id&gt;.json</code>.
       The notebook's per-section outcomes: <code>figures_official/sections_table.csv</code> (the same as <code>sections_table.js</code> here).
@@ -377,7 +377,7 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
         <span></span><textarea id="dsOf" rows="1" spellcheck="false" aria-label="object formula"></textarea>
         <span></span><div id="dsOfMsg" class="fmsg"></div>
       </div>
-      <div class="row"><label title="Crossed: the object's centroid lies past the junction line (extended past its ends), in the organoid where AF488 is not at home.">Objects
+      <div class="row"><label title="Crossed: the object's centroid lies past the junction interface (extended past its ends), in the organoid where AF488 is not at home.">Objects
         <select id="dsSide"><option value="all">all</option><option value="crossed">crossed only</option><option value="home">home only</option></select></label>
         <label>Junction region <select id="dsObjRegion"><option value="all">in or out</option><option value="in">inside only</option><option value="out">outside only</option></select></label></div>
       <details class="hint" style="border:0;padding:0"><summary style="font-weight:normal">Object variables</summary><div id="dsObjVars" style="font-size:12px"></div></details>
@@ -417,7 +417,7 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
   <!-- ---------------------------------------------------------------- the human against automated panel -->
   <div class="pane" id="pane-hv-data">
     <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label></div>
-    <p class="hint">Every human-counted section of the annotators ticked: the human count against the automated count of the positivity method chosen in the sidebar, in the area the human counted (annotator 1 the whole section; annotator 2 from 50 µm before the junction line on). The same ticks also apply to the human counts everywhere else on the page.</p>
+    <p class="hint">Every human-counted section of the annotators ticked: the human count against the automated count of the positivity method chosen in the sidebar, in the area the human counted (annotator 1 the whole section; annotator 2 from 50 µm before the junction interface on). The same ticks also apply to the human counts everywhere else on the page.</p>
     <div class="row"><label>Plot <select id="hvPlot"><option value="scatter">automated against human (log–log)</option><option value="ba">Bland–Altman (ratio)</option><option value="groups">ratio by group: sections, slide means and tests</option></select></label></div>
     <div class="row"><label title="The groups of the ratio-by-group plot and of its table. Genotype × experiment compares WT3 with GD1 within each experiment; experiment compares the experiments (both genotypes together).">Group by <select id="hvGroup"><option value="genotype">genotype</option><option value="geno_exp">genotype × experiment</option><option value="experiment">experiment</option></select></label></div>
     <p class="hint">Ratio by group: one small marker per human-counted section (automated ÷ human), one large marker per slide (the geometric mean of its sections), and the geometric mean of the slide means with its 95 % CI. The tests use slides as the unit (sections of one slide are not independent): Welch t and Mann–Whitney on the slide means of ln(ratio), and a linear mixed model of ln(ratio) on the sections with the slide as a random intercept. Each group's ratio is also tested against 1 (one-sample t on its slide means).</p>
@@ -1216,15 +1216,15 @@ const $ = (id) => document.getElementById(id);
 const METHOD_VARS = [
   ["total", "AF488⁺ objects / cells in the whole section", (c) => c.n],
   ["region", "… in the junction region", (c) => c.reg],
-  ["crossed", "… crossed: on the far side of the junction line (extended past its ends), where AF488 is not at home", (c) => c.crossed],
+  ["crossed", "… crossed: on the far side of the junction interface (extended past its ends), where AF488 is not at home", (c) => c.crossed],
   ["home", "… on the home side (every one not crossed)", (c) => c.home],
   ["auto_in_human_area", "… in the area the human counted (human-counted sections only)", null],
   ["threshold", "the method's threshold in this section (median + k robust SD)", (c) => c.thr],
 ];
 // Per-section values of the notebook (sections_table.js); column → short name
 const SECTION_VARS = [
-  ["junction_mm", "length (mm)", "length of the junction line, mm"],
-  ["junction_um", null, "length of the junction line, µm"],
+  ["junction_mm", "length (mm)", "length of the junction interface, mm"],
+  ["junction_um", null, "length of the junction interface, µm"],
   ["area_mm2", "tissue area (mm²)", "assembloid (tissue) area of the section, mm²"],
   ["nuclei", "cells in section", "segmented nuclei in the section"],
   ["assembloid_um", "assembloid length (µm)", "assembloid length across the line, µm"],
@@ -1988,7 +1988,7 @@ function modelMethods() {
       ", and maximised with a quasi-Newton (BFGS) method" + n + ". The genotype effect is the odds ratio WT3 ÷ GD1, exp(β), with its Wald 95 % " +
       "confidence interval and two-sided P (standard errors from the numerical Hessian of the log-likelihood).";
   }
-  const EXPO_WORDS = { junction_mm: ["the junction line's length (mm)", "per mm of junction line"],
+  const EXPO_WORDS = { junction_mm: ["the junction interface's length (mm)", "per mm of junction interface"],
     area_mm2: ["the assembloid (tissue) area of the section (mm²)", "per mm² of assembloid"], nuclei: ["the number of segmented nuclei", "per nucleus"] };
   const ew = EXPO_WORDS[ST.mExposure] || [words(ST.mExposure), "per unit of " + ST.mExposure];
   const expo = ST.mExposure === "1" ? "" : ", the logarithm of " + ew[0] + " as an offset";
@@ -2957,7 +2957,7 @@ function titleAnnotation(text, plotH, top, z, fs, C) {
 // A histogram, kernel density, ECDF, violin or box plot of one value per section (a formula, as the dot plot's) or
 // per AF488⁺ object of the counting method (objects.js from objects_data.py, loaded only when objects are shown).
 const OBJECT_VARS = [
-  ["away", "distance past the junction line, µm (> 0 crossed, ≤ 0 home; the line extended past its ends, sides.py)"],
+  ["away", "distance past the junction interface, µm (> 0 crossed, ≤ 0 home; the line extended past its ends, sides.py)"],
   ["area", "the object's area, µm²"],
   ["is_crossed", "1 if the object crossed (away > 0), else 0"],
   ["in_region", "1 if its centroid lies in the junction region, else 0"],
@@ -2969,7 +2969,7 @@ const KNOWN_OBJ = new Set([...OBJECT_VARS, ...SECTION_VARS, ...NOTEBOOK_VARS].ma
 const OBJECT_PRESETS = [["away", "distance past the line (µm)"], ["away / assembloid_um", "distance past the line ÷ assembloid length"],
   ["away / home_depth", "distance past the line ÷ home depth"], ["area", "area (µm²)"], ["edge", "distance to the organoid edge (µm)"],
   ["edge_rel", "distance to the edge ÷ local half-width"]];
-const OBJECT_TITLES = { away: "Distance past the junction line (µm)", "away / assembloid_um": "Distance past the line ÷ assembloid length",
+const OBJECT_TITLES = { away: "Distance past the junction interface (µm)", "away / assembloid_um": "Distance past the line ÷ assembloid length",
   "away / home_depth": "Distance past the line ÷ home depth", area: "Object area (µm²)", edge: "Distance to the organoid edge (µm)",
   edge_rel: "Distance to the edge ÷ local half-width" };
 const DS_INPUTS = { dsOn: "on", dsUnit: "unit", dsF: "f", dsOf: "of", dsGroup: "group", dsSide: "side", dsObjRegion: "region", dsKind: "kind",
@@ -3409,7 +3409,7 @@ function distMethods() {
   const what = objects ? "the value " + formulaInWords(ds.of).replace(/\baway\b/g, "distance past the line (µm)") + " of every AF488⁺ object of the counting method " +
     "(" + methodLong(objectsMethod()) + "; " + D.series.reduce((a, s) => a + s.n, 0).toLocaleString("en-US") + " objects in " +
     D.series.reduce((a, s) => a + s.sections, 0) + " sections" +
-    (ds.side !== "all" ? ", " + (ds.side === "crossed" ? "crossed objects only (on the far side of the junction line)" : "home-side objects only") : "") +
+    (ds.side !== "all" ? ", " + (ds.side === "crossed" ? "crossed objects only (on the far side of the junction interface)" : "home-side objects only") : "") +
     (ds.region !== "all" ? ", " + (ds.region === "in" ? "inside" : "outside") + " the junction region" : "") + ")"
     : "the per-section value " + formulaInWords(ds.f) + " (" + D.series.reduce((a, s) => a + s.n, 0) + " sections)";
   const defs = [];
@@ -3441,7 +3441,7 @@ function distMethods() {
 // ------------------------------------------------------------------ the human against automated panel
 // One row per human-counted section: the human count in the annotator's area against the automated count of the chosen
 // positivity method in the same area (section_browser.py: annotator 1 the whole section, annotator 2 from 50 µm before
-// the extended junction line on). Agreement as 01_validation: Lin's CCC on log10 counts, Bland–Altman on
+// the extended junction interface on). Agreement as 01_validation: Lin's CCC on log10 counts, Bland–Altman on
 // log2(automated ÷ human), Spearman ρ; 95 % CIs from 2,000 section bootstraps (within annotator when pooled).
 const HV_INPUTS = { hvOn: "on", hvPlot: "plot", hvGroup: "group", hvShow: "show", hvFilters: "filters", hvSize: "size", hvWidthMm: "widthMm", hvHeightMm: "heightMm",
   hvTitle: "title", hvXlabel: "xlabel", hvYlabel: "ylabel" };
@@ -3916,7 +3916,7 @@ function humanMethods() {
   const meth = METHODS.find((m) => ST.method.startsWith(m.key + "-")), k = ST.method.split("-")[1];
   const n = (a) => HV.rows.filter((e) => e.ann === a).length;
   const area = { 1: "human annotator 1 the whole section (" + n(1) + " sections)",
-    2: "human annotator 2 from 50 µm before the junction line (extended past both ends) across the whole partner organoid (" + n(2) + " sections)" };
+    2: "human annotator 2 from 50 µm before the junction interface (extended past both ends) across the whole partner organoid (" + n(2) + " sections)" };
   const two = ST.annotators.length > 1;
   return "Agreement with human counts. " + (two ? "Two investigators" : "An investigator") + " counted AF488⁺ cells by hand, one point per labelled cell on the AF488 image " +
     "(maximum over z): " + ST.annotators.map((a) => area[a]).join("; ") + ". The automated count (" + (meth ? methodPhrase(meth, k) : ST.method) +
@@ -4332,7 +4332,7 @@ function positivityMethods(key) {
   // since 10 Nov 2026 (section_outline.py): nothing outside the section is counted, whatever the method
   const inSection = " " +
     "{what} whose centroid lay more than 10 µm outside the section's outline, or in a part of the outline that the " +
-    "junction line did not pass within 50 µm of, were not counted (debris, air-bubble rims, neighbouring organoids, " +
+    "junction interface did not pass within 50 µm of, were not counted (debris, air-bubble rims, neighbouring organoids, " +
     "artefacts at the edge of the scan). The outline was the one used to find the junction: tissue standing above " +
     "the slide background in any channel on a 5 µm overview (smoothed by 10 µm, a fifth of the way from background " +
     "to tissue), opened (10 µm) and closed (15 µm), pieces smaller than a tenth of the largest dropped, holes " +
@@ -4355,11 +4355,11 @@ function positivityMethods(key) {
 
 const WORDS = {   // variable → plain words for the outcome sentence
   total: "all AF488⁺ cells of the section", region: "AF488⁺ cells in the junction region",
-  crossed: "AF488⁺ cells that crossed (on the far side of the junction line)", home: "AF488⁺ cells on the home side",
+  crossed: "AF488⁺ cells that crossed (on the far side of the junction interface)", home: "AF488⁺ cells on the home side",
   auto_in_human_area: "AF488⁺ cells in the area counted by hand", threshold: "the section's positivity threshold",
-  junction_mm: "the junction line's length (mm)", junction_um: "the junction line's length (µm)",
+  junction_mm: "the junction interface's length (mm)", junction_um: "the junction interface's length (µm)",
   area_mm2: "the assembloid (tissue) area of the section (mm²)", nuclei: "the number of segmented nuclei in the section",
-  assembloid_um: "the assembloid's length across the junction line (µm)", human: "the human count",
+  assembloid_um: "the assembloid's length across the junction interface (µm)", human: "the human count",
   edge_um: "the crossed cells' mean distance to the organoid edge (µm; negative distances, the nearest cell outside the tissue mask, left out)", past_um: "the crossed cells' mean distance past the line (µm)",
   edge_rel: "the crossed cells' distance to the edge divided by the organoid's local half-width",
   past_rel: "the crossed cells' distance past the line divided by the assembloid length",
@@ -4432,9 +4432,9 @@ function methodsText() {
   const out = [];
   if ($("mImage").checked) {
     out.push("Image analysis. Assembloid sections were imaged on a slide scanner (0.325 µm per pixel). The junction between the two " +
-      "organoids of each assembloid was found automatically on the tissue overview; every junction line was screened by eye and " +
+      "organoids of each assembloid was found automatically on the tissue overview; every junction interface was screened by eye and " +
       "redrawn by hand where it was wrong, and a junction region (counting band) was built along it. " + positivityMethods(ST.method) +
-      " To give every point of a section a side, the junction line was extended straight past both ends (along the direction of its " +
+      " To give every point of a section a side, the junction interface was extended straight past both ends (along the direction of its " +
       "last 60 µm) and each cell's signed distance to the extended line was computed. The home side of a section was the side holding " +
       "more AF488 mask-object area (the counting method's mask), the same side for every positivity " +
       "method; AF488⁺ cells on the other side were classed as crossed, all others as home.");

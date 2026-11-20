@@ -9,7 +9,7 @@ Builds ``D:\\Slidescanner extracted\\oasis-paper\\`` from the analysis folders a
       design/               every scan's genotype / experiment / slide, the pre-screen decisions, the 614 analysed
       segmentation/         per section: every cell (Cellpose nuclei grown by 6 µm) as label maps and a per-cell table;
                             the segmentation's settings and the junction review's table
-      junction/             per section: the junction line and region (label map), the section's record, and the store
+      junction/             per section: the junction interface and region (label map), the section's record, and the store
                             the line and region were drawn / reviewed in (<section>.junction.h5)
       counting/             per section: the counting method's AF488 mask objects (median + 8 robust SD; also 3, 5),
                             thresholds, each cell's cover, the section outline used to drop objects outside the section
@@ -113,7 +113,7 @@ def store_copy(src: Path, dst: Path) -> bool:
         top = a[next(iter(a.keys()))]
         group = b.create_group("junction")
         group.attrs["contents"] = ("Labels/<name>: label maps of the junction regions (attribute line_yx_um: the "
-                                   "junction line, µm); ROIs/<name>: their outlines (y, x px)")
+                                   "junction interface, µm); ROIs/<name>: their outlines (y, x px)")
         for key in top:
             a.copy(top[key], group, name=key)
     return True
@@ -277,7 +277,7 @@ The analysis code is in `../pipeline/` (`python run.py` re-makes every result fr
    stores they were drawn in: `data/junction/stores/`.
 3. **Segmentation**: Cellpose 4 (`cpsam_v2`) on the nuclear stain (maximum over z) of the whole section in 2048 px
    tiles, nuclei grown by 6 µm to approximate cells, each cell measured in every channel and placed relative to the
-   junction line and the tissue edge (`data/segmentation/`; settings in `run_README.txt`). Re-made by
+   junction interface and the tissue edge (`data/segmentation/`; settings in `run_README.txt`). Re-made by
    `python run.py --segment` (`pipeline/oasis/segment.py`).
 4. **Counting**: the AF488 mask at median + 3, 5 and 8 robust SD of each section's tissue, looked for inside that
    tissue or within 10 µm of the section outline, objects outside the section dropped; 8 SD is the counting method
@@ -325,7 +325,7 @@ Package built {built}.
 ## Start here
 
 - **Results, interactive**: open `results/section_browser/section_browser.html` in a web browser (works straight from
-  disk; Chrome, Edge or Firefox). Every section with its junction line, junction region, counted AF488⁺ objects
+  disk; Chrome, Edge or Firefox). Every section with its junction interface, junction region, counted AF488⁺ objects
   (home white, crossed magenta), the objects too small to count (removed by the size filter, a toggle), the human
   annotators' dots, a table and plots; zoom in for the full-resolution image
   and outlines. `figure_builder.html` beside it re-draws the paper's figures with any normalisation and writes the
@@ -356,14 +356,14 @@ data/
                            junction length, home side, tissue area, number of nuclei, whether counted by hand
   segmentation/
     cells/<section>.csv    every segmented cell of the section (Cellpose cpsam_v2 on the nuclear stain, grown by 6 µm):
-                           position, size, intensities per channel, region membership, distance to the junction line
+                           position, size, intensities per channel, region membership, distance to the junction interface
                            and to the tissue edge
     labels/<section> nuclei.tif, <section> grown.tif
                            label maps of the whole section (0 = background; label = the 'Label' column)
     run_README.txt         the segmentation's settings
     run_counts_and_review.xlsx  per-section counts and the junction review (QC status, decisions; sheet Counts)
   junction/
-    junction_lines.csv     every section's junction line: points (y, x) in µm
+    junction_lines.csv     every section's junction interface: points (y, x) in µm
     region/<section> region.tif  the junction region (counting band, 300 µm) as a label map
     sections/<section>.json      the section's record: line, region source, flags, segmentation settings
     stores/<section>.junction.h5 the store the line and region were drawn and reviewed in (HDF5): junction/Labels/<name>
@@ -372,7 +372,7 @@ data/
                            their outlines
   counting/af488_mask/<section>/
     objects.parquet        every object of the AF488 mask at median + 3, 5, 8 robust SD (column mask: kmad3/5/8;
-                           kmad8 is the counting method): area (µm²), centroid (µm), distance to the junction line,
+                           kmad8 is the counting method): area (µm²), centroid (µm), distance to the junction interface,
                            in the junction region
     summary.json           the section's thresholds, noise SD, objects dropped as outside the section
     cells.parquet          each segmented cell's cover by each mask
@@ -381,7 +381,7 @@ data/
     annotator_1/, annotator_2/  clicks.parquet: one row per AF488⁺ cell clicked by hand (y, x in µm; the segmented
                            cell it fell on); cells/: the segmented cells of each hand-counted section; methods/: a
                            comparison method's objects on these sections (Cellpose fine-tuned on the dots).
-                           Annotator 1 counted whole sections (14), annotator 2 from 50 µm before the junction line on (13).
+                           Annotator 1 counted whole sections (14), annotator 2 from 50 µm before the junction interface on (13).
     junctions_hand_drawn/  the 138 sections with a hand-drawn junction (annotated_all.csv: tuning / held-out split,
                            section classes), the first 31 picks, the automatic finder's scores against them, and the
                            stores holding the hand-drawn lines ("manual annotated junction region")
@@ -404,7 +404,7 @@ as the label maps' pixel grid. Section names are the scan file names without `.o
 20 µm Gaussian background, thresholded at the median + 8 robust SD of the section's own tissue and kept inside that
 tissue or within 10 µm of the section outline; objects of 20 µm² or less dropped, holes of 10 µm² or less filled;
 objects outside the section not counted). *Crossed*: centroid on the far side of the
-junction line extended past its ends. Full detail in `methods/METHODS.md`.
+junction interface extended past its ends. Full detail in `methods/METHODS.md`.
 """
 
 
