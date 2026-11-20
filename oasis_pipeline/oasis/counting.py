@@ -2,7 +2,8 @@
 
 The mask (``cv.classical_masks``): AF488 (maximum over z) smoothed 0.5 µm, less its 20 µm Gaussian background, cut
 inside the tissue at the median + k robust SD of the section's own tissue, k = 3, 5, 8 (``kmad3`` …; ``kmad8`` is
-the counting method); objects < 20 µm² removed, holes < 10 µm² filled. Objects outside the section are then taken
+the counting method), inside the tissue or the section's outline widened 10 µm (``section_outline.count_domain``);
+objects of 20 µm² or less removed, holes of 10 µm² or less filled. Objects outside the section are then taken
 out of each mask (``section_outline.drop_outside``). One connected object (8-connectivity) is one AF488⁺ cell.
 
 Per section, into ``rerun/counting/af488_mask/<section>/``:
@@ -28,7 +29,7 @@ from . import cells as ja
 from . import cv, paths, section_outline
 
 WORKERS = 4
-VERSION = 2
+VERSION = 3                       #: 2: objects outside the section dropped; 3: cut inside tissue | outline
 
 
 def run_one(name: str) -> str:
@@ -43,10 +44,11 @@ def run_one(name: str) -> str:
     af488, nuclear, voxel = cv.read_planes(paths.scan_path(name))
     tissue = cv.tissue_mask(nuclear)
     del nuclear
-    masks, meta = cv.classical_masks(af488, tissue, voxel)
-    del af488
     folder = paths.MASKS / name
     outline = section_outline.outline_for(folder, paths.scan_path(name))
+    # threshold from the nuclear-stain tissue; objects looked for there or in the section's outline (version 3)
+    masks, meta = cv.classical_masks(af488, tissue, voxel, section_outline.count_domain(outline, tissue))
+    del af488
     line = section_outline.line_um(info)
     outside = {}
     for method in cv.METHODS:
@@ -82,6 +84,7 @@ def run_one(name: str) -> str:
     summary = {"version": VERSION, "sample": name, "file": paths.scan_path(name).name, "voxel_um": voxel,
                "thresholds": {m: meta["thresholds"][m] for m in cv.METHODS}, "noise_sd": meta["noise_sd"],
                "background_centre": meta["background_centre"], "outside": outside,
+               "domain": "nuclear-stain tissue or the section outline widened 10 µm",
                "seconds": round(time.perf_counter() - started, 1)}
     (folder / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     return f"{name}: {summary['seconds']:.0f} s, outside the section {outside}"

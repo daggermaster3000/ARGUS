@@ -81,6 +81,30 @@ def edge_distance(outline: dict, yx_um: np.ndarray, voxel: float) -> np.ndarray:
     return jn.edge_distance(grid, yx_um[:, 0] / voxel, yx_um[:, 1] / voxel, outline["filled"])
 
 
+def count_domain(outline: dict, tissue: np.ndarray) -> np.ndarray:
+    """Where AF488⁺ objects are looked for, at full resolution: *tissue* (the coarse nuclear-stain mask the threshold
+    is taken over) or the outline, widened by :data:`TOLERANCE_UM`.
+
+    The nuclear-stain mask alone misses tissue whose nuclear stain is dim; the outline is found in every channel
+    (``junction.tissue_of``), so a labelled cell there is no longer cut off. Objects outside the section are still
+    dropped afterwards (:func:`drop_outside`). Since counting.py version 3.
+    """
+    return near_outline(outline, np.arange(tissue.shape[0]), np.arange(tissue.shape[1])) | tissue
+
+
+def near_outline(outline: dict, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+    """Whether each of the scan's pixels *rows* × *cols* lies inside the outline or within :data:`TOLERANCE_UM` of it
+    (a crop's own part of :func:`count_domain`)."""
+    from scipy import ndimage
+
+    filled, step, um = outline["filled"], outline["step"], outline["um"]
+    near = ndimage.distance_transform_edt(~filled) * um - um / 2 <= TOLERANCE_UM     # as edge_distance
+    # overview pixel k stands for the scan's pixels k·step … k·step + step - 1
+    r = np.clip(np.asarray(rows) // step, 0, near.shape[0] - 1)
+    c = np.clip(np.asarray(cols) // step, 0, near.shape[1] - 1)
+    return near[r][:, c]
+
+
 def assembloid_pieces(outline: dict, line: np.ndarray | None, voxel: float) -> tuple[np.ndarray, np.ndarray]:
     """The outline's pieces (labels) and which of them are the assembloid's (the line passes within reach)."""
     from scipy import ndimage

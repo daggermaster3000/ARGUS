@@ -1,8 +1,9 @@
 """The AF488 mask: the counting method's image steps.
 
 AF488 (maximum over z) is smoothed (Gaussian, 0.5 µm), its local background (Gaussian, 20 µm, computed at 1/4
-resolution) is taken away, and the result is cut inside the tissue at the median + k robust SD (1.4826 × MAD) of the
-tissue's pixels (every 20th), k = 3, 5, 8; objects under 20 µm² are removed and holes under 10 µm² filled. The
+resolution) is taken away, and the result is cut at the median + k robust SD (1.4826 × MAD) of the tissue's
+pixels (every 20th), k = 3, 5, 8, inside the tissue or the section's outline widened 10 µm
+(``section_outline.count_domain``); objects of 20 µm² or less are removed and holes of 10 µm² or less filled. The
 tissue here is the nuclear stain's Otsu mask at 1/8, closed, holes filled, widened by two steps.
 """
 from __future__ import annotations
@@ -98,8 +99,10 @@ def remove_small_holes(mask: np.ndarray, size_px: int) -> np.ndarray:
     return mask | fill[labels]
 
 
-def classical_masks(af488: np.ndarray, tissue: np.ndarray, voxel: float) -> tuple[dict[str, np.ndarray], dict]:
-    """The AF488 masks at every k of :data:`K_MADS`, and their thresholds."""
+def classical_masks(af488: np.ndarray, tissue: np.ndarray, voxel: float,
+                    domain: np.ndarray | None = None) -> tuple[dict[str, np.ndarray], dict]:
+    """The AF488 masks at every k of :data:`K_MADS`, and their thresholds: from the *tissue* pixels, the masks cut
+    inside *domain* (default *tissue*)."""
     from scipy import ndimage
 
     smooth = ndimage.gaussian_filter(af488, SMOOTH_UM / voxel)
@@ -113,7 +116,7 @@ def classical_masks(af488: np.ndarray, tissue: np.ndarray, voxel: float) -> tupl
     hole_px = int(round(MAX_HOLE_UM2 / voxel ** 2))
     masks = {}
     for method in METHODS:
-        mask = (signal > thresholds[method]) & tissue
+        mask = (signal > thresholds[method]) & (tissue if domain is None else domain)
         masks[method] = remove_small_holes(remove_small_objects(mask, min_px), hole_px)
     return masks, {"thresholds": thresholds, "background_centre": centre, "noise_sd": spread}
 

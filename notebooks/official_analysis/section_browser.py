@@ -124,7 +124,8 @@ DISPLAY_PCT = (1.0, 99.7)         #: display range: these percentiles of AF488 i
 JPEG_QUALITY = 85
 WORKERS = 4                       #: each holds a slide scan's planes and one mask at a time (~2 GB)
 VERSION = 1                       #: of the pictures (parts/<id>.json)
-MASK_VERSION = 2                  #: of the outlines and counts (parts/methods/<id>.json, parts/masks/); 2: in the section only
+MASK_VERSION = 3                  #: of the outlines and counts (parts/methods/<id>.json, parts/masks/); 2: in the section
+                                  #: only; 3: masks cut inside the tissue or the outline (as af488_masks.py 3)
 PREFIX = "2025_09_26_Asssembloid_"
 # --------------------------------------------------------------------------
 
@@ -428,6 +429,8 @@ def run_masks(name: str, out: str, sizes_only: bool = False) -> str:
     del nuclear
     # objects and cells outside the section are not counted (section_outline; the outline af488_masks.py cached)
     section = section_outline.outline_for(MASKS / name, Path(info["file"]))     # not `outline`: that is the ring tracer
+    # thresholds from the nuclear-stain tissue; masks cut inside it or the section outline (af488_masks.py version 3)
+    domain = section_outline.count_domain(section, tissue)
     line_um = section_outline.line_um(info)
 
     def in_section(mask: np.ndarray) -> np.ndarray:
@@ -473,7 +476,7 @@ def run_masks(name: str, out: str, sizes_only: bool = False) -> str:
     for m in (() if sizes_only else ("gauss",)) + SIZE_VARIANTS:       # the same mask, each with its size filter
         for k in METHODS[m]["ks"]:
             cut = float(stored.get(f"kmad{k:g}", cuts[k]))        # the stored threshold (equal to the recomputed one)
-            shapes = place(mask_objects(in_section(cleaned((signal > cut) & tissue, voxel, min_um2(m))), voxel, f))
+            shapes = place(mask_objects(in_section(cleaned((signal > cut) & domain, voxel, min_um2(m))), voxel, f))
             record(f"{m}-{k}", shapes, cut)
             if m == "gauss":
                 check[f"gauss-{k}"] = {"recomputed_threshold": cuts[k], "stored_threshold": stored.get(f"kmad{k:g}"),
@@ -493,7 +496,7 @@ def run_masks(name: str, out: str, sizes_only: bool = False) -> str:
     del af488
     cuts, _c, _s = robust_cuts(signal, tissue, METHODS["median"]["ks"])
     for k in METHODS["median"]["ks"]:
-        shapes = place(mask_objects(in_section(cleaned((signal > cuts[k]) & tissue, voxel)), voxel, f))
+        shapes = place(mask_objects(in_section(cleaned((signal > cuts[k]) & domain, voxel)), voxel, f))
         record(f"median-{k}", shapes, cuts[k])
     del signal, tissue
     seconds["median"] = round(time.perf_counter() - tick, 1)

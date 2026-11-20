@@ -140,8 +140,12 @@ def local_background(image: np.ndarray, sigma_px: float, step: int = 4) -> np.nd
     return out
 
 
-def classical_masks(af488: np.ndarray, tissue: np.ndarray, voxel: float) -> tuple[dict[str, np.ndarray], dict]:
-    """The AF488 masks of every method in :data:`METHODS`, and their thresholds."""
+def classical_masks(af488: np.ndarray, tissue: np.ndarray, voxel: float,
+                    domain: np.ndarray | None = None) -> tuple[dict[str, np.ndarray], dict]:
+    """The AF488 masks of every method in :data:`METHODS`, and their thresholds.
+
+    The thresholds come from the *tissue* pixels; the masks are cut inside *domain* (default *tissue*).
+    """
     from scipy import ndimage
     from skimage.filters import threshold_otsu, threshold_triangle
     from skimage.morphology import remove_small_holes, remove_small_objects
@@ -163,7 +167,7 @@ def classical_masks(af488: np.ndarray, tissue: np.ndarray, voxel: float) -> tupl
     import warnings
 
     for method in METHODS:
-        mask = (signal > thresholds[method]) & tissue
+        mask = (signal > thresholds[method]) & (tissue if domain is None else domain)
         with warnings.catch_warnings():
             # scikit-image 0.26 renames these arguments; the notebook's environment has 0.25.
             warnings.simplefilter("ignore", FutureWarning)

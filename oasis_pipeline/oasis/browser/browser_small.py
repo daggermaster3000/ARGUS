@@ -36,7 +36,7 @@ from .. import paths
 BROWSER = paths.BROWSER                                          # section_browser.py's folder
 KEYS = tuple(f"{m}-{k}" for m in ("gauss", "gauss10", "gauss5") for k in (3, 5, 8))   #: the Gaussian mask (and its size variants)
 WORKERS = 4                       #: each holds a slide scan's planes (~2 GB)
-VERSION = 1
+VERSION = 2                       #: 2: cut inside tissue | outline (counting.py 3)
 # --------------------------------------------------------------------------
 
 
@@ -82,6 +82,7 @@ def run_small(name: str, out: str) -> str:
     tissue = cv.tissue_mask(nuclear)
     del nuclear
     outline = sb.section_outline.outline_for(sb.MASKS / name, paths.scan_path(name))
+    domain = sb.section_outline.count_domain(outline, tissue)          # as section_browser.run_masks
     line_um = sb.section_outline.line_um(info)
     # as browser_outlines.run_fine: smoothed, less the 20 µm Gaussian, cut at the stored threshold in the tissue
     smooth = ndimage.gaussian_filter(af488, cv.SMOOTH_UM / voxel)
@@ -95,7 +96,7 @@ def run_small(name: str, out: str) -> str:
     for key in [k for k in KEYS if not key_done(out, sid, k)]:         # only what is missing
         k = int(key.split("-")[1])
         cut = float(stored.get(f"kmad{k:g}", cuts[k]))
-        small = removed_by_size((signal > cut) & tissue, voxel, sb.min_um2(key))
+        small = removed_by_size((signal > cut) & domain, voxel, sb.min_um2(key))
         props = regionprops(label(small, connectivity=2))
         yx = np.array([p.centroid for p in props], float).reshape(-1, 2) * voxel
         inside = sb.section_outline.in_section(outline, line_um, yx, voxel) if len(yx) else np.zeros(0, bool)
