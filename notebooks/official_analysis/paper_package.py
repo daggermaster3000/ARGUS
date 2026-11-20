@@ -279,8 +279,9 @@ The analysis code is in `../pipeline/` (`python run.py` re-makes every result fr
    tiles, nuclei grown by 6 µm to approximate cells, each cell measured in every channel and placed relative to the
    junction line and the tissue edge (`data/segmentation/`; settings in `run_README.txt`). Re-made by
    `python run.py --segment` (`pipeline/oasis/segment.py`).
-4. **Counting**: the AF488 mask at median + 3, 5 and 8 robust SD of each section's tissue, objects outside the section
-   dropped; 8 SD is the counting method (`data/counting/`; `pipeline/oasis/counting.py`).
+4. **Counting**: the AF488 mask at median + 3, 5 and 8 robust SD of each section's tissue, looked for inside that
+   tissue or within 10 µm of the section outline, objects outside the section dropped; 8 SD is the counting method
+   (`data/counting/`; `pipeline/oasis/counting.py`).
 5. **Section sizes**: tissue area and assembloid length (`data/derived/`; `pipeline/oasis/sizes.py`).
 6. **Analysis**: `pipeline/notebooks/01_validation.ipynb` (agreement with the hand counts) and `02_biology.ipynb`
    (WT3 against GD1): every statistic, figure and table (`figures/`, `results/tables/`); executed copies in
@@ -400,8 +401,9 @@ SHA256SUMS                 checksums of every file (sha256sum -c SHA256SUMS)
 as the label maps' pixel grid. Section names are the scan file names without `.ome.tiff`.
 
 **Counting method.** An AF488⁺ cell is one connected object of the AF488 mask (maximum over z, smoothed 0.5 µm, less a
-20 µm Gaussian background, thresholded at the median + 8 robust SD of the section's own tissue; objects < 20 µm²
-dropped, holes < 10 µm² filled; objects outside the section not counted). *Crossed*: centroid on the far side of the
+20 µm Gaussian background, thresholded at the median + 8 robust SD of the section's own tissue and kept inside that
+tissue or within 10 µm of the section outline; objects of 20 µm² or less dropped, holes of 10 µm² or less filled;
+objects outside the section not counted). *Crossed*: centroid on the far side of the
 junction line extended past its ends. Full detail in `methods/METHODS.md`.
 """
 

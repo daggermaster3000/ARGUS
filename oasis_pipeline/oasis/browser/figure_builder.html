@@ -4339,12 +4339,15 @@ function positivityMethods(key) {
     "filled.";
   const outside = (what) => inSection.replace("{what}", what);
   if (m === "gauss") return "AF488⁺ cells were counted as objects of a mask of the AF488 channel: the maximum-intensity projection over z, " +
-    "smoothed with a Gaussian (σ = 0.5 µm), less its local background (Gaussian, σ = 20 µm), and thresholded inside the tissue " +
-    "(Otsu mask of the nuclear stain at 1/8 resolution, closed and hole-filled) at the median + " + sd + " of the section's tissue. " + cleanup +
+    "smoothed with a Gaussian (σ = 0.5 µm), less its local background (Gaussian, σ = 20 µm), and thresholded at the median + " + sd +
+    " of the section's tissue (Otsu mask of the nuclear stain at 1/8 resolution, closed and hole-filled); pixels above the threshold " +
+    "were kept inside that tissue mask or within 10 µm of the section outline (see below), so that labelled cells where the nuclear " +
+    "stain is dim were not cut off. " + cleanup +
     outside("Objects");
   if (m === "median") return "AF488⁺ cells were counted as objects of a mask of the AF488 channel: the maximum-intensity projection over z, " +
     "less its local median (45 µm window, computed at 1/8 resolution), smoothed with a Gaussian (σ = 0.5 µm) and thresholded inside " +
-    "the tissue (Otsu mask of the nuclear stain) at the median + " + sd + " of the section's tissue. " + cleanup + outside("Objects");
+    "the tissue (Otsu mask of the nuclear stain) or within 10 µm of the section outline, at the median + " + sd + " of the section's tissue. " +
+    cleanup + outside("Objects");
   const value = m === "cellmf" ? "mean AF488 intensity over the grown nucleus, measured on the AF488 image less its local median " +
     "(45 µm window)" : "mean AF488 intensity over the grown nucleus (raw image)";
   return nuclei + " A cell was called AF488⁺ when its " + value + ", exceeded the median + " + sd + " of all cells in the junction " +
