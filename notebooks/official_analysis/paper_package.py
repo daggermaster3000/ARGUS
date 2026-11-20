@@ -325,10 +325,11 @@ Package built {built}.
 
 - **Results, interactive**: open `results/section_browser/section_browser.html` in a web browser (works straight from
   disk; Chrome, Edge or Firefox). Every section with its junction line, junction region, counted AF488⁺ objects
-  (home white, crossed magenta), the objects too small to count (≤ 20 µm², a toggle), the human annotators' dots,
-  a table and plots; zoom in for the full-resolution image
+  (home white, crossed magenta), the objects too small to count (removed by the size filter, a toggle), the human
+  annotators' dots, a table and plots; zoom in for the full-resolution image
   and outlines. `figure_builder.html` beside it re-draws the paper's figures with any normalisation and writes the
-  Methods text for them.
+  Methods text for them. Both pages can also count with a smaller size filter (objects > 10 or > 5 µm² instead of
+  > 20 µm²), to show what the filter does to the counts and the statistics.
 - **Paper figures**: `figures/` (PDF, PNG, SVG); their tables in `results/tables/`.
 - **Methods**: `methods/METHODS.md`; the executed analysis notebooks in `methods/notebooks/` (`.html` to read).
 - **Re-run everything**: `pipeline/README.md`. In short, with Python 3.10:
