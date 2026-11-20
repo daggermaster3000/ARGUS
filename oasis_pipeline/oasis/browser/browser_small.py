@@ -10,7 +10,8 @@ pixels as objects of their own (8-connected, as objects are counted). Each is ma
     parts/small/<id>__<key>.js   window.SMALL_LOADED(id, key, {"q": 2·f, "rings": [...], "area": [µm²], "in": [0/1]})
     parts/small/index.js         window.SMALL_INDEX = {id: {key: number of small objects in the section}}
 
-Rings as ``browser_outlines.fine_rings``; ``key`` is ``gauss-3``, ``gauss-5`` or ``gauss-8`` (the counting method).
+Rings as ``browser_outlines.fine_rings``; ``key`` is ``gauss-3``, ``gauss-5`` or ``gauss-8`` (the counting method),
+or the same for the variants with a 10 or 5 µm² size filter (``gauss10-8`` …: what that filter removes).
 The page's "too small to count" toggle draws them. A section with all its files is done, so a rerun skips it; the
 index is rebuilt from the files at the end.
 
@@ -33,7 +34,7 @@ from .. import paths
 
 # ---------------------------------------------------------------- Settings
 BROWSER = paths.BROWSER                                          # section_browser.py's folder
-KEYS = ("gauss-3", "gauss-5", "gauss-8")   #: the Gaussian mask's thresholds, as browser_outlines
+KEYS = tuple(f"{m}-{k}" for m in ("gauss", "gauss10", "gauss5") for k in (3, 5, 8))   #: the Gaussian mask (and its size variants)
 WORKERS = 4                       #: each holds a slide scan's planes (~2 GB)
 VERSION = 1
 # --------------------------------------------------------------------------
@@ -43,18 +44,22 @@ def small_file(out: Path, sid: str, key: str) -> Path:
     return out / "parts" / "small" / f"{sid}__{key}.js"
 
 
-def small_done(out: Path, sid: str) -> bool:
+def key_done(out: Path, sid: str, key: str) -> bool:
     try:
-        return all(f'"version":{VERSION},' in small_file(out, sid, k).read_text(encoding="utf-8")[:200] for k in KEYS)
+        return f'"version":{VERSION},' in small_file(out, sid, key).read_text(encoding="utf-8")[:200]
     except OSError:
         return False
 
 
-def removed_by_size(mask: np.ndarray, voxel: float) -> np.ndarray:
-    """The pixels of *mask* that ``section_browser.cleaned``'s size filter removes (same rule)."""
+def small_done(out: Path, sid: str) -> bool:
+    return all(key_done(out, sid, k) for k in KEYS)
+
+
+def removed_by_size(mask: np.ndarray, voxel: float, min_area_um2: float = 20.0) -> np.ndarray:
+    """The pixels of *mask* that ``section_browser.cleaned``'s size filter (*min_area_um2*) removes (same rule)."""
     from .. import cv
 
-    return mask & ~cv.remove_small_objects(mask, int(round(cv.MIN_OBJECT_UM2 / voxel ** 2)))
+    return mask & ~cv.remove_small_objects(mask, int(round(min_area_um2 / voxel ** 2)))
 
 
 def run_small(name: str, out: str) -> str:
@@ -87,10 +92,10 @@ def run_small(name: str, out: str) -> str:
     cuts = sb.robust_cuts(signal, tissue, sb.METHODS["gauss"]["ks"])[0]
     (out / "parts" / "small").mkdir(parents=True, exist_ok=True)
     said = []
-    for key in KEYS:
+    for key in [k for k in KEYS if not key_done(out, sid, k)]:         # only what is missing
         k = int(key.split("-")[1])
         cut = float(stored.get(f"kmad{k:g}", cuts[k]))
-        small = removed_by_size((signal > cut) & tissue, voxel)
+        small = removed_by_size((signal > cut) & tissue, voxel, sb.min_um2(key))
         props = regionprops(label(small, connectivity=2))
         yx = np.array([p.centroid for p in props], float).reshape(-1, 2) * voxel
         inside = sb.section_outline.in_section(outline, line_um, yx, voxel) if len(yx) else np.zeros(0, bool)
@@ -108,7 +113,7 @@ def run_small(name: str, out: str) -> str:
 def write_index(out: Path) -> int:
     """``parts/small/index.js`` from the files there: per section and key, the small objects in the section."""
     index: dict[str, dict[str, int]] = {}
-    for path in sorted((out / "parts" / "small").glob("*__gauss-*.js")):
+    for path in sorted((out / "parts" / "small").glob("*__gauss*-*.js")):
         sid, key = path.stem.rsplit("__", 1)
         flags = re.search(r'"in":\[([01,]*)\]', path.read_text(encoding="utf-8"))
         index.setdefault(sid, {})[key] = flags.group(1).count("1") if flags else 0

@@ -4321,9 +4321,11 @@ function readHash() {
 const VERSIONS = "Python 3.10/3.13, Cellpose 4.2, scikit-image 0.25, SciPy 1.15, statsmodels 0.14 and Plotly.js 2.34";
 
 function positivityMethods(key) {
-  const [m, k] = key.split("-");
+  const [key0, k] = key.split("-");
+  const spec = METHODS.find((x) => x.key === key0) || {};
+  const m = spec.of || key0;                      // a size variant ("gauss5") is its mask ("gauss") with another size filter
   const sd = k + " robust standard deviations (1.4826 × median absolute deviation)";
-  const cleanup = "Objects smaller than 20 µm² were removed and holes smaller than 10 µm² filled; each connected object " +
+  const cleanup = "Objects of " + (spec.min_um2 || 20) + " µm² or smaller were removed and holes of 10 µm² or smaller filled; each connected object " +
     "(8-connectivity) was counted as one AF488⁺ cell, at its centroid.";
   const nuclei = "Nuclei were segmented over the whole section with Cellpose (cpsam) on the nuclear stain and grown by 6 µm to " +
     "approximate cells.";
@@ -4474,8 +4476,8 @@ function methodsText() {
   if ($("mDist").checked && ST.ds.on) { const t = distMethods(); if (t) out.push(t); }
   if ($("mHuman").checked && ST.hv.on) { const t = humanMethods(); if (t) out.push(t); }
   if ($("mSoftware").checked) {
-    out.push("Software. Image analysis used the oasis pipeline (Python; pipeline/ of the data package), with " +
-      VERSIONS + ". Code: pipeline/oasis (counting.py, section_outline.py, sides.py, glmm.py, browser/figure_builder.html), pipeline/notebooks/02_biology.ipynb." +
+    out.push("Software. Image analysis used ARGUS, a custom napari-based pipeline (version: git commit of the analysis), with " +
+      VERSIONS + ". Code: notebooks/official_analysis (02_biology.ipynb, sides.py, figure_builder.html), notebooks/dataset/af488_masks.py." +
       ($("mModel").checked && ST.model !== "none" ? " The " + MODELS[ST.model].long + " was fitted by the figure builder's own implementation " +
         "(JavaScript), which reproduces statsmodels MixedLM (linear mixed model) and an independent Python implementation " +
         "(glmm.py, SciPy; generalised linear mixed models) to at least three significant digits." : ""));

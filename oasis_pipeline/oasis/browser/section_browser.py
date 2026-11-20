@@ -16,9 +16,12 @@ The methods:
 
 - **AF488 mask, Gaussian 20 µm background** (3, 5, 8 SD) — the mask of ``counting.py``:
   AF488 smoothed 0.5 µm, less its 20 µm Gaussian, cut inside the tissue at the median + k robust SD,
-  objects < 20 µm² dropped, holes < 10 µm² filled. One object = one AF488⁺ cell body. 8 SD is the
+  objects of 20 µm² or less dropped, holes of 10 µm² or less filled. One object = one AF488⁺ cell body. 8 SD is the
   counting method of the official analysis (the page's default; until 9 Nov 2026 it was 5 SD). The median and
   robust SD are each section's own, from its tissue pixels, so the threshold is set per section.
+- **The same mask with a smaller size filter** (:data:`SIZE_VARIANTS`: objects > 10 µm² and > 5 µm² kept; 3, 5,
+  8 SD): the same thresholds and hole filling, only fewer small objects dropped, to see what the 20 µm² filter
+  does to the counts and the statistics.
 - **AF488 mask, local median 45 µm background** (3, 5, 7, 8 SD) — as a local-median mask:
   AF488 less its 45 µm local median (``junction_analysis.less_local_median``), smoothed 0.5 µm, the
   same threshold and cleanup.
@@ -74,14 +77,23 @@ CHANNEL = "AF488"
 SIDE_MASK = "kmad8"               #: the stored mask whose object area decides the home side (the counting method's)
 #: The positivity methods: key → label, kind ("mask" or "cell"), the k of median + k robust SD, the default k.
 METHODS = {
-    "gauss": {"label": "AF488 mask, Gaussian 20 µm background", "kind": "mask", "ks": (3, 5, 8), "default": 8},
-    "median": {"label": "AF488 mask, local median 45 µm background", "kind": "mask", "ks": (3, 5, 7, 8), "default": 5},
+    "gauss": {"label": "AF488 mask, Gaussian 20 µm background", "kind": "mask", "ks": (3, 5, 8), "default": 8,
+              "min_um2": 20.0},
+    # the same mask, only a smaller size filter ("of": the method whose mask and thresholds it shares)
+    "gauss10": {"label": "AF488 mask, Gaussian 20 µm background, objects > 10 µm²", "kind": "mask", "ks": (3, 5, 8),
+                "default": 8, "min_um2": 10.0, "of": "gauss"},
+    "gauss5": {"label": "AF488 mask, Gaussian 20 µm background, objects > 5 µm²", "kind": "mask", "ks": (3, 5, 8),
+               "default": 8, "min_um2": 5.0, "of": "gauss"},
+    "median": {"label": "AF488 mask, local median 45 µm background", "kind": "mask", "ks": (3, 5, 7, 8), "default": 5,
+               "min_um2": 20.0},
     "cellmf": {"label": "Per-nucleus rule, median-filtered mean", "kind": "cell", "ks": (3, 5, 7), "default": 7,
                "column": "AF488 mean (median filter)"},
     "cellraw": {"label": "Per-nucleus rule, raw mean", "kind": "cell", "ks": (3, 5, 7), "default": 7,
                 "column": "AF488 mean"},
 }
 DEFAULT = "gauss-8"               #: the counting method of the official analysis (median + 8 robust SD)
+#: the Gaussian mask's variants with another size filter
+SIZE_VARIANTS = tuple(m for m, spec in METHODS.items() if spec.get("of") == "gauss")
 MEDIAN_BACKGROUND_UM = 45.0       #: junction_analysis.less_local_median's window (for the label only)
 SIMPLIFY_PX = 0.5                 #: outlines simplified to within this many picture pixels
 AREA_2_UM = -50.0                 #: annotator 2 counted from 50 µm before the line to the far edge
@@ -104,6 +116,11 @@ def short(name: str) -> str:
 def method_keys() -> list[str]:
     """Every method-threshold key, e.g. ``gauss-8``."""
     return [f"{m}-{k}" for m, spec in METHODS.items() for k in spec["ks"]]
+
+
+def min_um2(key: str) -> float:
+    """The size filter of a method or method-threshold key: objects of this area (µm²) or less are dropped."""
+    return float(METHODS[key.split("-")[0]].get("min_um2", 20.0))
 
 
 def block_mean(image: np.ndarray, f: int) -> np.ndarray:
@@ -320,11 +337,13 @@ def robust_cuts(signal: np.ndarray, tissue: np.ndarray, ks) -> tuple[dict[int, f
     return {k: centre + k * spread for k in ks}, centre, spread
 
 
-def cleaned(mask: np.ndarray, voxel: float) -> np.ndarray:
-    """*mask* without objects of 20 µm² or less and with holes of 10 µm² or less filled (cv.py)."""
+def cleaned(mask: np.ndarray, voxel: float, min_area_um2: float | None = None) -> np.ndarray:
+    """*mask* without objects of *min_area_um2* or less (default 20 µm², cv.py) and with holes of 10 µm² or less
+    filled."""
     from .. import cv
 
-    mask = cv.remove_small_objects(mask, int(round(cv.MIN_OBJECT_UM2 / voxel ** 2)))
+    limit = cv.MIN_OBJECT_UM2 if min_area_um2 is None else min_area_um2
+    mask = cv.remove_small_objects(mask, int(round(limit / voxel ** 2)))
     return cv.remove_small_holes(mask, int(round(cv.MAX_HOLE_UM2 / voxel ** 2)))
 
 
@@ -409,12 +428,14 @@ def run_masks(name: str, out: str) -> str:
     del smooth
     cuts, _c, _s = robust_cuts(signal, tissue, METHODS["gauss"]["ks"])
     stored = stored_summary["thresholds"]
-    for k in METHODS["gauss"]["ks"]:
-        cut = float(stored.get(f"kmad{k:g}", cuts[k]))            # the stored threshold (equal to the recomputed one)
-        shapes = place(mask_objects(in_section(cleaned((signal > cut) & tissue, voxel)), voxel, f))
-        record(f"gauss-{k}", shapes, cut)
-        check[f"gauss-{k}"] = {"recomputed_threshold": cuts[k], "stored_threshold": stored.get(f"kmad{k:g}"),
-                               "objects": len(shapes), "stored_objects": int(stored_objects.get(f"kmad{k:g}", -1))}
+    for m in ("gauss",) + SIZE_VARIANTS:                              # the same mask, each with its size filter
+        for k in METHODS[m]["ks"]:
+            cut = float(stored.get(f"kmad{k:g}", cuts[k]))        # the stored threshold (equal to the recomputed one)
+            shapes = place(mask_objects(in_section(cleaned((signal > cut) & tissue, voxel, min_um2(m))), voxel, f))
+            record(f"{m}-{k}", shapes, cut)
+            if m == "gauss":
+                check[f"gauss-{k}"] = {"recomputed_threshold": cuts[k], "stored_threshold": stored.get(f"kmad{k:g}"),
+                                       "objects": len(shapes), "stored_objects": int(stored_objects.get(f"kmad{k:g}", -1))}
     del signal
     seconds["gauss"] = round(time.perf_counter() - tick, 1)
 
@@ -586,7 +607,8 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
                                              "in": inside.astype(int).tolist()}})
         sections.append(entry)
     catalogue = [{"key": m, "label": spec["label"], "kind": spec["kind"], "ks": list(spec["ks"]),
-                  "default": spec["default"]} for m, spec in METHODS.items()]
+                  "default": spec["default"], "min_um2": spec.get("min_um2"), "of": spec.get("of")}
+                 for m, spec in METHODS.items()]
     payload = _clean({"generated": time.strftime("%Y-%m-%d %H:%M"), "methods": catalogue, "default": DEFAULT,
                       "area_2_um": AREA_2_UM, "sections": sections})
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
