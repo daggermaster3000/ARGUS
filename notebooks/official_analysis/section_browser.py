@@ -124,7 +124,7 @@ DISPLAY_PCT = (1.0, 99.7)         #: display range: these percentiles of AF488 i
 JPEG_QUALITY = 85
 WORKERS = 4                       #: each holds a slide scan's planes and one mask at a time (~2 GB)
 VERSION = 1                       #: of the pictures (parts/<id>.json)
-MASK_VERSION = 3                  #: of the outlines and counts (parts/methods/<id>.json, parts/masks/); 2: in the section
+MASK_VERSION = 4                  #: of the outlines and counts (parts/methods/<id>.json, parts/masks/); 2: in the section
                                   #: only; 3: masks cut inside the tissue or the outline (as af488_masks.py 3)
 PREFIX = "2025_09_26_Asssembloid_"
 # --------------------------------------------------------------------------
@@ -425,12 +425,12 @@ def run_masks(name: str, out: str, sizes_only: bool = False) -> str:
     band = ja.read_labels(RUN / info["region_file"]) > 0 if info.get("region_file") else None
     af488, nuclear, voxel = cv.read_planes(Path(info["file"]))
     f = max(1, int(round(TARGET_UM / voxel)))
-    tissue = cv.tissue_mask(nuclear)
     del nuclear
     # objects and cells outside the section are not counted (section_outline; the outline af488_masks.py cached)
     section = section_outline.outline_for(MASKS / name, Path(info["file"]))     # not `outline`: that is the ring tracer
-    # thresholds from the nuclear-stain tissue; masks cut inside it or the section outline (af488_masks.py version 3)
-    domain = section_outline.count_domain(section, tissue)
+    # thresholds over the section's tissue from every channel; masks cut inside the outline widened 10 µm (af488_masks.py version 4)
+    tissue = section_outline.stats_mask(section, af488.shape)
+    domain = section_outline.count_domain(section, af488.shape)
     line_um = section_outline.line_um(info)
 
     def in_section(mask: np.ndarray) -> np.ndarray:

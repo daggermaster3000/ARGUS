@@ -42,7 +42,7 @@ KEYS = tuple(f"{m}-{k}" for m in ("gauss", "gauss10", "gauss5") for k in (3, 5, 
                                   #: at each threshold, traced at full resolution
 STRAIGHT_PX = 0.05                #: points within this many scan pixels of a straight run are dropped
 WORKERS = 4                       #: each holds a slide scan's planes (~2 GB)
-VERSION = 3                       #: 2: objects outside the section dropped; 3: cut inside tissue | outline
+VERSION = 4                       #: 2: outside the section dropped; 3: tissue | outline; 4: outline only
 # --------------------------------------------------------------------------
 
 
@@ -99,10 +99,10 @@ def run_fine(name: str, out: str) -> str:
     info = paths.section_info(name)
     af488, nuclear, voxel = cv.read_planes(paths.scan_path(name))
     f = max(1, int(round(sb.TARGET_UM / voxel)))
-    tissue = cv.tissue_mask(nuclear)
     del nuclear
     outline = sb.section_outline.outline_for(sb.MASKS / name, paths.scan_path(name))
-    domain = sb.section_outline.count_domain(outline, tissue)          # as section_browser.run_masks
+    tissue = sb.section_outline.stats_mask(outline, af488.shape)      # as section_browser.run_masks
+    domain = sb.section_outline.count_domain(outline, af488.shape)
     line_um = sb.section_outline.line_um(info)
     # as section_browser.run_masks: smoothed, less the 20 µm Gaussian, cut at the stored threshold in the tissue
     smooth = ndimage.gaussian_filter(af488, cv.SMOOTH_UM / voxel)

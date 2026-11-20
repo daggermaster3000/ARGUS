@@ -36,7 +36,7 @@ from .. import paths
 BROWSER = paths.BROWSER                                          # section_browser.py's folder
 KEYS = tuple(f"{m}-{k}" for m in ("gauss", "gauss10", "gauss5") for k in (3, 5, 8))   #: the Gaussian mask (and its size variants)
 WORKERS = 4                       #: each holds a slide scan's planes (~2 GB)
-VERSION = 2                       #: 2: cut inside tissue | outline (counting.py 3)
+VERSION = 3                       #: 2: tissue | outline; 3: threshold and objects from the outline only
 # --------------------------------------------------------------------------
 
 
@@ -79,10 +79,10 @@ def run_small(name: str, out: str) -> str:
     info = paths.section_info(name)
     af488, nuclear, voxel = cv.read_planes(paths.scan_path(name))
     f = max(1, int(round(sb.TARGET_UM / voxel)))
-    tissue = cv.tissue_mask(nuclear)
     del nuclear
     outline = sb.section_outline.outline_for(sb.MASKS / name, paths.scan_path(name))
-    domain = sb.section_outline.count_domain(outline, tissue)          # as section_browser.run_masks
+    tissue = sb.section_outline.stats_mask(outline, af488.shape)      # as section_browser.run_masks
+    domain = sb.section_outline.count_domain(outline, af488.shape)
     line_um = sb.section_outline.line_um(info)
     # as browser_outlines.run_fine: smoothed, less the 20 µm Gaussian, cut at the stored threshold in the tissue
     smooth = ndimage.gaussian_filter(af488, cv.SMOOTH_UM / voxel)

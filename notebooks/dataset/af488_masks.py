@@ -9,9 +9,9 @@ called almost the same cells as the run's rule (κ 0.79). Objects outside the se
 mask (``section_outline.drop_outside``: centroid more than 10 µm outside the run's outline of the section, or in a
 piece of it the junction line does not pass through: debris, bubble rims, a neighbouring organoid, a bright strip at
 the scan's edge), so the cover and the objects below count only what lies in the assembloid. The threshold is still
-taken over the coarse tissue mask, as before; since version 3 (20 Nov 2026) the masks are cut inside that mask *or*
-the section's outline from every channel, widened 10 µm (``section_outline.count_domain``), so a labelled cell where
-the nuclear stain is dim is no longer left out.
+taken over the section's tissue from every channel and the masks are cut inside the section's outline widened 10 µm
+(version 4, 20 Nov 2026: ``section_outline.stats_mask`` and ``count_domain``). Until then both came from the nuclear
+stain's Otsu mask at 1/8, which lost much of a section's dimmer rim and the labelled cells there.
 
 Per section, into ``OUT/<sample>/``:
 
@@ -55,7 +55,7 @@ OUT = Path(r"D:\Slidescanner extracted\run_analysis_20261028\af488_mask")
 METHODS = tuple(f"kmad{k:g}" for k in cv.K_MADS)
 #: Processes at a time: each holds a slide scan's planes and masks (~2 GB).
 WORKERS = 4
-VERSION = 3                       #: 2: objects outside the section dropped; 3: cut inside tissue | outline
+VERSION = 4                       #: 2: outside the section dropped; 3: cut inside tissue | outline; 4: outline only
 
 
 def run_one(name: str) -> str:
@@ -68,12 +68,13 @@ def run_one(name: str) -> str:
     started = time.perf_counter()
     info = json.loads((RUN / "cells" / f"{name}.json").read_text(encoding="utf-8"))
     af488, nuclear, voxel = cv.read_planes(Path(info["file"]))
-    tissue = cv.tissue_mask(nuclear)
     del nuclear
     folder = OUT / name
     outline = section_outline.outline_for(folder, Path(info["file"]))
-    # threshold from the nuclear-stain tissue; objects looked for there or in the section's outline (version 3)
-    masks, meta = cv.classical_masks(af488, tissue, voxel, section_outline.count_domain(outline, tissue))
+    # threshold over the section's tissue from every channel; objects looked for inside the outline widened 10 µm
+    # (version 4; until 20 Nov 2026 both came from the nuclear-stain Otsu mask, which lost much of a section's rim)
+    masks, meta = cv.classical_masks(af488, section_outline.stats_mask(outline, af488.shape), voxel,
+                                     section_outline.count_domain(outline, af488.shape))
     del af488
     outside = {}
     for method in METHODS:
@@ -111,7 +112,8 @@ def run_one(name: str) -> str:
     summary = {"version": VERSION, "sample": name, "file": info["file"], "voxel_um": voxel,
                "thresholds": {m: meta["thresholds"][m] for m in METHODS}, "noise_sd": meta["noise_sd"],
                "background_centre": meta["background_centre"], "outside": outside,
-               "domain": "nuclear-stain tissue or the section outline widened 10 µm",
+               "threshold over": "the section's tissue from every channel (section_outline.stats_mask)",
+               "domain": "the section outline widened 10 µm (section_outline.count_domain)",
                "seconds": round(time.perf_counter() - started, 1)}
     (folder / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     return f"{name}: {summary['seconds']:.0f} s, outside the section {outside}"

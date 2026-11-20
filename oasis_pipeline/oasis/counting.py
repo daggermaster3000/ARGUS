@@ -2,7 +2,8 @@
 
 The mask (``cv.classical_masks``): AF488 (maximum over z) smoothed 0.5 µm, less its 20 µm Gaussian background, cut
 inside the tissue at the median + k robust SD of the section's own tissue, k = 3, 5, 8 (``kmad3`` …; ``kmad8`` is
-the counting method), inside the tissue or the section's outline widened 10 µm (``section_outline.count_domain``);
+the counting method), over the section's tissue from every channel, objects kept inside the section's outline
+widened 10 µm (``section_outline.stats_mask``, ``count_domain``);
 objects of 20 µm² or less removed, holes of 10 µm² or less filled. Objects outside the section are then taken
 out of each mask (``section_outline.drop_outside``). One connected object (8-connectivity) is one AF488⁺ cell.
 
@@ -29,7 +30,7 @@ from . import cells as ja
 from . import cv, paths, section_outline
 
 WORKERS = 4
-VERSION = 3                       #: 2: objects outside the section dropped; 3: cut inside tissue | outline
+VERSION = 4                       #: 2: outside the section dropped; 3: cut inside tissue | outline; 4: outline only
 
 
 def run_one(name: str) -> str:
@@ -42,12 +43,13 @@ def run_one(name: str) -> str:
     started = time.perf_counter()
     info = paths.section_info(name)
     af488, nuclear, voxel = cv.read_planes(paths.scan_path(name))
-    tissue = cv.tissue_mask(nuclear)
     del nuclear
     folder = paths.MASKS / name
     outline = section_outline.outline_for(folder, paths.scan_path(name))
-    # threshold from the nuclear-stain tissue; objects looked for there or in the section's outline (version 3)
-    masks, meta = cv.classical_masks(af488, tissue, voxel, section_outline.count_domain(outline, tissue))
+    # threshold over the section's tissue from every channel; objects looked for inside the outline widened 10 µm
+    # (version 4; until 20 Nov 2026 both came from the nuclear-stain Otsu mask, which lost much of a section's rim)
+    masks, meta = cv.classical_masks(af488, section_outline.stats_mask(outline, af488.shape), voxel,
+                                     section_outline.count_domain(outline, af488.shape))
     del af488
     line = section_outline.line_um(info)
     outside = {}
@@ -84,7 +86,8 @@ def run_one(name: str) -> str:
     summary = {"version": VERSION, "sample": name, "file": paths.scan_path(name).name, "voxel_um": voxel,
                "thresholds": {m: meta["thresholds"][m] for m in cv.METHODS}, "noise_sd": meta["noise_sd"],
                "background_centre": meta["background_centre"], "outside": outside,
-               "domain": "nuclear-stain tissue or the section outline widened 10 µm",
+               "threshold over": "the section's tissue from every channel (section_outline.stats_mask)",
+               "domain": "the section outline widened 10 µm (section_outline.count_domain)",
                "seconds": round(time.perf_counter() - started, 1)}
     (folder / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     return f"{name}: {summary['seconds']:.0f} s, outside the section {outside}"

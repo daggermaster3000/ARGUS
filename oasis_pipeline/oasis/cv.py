@@ -2,9 +2,10 @@
 
 AF488 (maximum over z) is smoothed (Gaussian, 0.5 µm), its local background (Gaussian, 20 µm, computed at 1/4
 resolution) is taken away, and the result is cut at the median + k robust SD (1.4826 × MAD) of the tissue's
-pixels (every 20th), k = 3, 5, 8, inside the tissue or the section's outline widened 10 µm
-(``section_outline.count_domain``); objects of 20 µm² or less are removed and holes of 10 µm² or less filled. The
-tissue here is the nuclear stain's Otsu mask at 1/8, closed, holes filled, widened by two steps.
+pixels (every 20th), k = 3, 5, 8, inside the section's outline widened 10 µm; objects of 20 µm² or less are removed and
+holes of 10 µm² or less filled. Since counting.py version 4 the tissue and the outline are the section's own, found in
+every channel (``section_outline.stats_mask`` and ``count_domain``); :func:`tissue_mask` (the nuclear stain's Otsu
+mask at 1/8, closed, holes filled, widened by two steps) was used until then.
 """
 from __future__ import annotations
 

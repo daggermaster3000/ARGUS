@@ -35,31 +35,44 @@ def build_outline(path: Path) -> dict:
     from microscopy_viewer import junction as jn
     from microscopy_viewer import loaders
 
+    from scipy import ndimage
+
     specs = loaders.load_path(path)
     try:
         overview = jn.build_overview(specs, jn.JunctionOptions(save=False))
     finally:
         loaders.release(path)
-    filled = jn.tissue_of(overview)
-    return {"filled": filled, "step": int(overview.step), "um": float(overview.um)}
+    valid = (overview.channels > 0).all(axis=0)
+    tissue = jn.tissue_mask(overview.channels[overview.nuclear], valid, overview.um,
+                            jn._others(overview.channels, overview.nuclear, jn.TISSUE_ALL_CHANNELS))
+    # as junction.tissue_of: holes filled for the outline; the tissue itself (holes left) for the threshold
+    return {"filled": ndimage.binary_fill_holes(tissue), "tissue": tissue, "step": int(overview.step),
+            "um": float(overview.um)}
 
 
 def save_outline(folder: Path, outline: dict) -> None:
     np.savez_compressed(folder / OUTLINE_FILE, filled=np.packbits(outline["filled"]),
+                        tissue=np.packbits(outline["tissue"]),
                         shape=np.asarray(outline["filled"].shape), step=outline["step"], um=outline["um"])
 
 
 def load_outline(folder: Path) -> dict:
     z = np.load(folder / OUTLINE_FILE)
     shape = tuple(int(v) for v in z["shape"])
-    filled = np.unpackbits(z["filled"])[: shape[0] * shape[1]].reshape(shape).astype(bool)
-    return {"filled": filled, "step": int(z["step"]), "um": float(z["um"])}
+    unpack = lambda key: np.unpackbits(z[key])[: shape[0] * shape[1]].reshape(shape).astype(bool)  # noqa: E731
+    out = {"filled": unpack("filled"), "step": int(z["step"]), "um": float(z["um"])}
+    if "tissue" in z.files:
+        out["tissue"] = unpack("tissue")
+    return out
 
 
 def outline_for(folder: Path, path: Path) -> dict:
-    """The cached outline of *folder*, made (and cached) from the scan *path* when missing."""
+    """The cached outline of *folder*, made (and cached) from the scan *path* when missing (or made before the
+    outline kept its tissue too)."""
     if (folder / OUTLINE_FILE).exists():
-        return load_outline(folder)
+        outline = load_outline(folder)
+        if "tissue" in outline:
+            return outline
     outline = build_outline(path)
     folder.mkdir(parents=True, exist_ok=True)
     save_outline(folder, outline)
@@ -85,15 +98,23 @@ def edge_distance(outline: dict, yx_um: np.ndarray, voxel: float) -> np.ndarray:
     return jn.edge_distance(grid, yx_um[:, 0] / voxel, yx_um[:, 1] / voxel, outline["filled"])
 
 
-def count_domain(outline: dict, tissue: np.ndarray) -> np.ndarray:
-    """Where AF488⁺ objects are looked for, at full resolution: *tissue* (the coarse nuclear-stain mask the threshold
-    is taken over) or the outline, widened by :data:`TOLERANCE_UM`.
-
-    The nuclear-stain mask alone misses tissue whose nuclear stain is dim; the outline is found in every channel
-    (``junction.tissue_of``), so a labelled cell there is no longer cut off. Objects outside the section are still
-    dropped afterwards (:func:`drop_outside`). Since 20 Nov 2026 (``af488_masks.py`` version 3).
+def count_domain(outline: dict, shape: tuple[int, int]) -> np.ndarray:
+    """Where AF488⁺ objects are looked for, at full resolution (*shape*): inside the section's outline or within
+    :data:`TOLERANCE_UM` of it. The outline is found in every channel (``junction.tissue_of``), so tissue whose nuclear
+    stain is dim is not left out (the nuclear-stain mask used until 20 Nov 2026 lost much of a section's rim). Objects
+    outside the section are still dropped afterwards (:func:`drop_outside`).
     """
-    return near_outline(outline, np.arange(tissue.shape[0]), np.arange(tissue.shape[1])) | tissue
+    return near_outline(outline, np.arange(shape[0]), np.arange(shape[1]))
+
+
+def stats_mask(outline: dict, shape: tuple[int, int]) -> np.ndarray:
+    """The pixels a section's threshold is taken over, at full resolution (*shape*): the section's tissue from every
+    channel (``junction.tissue_mask`` on the overview, holes left as holes, so tears and gaps do not lower the
+    median and robust SD)."""
+    tissue, step = outline["tissue"], outline["step"]
+    r = np.clip(np.arange(shape[0]) // step, 0, tissue.shape[0] - 1)
+    c = np.clip(np.arange(shape[1]) // step, 0, tissue.shape[1] - 1)
+    return tissue[r][:, c]
 
 
 def near_outline(outline: dict, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
