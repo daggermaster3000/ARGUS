@@ -4364,7 +4364,7 @@ const VERSIONS = "Python 3.10/3.13, Cellpose 4.2, scikit-image 0.25, SciPy 1.15,
 function positivityMethods(key) {
   const [key0, k] = key.split("-");
   const spec = METHODS.find((x) => x.key === key0) || {};
-  const m = spec.of || key0;                      // a size variant ("gauss5") is its mask ("gauss") with another size filter
+  const m = spec.of || key0;                      // a variant ("gauss5", "gpool") is its mask ("gauss") with another size filter or spread
   const sd = k + " robust standard deviations (1.4826 × median absolute deviation)";
   const cleanup = "Objects of " + (spec.min_um2 || 20) + " µm² or smaller were removed and holes of 10 µm² or smaller filled; each connected object " +
     "(8-connectivity) was counted as one AF488⁺ cell, at its centroid.";
@@ -4380,8 +4380,12 @@ function positivityMethods(key) {
     "filled.";
   const outside = (what) => inSection.replace("{what}", what);
   if (m === "gauss") return "AF488⁺ cells were counted as objects of a mask of the AF488 channel: the maximum-intensity projection over z, " +
-    "smoothed with a Gaussian (σ = 0.5 µm), less its local background (Gaussian, σ = 20 µm), and thresholded at the median + " + sd +
-    " of the section's tissue pixels; pixels above the threshold were kept inside the section's outline widened by 10 µm. The tissue " +
+    "smoothed with a Gaussian (σ = 0.5 µm), less its local background (Gaussian, σ = 20 µm), and thresholded at the median + " +
+    (spec.spread === "pooled" ? k + " robust standard deviations, the median being the section's tissue pixels' and the robust standard deviation " +
+      "(1.4826 × median absolute deviation) the median of every section's own, pooled over all sections"
+      : spec.spread === "slide" ? k + " robust standard deviations, the median being the section's tissue pixels' and the robust standard deviation " +
+      "(1.4826 × median absolute deviation) the median of the own of every section on the same slide"
+      : sd + " of the section's tissue pixels") + "; pixels above the threshold were kept inside the section's outline widened by 10 µm. The tissue " +
     "and the outline were found in every channel (see below), so that tissue whose nuclear stain is dim was not left out. " + cleanup +
     outside("Objects");
   if (m === "median") return "AF488⁺ cells were counted as objects of a mask of the AF488 channel: the maximum-intensity projection over z, " +

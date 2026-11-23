@@ -21,7 +21,11 @@ The methods:
   robust SD are each section's own, from its tissue pixels, so the threshold is set per section.
 - **The same mask with a smaller size filter** (:data:`SIZE_VARIANTS`: objects > 10, > 5 and > 3 µm² kept; 3, 5,
   8 SD): the same thresholds and hole filling, only fewer small objects dropped, to see what the 20 µm² filter
-  does to the counts and the statistics. Added on 19 Nov 2026; a section made before gets them from
+  does to the counts and the statistics.
+- **The same mask with a shared threshold spread** (``gpool``, ``gslide``; 3, 5, 8 SD): the section's own median + k × the
+  robust SD pooled over all sections (the median of the sections' own SDs) or over the sections of its slide
+  (:func:`write_spreads`, ``parts/spreads.json``), so that a noisy section does not raise its own bar nor a quiet, empty
+  one lower it. Added on 19 Nov 2026; a section made before gets them from
   :func:`run_sizes` (the other methods are not computed again).
 - **AF488 mask, local median 45 µm background** (3, 5, 7, 8 SD) — as ``notebooks/dataset/james_masks.py``:
   AF488 less its 45 µm local median (``junction_analysis.less_local_median``), smoothed 0.5 µm, the
@@ -106,6 +110,11 @@ METHODS = {
                "default": 8, "min_um2": 5.0, "of": "gauss"},
     "gauss3": {"label": "AF488 mask, Gaussian 20 µm background, objects > 3 µm²", "kind": "mask", "ks": (3, 5, 8),
                "default": 8, "min_um2": 3.0, "of": "gauss"},
+    # the same mask, the threshold's robust SD not the section's own (its median stays the section's): "spread"
+    "gpool": {"label": "AF488 mask, Gaussian 20 µm background, SD pooled over all sections", "kind": "mask", "ks": (3, 5, 8),
+              "default": 8, "min_um2": 20.0, "of": "gauss", "spread": "pooled"},
+    "gslide": {"label": "AF488 mask, Gaussian 20 µm background, SD pooled over the slide's sections", "kind": "mask",
+               "ks": (3, 5, 8), "default": 8, "min_um2": 20.0, "of": "gauss", "spread": "slide"},
     "median": {"label": "AF488 mask, local median 45 µm background", "kind": "mask", "ks": (3, 5, 7, 8), "default": 5,
                "min_um2": 20.0},
     "cellmf": {"label": "Per-nucleus rule, median-filtered mean", "kind": "cell", "ks": (3, 5, 7), "default": 7,
@@ -114,7 +123,7 @@ METHODS = {
                 "column": "AF488 mean"},
 }
 DEFAULT = "gauss-8"               #: the counting method of the official analysis (median + 8 robust SD)
-#: the Gaussian mask's variants with another size filter (computed with it, or later by run_sizes)
+#: the Gaussian mask's variants with another size filter or threshold spread (computed with it, or later by run_sizes)
 SIZE_VARIANTS = tuple(m for m, spec in METHODS.items() if spec.get("of") == "gauss")
 MEDIAN_BACKGROUND_UM = 45.0       #: junction_analysis.less_local_median's window (for the label only)
 SIMPLIFY_PX = 0.5                 #: outlines simplified to within this many picture pixels
@@ -209,6 +218,32 @@ def sizes_done(out: Path, name: str) -> bool:
         return all(k in counts and mask_file(out, name, k).exists() for k in method_keys(SIZE_VARIANTS))
     except Exception:
         return False
+
+
+def spread_file(out: Path) -> Path:
+    return out / "parts" / "spreads.json"
+
+
+def write_spreads(out: Path, table: pd.DataFrame) -> dict:
+    """The robust SD of the threshold variants with a shared spread: the median over all sections of each section's own
+    (``pooled``) and the median over each slide's sections (``slide``: section → value), from the stored counting
+    summaries. A section's threshold is then its own median + k × that SD."""
+    noise = {n: json.loads((MASKS / n / "summary.json").read_text(encoding="utf-8"))["noise_sd"] for n in table["name"]}
+    t = table.assign(noise=table["name"].map(noise))
+    by_slide = t.groupby("slide")["noise"].median()
+    spreads = {"pooled": float(t["noise"].median()), "slide": {n: float(by_slide[s]) for n, s in zip(t["name"], t["slide"])}}
+    spread_file(out).parent.mkdir(parents=True, exist_ok=True)
+    spread_file(out).write_text(json.dumps(spreads), encoding="utf-8")
+    return spreads
+
+
+def variant_cut(name: str, method: str, k: float, stored_summary: dict, spreads: dict | None) -> float | None:
+    """The threshold of a variant with a shared spread (None for the others): the section's median + k × the SD."""
+    spread = METHODS[method].get("spread")
+    if not spread:
+        return None
+    sd = spreads["pooled"] if spread == "pooled" else spreads["slide"][name]
+    return float(stored_summary["background_centre"]) + k * sd
 
 
 def run_one(name: str, out: str) -> str:
@@ -481,9 +516,17 @@ def run_masks(name: str, out: str, sizes_only: bool = False) -> str:
     del smooth
     cuts, _c, _s = robust_cuts(signal, tissue, METHODS["gauss"]["ks"])
     stored = stored_summary["thresholds"]
-    for m in (() if sizes_only else ("gauss",)) + SIZE_VARIANTS:       # the same mask, each with its size filter
+    spreads = json.loads(spread_file(out).read_text(encoding="utf-8")) if spread_file(out).exists() else None
+    variants = SIZE_VARIANTS
+    if sizes_only:                                    # only the variants not there yet
+        have = json.loads(methods_file(out, name).read_text(encoding="utf-8"))["counts"]
+        variants = tuple(m for m in SIZE_VARIANTS if not all(
+            f"{m}-{k}" in have and mask_file(out, name, f"{m}-{k}").exists() for k in METHODS[m]["ks"]))
+    for m in (() if sizes_only else ("gauss",)) + variants:            # the same mask, each with its size filter or spread
         for k in METHODS[m]["ks"]:
-            cut = float(stored.get(f"kmad{k:g}", cuts[k]))        # the stored threshold (equal to the recomputed one)
+            cut = variant_cut(name, m, k, stored_summary, spreads)
+            if cut is None:
+                cut = float(stored.get(f"kmad{k:g}", cuts[k]))    # the stored threshold (equal to the recomputed one)
             shapes = place(mask_objects(in_section(cleaned((signal > cut) & domain, voxel, min_um2(m))), voxel, f))
             record(f"{m}-{k}", shapes, cut)
             if m == "gauss":
@@ -796,8 +839,9 @@ def main(argv: list[str]) -> int:
     pool_run("AF555 pictures", run_red, todo[:limit], out, every=25)
     todo = [n for n in table["name"] if not masks_done(out, n)][:limit]
     pool_run("outlines and counts", run_masks, todo, out)
+    write_spreads(out, table)                   # the shared robust SDs of the gpool / gslide thresholds
     todo = [n for n in table["name"] if masks_done(out, n) and not sizes_done(out, n)][:limit]
-    pool_run("size variants (objects > 10, > 5 and > 3 µm²)", run_sizes, todo, out)
+    pool_run("variants (objects > 10, > 5, > 3 µm²; SD pooled over all sections, over the slide)", run_sizes, todo, out)
     n = assemble(out, table)
     print(f"written {out / 'data.json'}: {n} sections", flush=True)
     import objects_data                         # every counted object, for the figure builder (objects.js)
