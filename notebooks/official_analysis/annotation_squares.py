@@ -21,7 +21,8 @@ Written into ``OUT`` (``run_analysis_20261028/annotation_v2``):
 - ``images/<code>_488.png`` and ``<code>_405.png``: AF488 (the section's display range, as the browser) and the nuclear
   stain (its own 1st–99.8th percentile), maximum-intensity projection over z, at the scan's pixels (0.325 µm);
 - ``squares.js``: ``window.SQUARES`` — per square only its random code, image names and geometry, in a shuffled order;
-- ``key.csv``: code → section, genotype, experiment, compartment, square position (µm). **Not for the annotators.**
+- ``../annotation_v2_key.csv`` (:data:`KEY`, outside the folder): code → section, genotype, experiment, compartment,
+  square position (µm). **Not for the annotators.**
 - ``annotate.html`` and ``PROTOCOL.md``, copied from beside this script.
 
     python notebooks/official_analysis/annotation_squares.py
@@ -52,7 +53,8 @@ RUN = DATA / "cells_analysis" / "2026-10-28_090440 re-scored"
 ANALYSIS = DATA / "run_analysis_20261028"
 MASKS = ANALYSIS / "af488_mask"
 BROWSER = ANALYSIS / "section_browser"
-OUT = ANALYSIS / "annotation_v2"
+OUT = ANALYSIS / "annotation_v2"                 #: the folder to hand to the annotators
+KEY = ANALYSIS / "annotation_v2_key.csv"         #: code -> section; kept outside it, so the set stays blind
 SEED = 20261123
 SQUARE_UM = 120.0                 #: the counting frame
 MARGIN_UM = 20.0                  #: context shown round it (not counted)
@@ -158,7 +160,7 @@ def main() -> int:
     (OUT / "squares.js").write_text("window.SQUARES = " + json.dumps(squares, separators=(",", ":")) + ";\n",
                                     encoding="utf-8")
     import csv
-    with open(OUT / "key.csv", "w", newline="", encoding="utf-8") as f:
+    with open(KEY, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(key[0]))
         w.writeheader()
         w.writerows(key)

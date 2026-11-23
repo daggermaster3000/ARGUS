@@ -1,7 +1,7 @@
 """Analysis of the blinded square counts (``annotation_squares.py``): how well two people agree, and the automated count
 against their consensus.
 
-Reads ``annotation_v2/key.csv`` and every ``annotation_v2/counts/square_counts_*.csv`` (the annotators' exports; one
+Reads ``annotation_v2_key.csv`` and every ``annotation_v2/counts/square_counts_*.csv`` (the annotators' exports; one
 file each). The automated count of a square is the number of counting-method objects (``af488_mask/<section>/
 objects.parquet``, mask ``kmad8``; also ``kmad5``) whose centroid lies in the 120 µm frame.
 
@@ -108,7 +108,7 @@ def ratio(df, col, ref="consensus"):
 
 
 def main() -> int:
-    key = pd.read_csv(OUT / "key.csv")
+    key = pd.read_csv(aq.KEY)
     squares, dots = load_counts()
     who = sorted(squares["annotator"].unique())[:2]
     wide = squares.pivot_table(index="code", columns="annotator", values="n_dots").dropna()[who]
