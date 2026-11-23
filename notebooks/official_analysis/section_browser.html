@@ -675,7 +675,7 @@ function draw(s) {
   for (const q of s.squares || []) {
     gQ.appendChild(el("rect", { x: q.x, y: q.y, width: q.size, height: q.size, "vector-effect": "non-scaling-stroke" }));
     const t = el("text", { x: q.x, y: q.y - 2, fill: "#ffff00", stroke: "none", "font-size": Math.max(q.size / 14, 3), "font-family": "Arial" });
-    t.textContent = q.compartment;
+    t.textContent = q.compartment + (q.code ? " · " + q.code : "");
     gQ.appendChild(t);
   }
   if (s.line && s.line.length) gL.appendChild(el("polyline", { points: s.line.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
@@ -977,7 +977,7 @@ function info(s) {
   if (s.squares && s.squares.length) {
     const anns = [...new Set(s.squares.flatMap((q) => Object.keys(q.human)))].sort();
     html += '<h2>Blinded count squares</h2><div style="color:' + DARK + '">120 µm frames (yellow); the human count per annotator, the automated count of ' + methodText() + "</div><dl>" +
-      s.squares.map((q) => row(q.compartment, anns.map((a) => "human " + (a - 2) + ": " + fmt(q.human[a])).concat(["automated " + fmt(q.automated ? q.automated[KEY] : null)]).join(", "))).join("") + "</dl>";
+      s.squares.map((q) => row(q.compartment + (q.code ? " (" + q.code + ")" : ""), anns.map((a) => "human " + (a - 2) + ": " + fmt(q.human[a])).concat(["automated " + fmt(q.automated ? q.automated[KEY] : null)]).join(", "))).join("") + "</dl>";
   }
   const blob = (c) => '<path d="M4 9C4 5 7 3 10 4S15 7 14 11 9 15 6 13 4 11 4 9Z" fill="none" stroke="' + c + '" stroke-width="1.5"/>';
   const one = METHOD.kind === "cell" ? "AF488⁺ cell (its grown region)" : "AF488⁺ object (mask outline)";

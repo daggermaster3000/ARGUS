@@ -3537,6 +3537,12 @@ function withCi(rows) {
   ci.anyZero = rows.some((e) => e.human === 0 || e.auto === 0);
   return ci;
 }
+// the squares of a row's section: "code compartment: human / compared" (the compared: automated or the other annotator)
+function squareLines(e, sep) {
+  const vs = hvVsHuman() ? String(ST.hv.vs) : null, fmt = (v) => (v === undefined || v === null ? "–" : String(v));
+  return ((e.r.d && e.r.d.squares) || []).filter((q) => q.human && q.human[String(e.ann)] !== undefined).map((q) =>
+    q.code + " " + q.compartment + ": " + q.human[String(e.ann)] + " / " + (vs ? fmt(q.human[vs]) : fmt(q.automated ? q.automated[ST.method] : null))).join(sep);
+}
 // number formats for the panel: a ratio from ln, with its CI; a plain value with its CI
 const fmtRatio = (v, d = 2) => (v && Number.isFinite(v[0]) ? Math.exp(v[0]).toFixed(d) + " (" + Math.exp(v[1]).toFixed(d) + "–" + Math.exp(v[2]).toFixed(d) + ")" : "–");
 const fmtCi = (v, d = 2) => (v && Number.isFinite(v[0]) ? minus(v[0].toFixed(d) + (v[1] < 0 || v[2] < 0 ? " (" + v[1].toFixed(d) + " to " + v[2].toFixed(d) + ")"
@@ -3644,8 +3650,8 @@ function humanGroupsFigure(z) {
       const gc = groupColor({ key: grp.g ? grp.key : g, g });
       if (hSec) traces.push({ type: "scatter", mode: "markers", meta: "leg:" + g, legendgroup: g, name: name(g, g), showlegend: !seen.has(g),
         x: sec.map((v) => cx + pos.sec + ST.jitter * seededJitter(v.e.r.id + v.e.ann, 1)), y: sec.map((v) => Math.exp(v.y)),
-        customdata: sec.map((v) => [v.e.r.id, v.e.r.slide, v.e.label, v.e.human, v.e.auto, Math.exp(v.y).toFixed(2)]),
-        hovertemplate: "%{customdata[0]} (%{customdata[2]})<br>%{customdata[1]}<br>human %{customdata[3]}, " + yWord() + " %{customdata[4]}: %{customdata[5]}×<extra></extra>",
+        customdata: sec.map((v) => [v.e.r.id, v.e.r.slide, v.e.label, v.e.human, v.e.auto, Math.exp(v.y).toFixed(2), squareLines(v.e, "<br>")]),
+        hovertemplate: "%{customdata[0]} (%{customdata[2]})<br>%{customdata[1]}<br>human %{customdata[3]}, " + yWord() + " %{customdata[4]}: %{customdata[5]}×<br>%{customdata[6]}<extra></extra>",
         marker: { symbol: SYMBOL[g], size: ST.secSize * z, color: gc.fill, opacity: ST.secOpacity, line: { color: gc.edge, width: 0.3 * z } } });
       if (hSec) seen.add(g);
       if (hSl) traces.push({ type: "scatter", mode: "markers", legendgroup: g, ...(hSec ? { showlegend: false } : { meta: "leg:" + g, name: name(g, g), showlegend: !seen.has(g) }),
@@ -3731,8 +3737,8 @@ function humanFigure(z) {
     if (!pts.length) continue;
     const gc = groupColor({ key: g, g }), key = g + " a" + ann;
     traces.push({ type: "scatter", mode: "markers", meta: "leg:" + key, name: name(key, g + ", " + ANN_NAME[ann]), x: pts.map(fx), y: pts.map(fy),
-      customdata: pts.map((e) => [e.code, e.r.id, e.human, e.auto]),
-      hovertemplate: "%{customdata[0]} %{customdata[1]}<br>human %{customdata[2]}, " + yWord() + " %{customdata[3]}<extra></extra>",
+      customdata: pts.map((e) => [e.code, e.r.id, e.human, e.auto, squareLines(e, "<br>")]),
+      hovertemplate: "%{customdata[0]} %{customdata[1]}<br>human %{customdata[2]}, " + yWord() + " %{customdata[3]}<br>%{customdata[4]}<extra></extra>",
       marker: { symbol: ANN_SYMBOL[ann], size: (hv.size || 4) * z, color: gc.fill, line: { color: gc.edge, width: 0.8 * z } } });
   }
   const xs = rows.map(fx), ys = rows.map(fy);
@@ -3908,10 +3914,10 @@ function updateHuman() {
       " and slide as a random intercept (REML, Wald CI and P). Experiments: one-way ANOVA F test on the slide means. With few slides per group these tests have little power.</p>";
   }
   $("hvStats").innerHTML = html;
-  const head = ["", "Section", "Genotype", "Experiment", "Annotator", "Counted area", "Human", yCap(), yCap() + " ÷ human", "log₂ ratio"];
+  const head = ["", "Section", "Genotype", "Experiment", "Annotator", "Counted area", "Squares (human / " + yWord() + ")", "Human", yCap(), yCap() + " ÷ human", "log₂ ratio"];
   $("hvTable").innerHTML = "<table class='st'><thead><tr>" + head.map((h) => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>" +
     HV.rows.map((e) => "<tr><td>" + e.code + "</td><td>" + e.r.id + "</td><td>" + e.r.genotype + "</td><td>" + e.r.experiment + "</td><td>" + e.label + "</td><td style='text-align:left;white-space:normal'>" +
-      e.h.area + "</td><td>" + e.human + "</td><td>" + e.auto + "</td><td>" + e.ratio.toFixed(2) + "</td><td>" + minus(e.log2.toFixed(2)) + "</td></tr>").join("") + "</tbody></table>";
+      e.h.area + "</td><td style='text-align:left;white-space:nowrap'>" + (squareLines(e, "<br>") || "–") + "</td><td>" + e.human + "</td><td>" + e.auto + "</td><td>" + e.ratio.toFixed(2) + "</td><td>" + minus(e.log2.toFixed(2)) + "</td></tr>").join("") + "</tbody></table>";
 }
 
 function humanCsv(all) {
