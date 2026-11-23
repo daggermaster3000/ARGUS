@@ -135,22 +135,23 @@ def main() -> int:
         print(f"1. Inter-rater agreement: needs a second annotator; 'consensus' below is {who[0]}'s count\n")
     else:
         inter_rater(t, who, dots)
-    per_square(t, res)
+    refs = ["consensus"] + (who if len(who) > 1 else [])          # the automated count against each human reference
+    per_square(t, res, refs)
     cell_match(t, key, dots, res)
-    automated_vs_human(t, res)
-    genotype_on_squares(t, res)
+    automated_vs_human(t, res, refs)
+    genotype_on_squares(t, res, refs)
     return 0
 
 
-def per_square(t: pd.DataFrame, res: Path) -> None:
-    """Per square, the automated count against the human one: CCC, Spearman, Bland–Altman on log(1 + n)."""
+def per_square(t: pd.DataFrame, res: Path, refs: list[str]) -> None:
+    """Per square, the automated count against each human reference: CCC, Spearman, Bland–Altman on log(1 + n)."""
     print("2a. Automated vs human, per square")
-    h = t["consensus"].to_numpy(float)
     rows = []
-    for m in MASKS_AUTO:
+    for ref, m in [(r, m) for r in refs for m in MASKS_AUTO]:
+        h = t[ref].to_numpy(float)
         a = t[f"auto_{m}"].to_numpy(float)
         d = np.log1p(a) - np.log1p(h)
-        rows.append({"mask": m, "CCC": round(ccc(a, h), 2), "CCC log(1+n)": round(ccc(np.log1p(a), np.log1p(h)), 2),
+        rows.append({"against": ref, "mask": m, "CCC": round(ccc(a, h), 2), "CCC log(1+n)": round(ccc(np.log1p(a), np.log1p(h)), 2),
                      "Spearman": round(pd.Series(a).corr(pd.Series(h), method="spearman"), 2),
                      "BA bias ×": round(float(np.exp(d.mean())), 2),
                      "BA 95 % LoA ×": f"{np.exp(d.mean() - 1.96 * d.std(ddof=1)):.2f}–"
@@ -211,34 +212,40 @@ def inter_rater(t: pd.DataFrame, who: list[str], dots: pd.DataFrame) -> None:
     print(f"   Bland–Altman on log(1+n): bias {np.exp(diff.mean()):.2f}×, 95 % LoA {np.exp(diff.mean() - 1.96 * diff.std(ddof=1)):.2f}–"
           f"{np.exp(diff.mean() + 1.96 * diff.std(ddof=1)):.2f}×")
     print(f"   cells matched within {MATCH_UM:g} µm: {matched}; that is {matched / max(a.sum(), 1):.0%} of {who[0]}'s and "
-          f"{matched / max(b.sum(), 1):.0%} of {who[1]}'s dots\n")
+          f"{matched / max(b.sum(), 1):.0%} of {who[1]}'s dots")
+    # does one annotator count relatively more in one genotype? (the human benchmark for the automated genotype bias)
+    by = {g: ratio(t[t.genotype == g], who[0], who[1]) for g in ("WT3", "GD1")}
+    lo, hi = boot_sections(t, lambda d: ratio(d[d.genotype == "WT3"], who[0], who[1]) /
+                           ratio(d[d.genotype == "GD1"], who[0], who[1]))
+    print(f"   Σ {who[0]} ÷ Σ {who[1]}: WT3 {by['WT3']:.2f}, GD1 {by['GD1']:.2f}; WT3 ÷ GD1 {by['WT3'] / by['GD1']:.2f} "
+          f"({lo:.2f}–{hi:.2f})\n")
 
 
-def automated_vs_human(t: pd.DataFrame, res: Path) -> None:
-    print("2c. Automated ÷ consensus (Σ over squares; 95 % CI, section bootstrap)")
+def automated_vs_human(t: pd.DataFrame, res: Path, refs: list[str]) -> None:
+    print("2c. Automated ÷ human (Σ over squares; 95 % CI, section bootstrap)")
     rows = []
-    for m in MASKS_AUTO:
+    for ref, m in [(r, m) for r in refs for m in MASKS_AUTO]:
         col = f"auto_{m}"
         for label, part in [("all", t)] + [(g, t[t.genotype == g]) for g in ("WT3", "GD1")] + \
                            [(c, t[t.compartment == c]) for c in aq.COMPARTMENTS]:
-            r = ratio(part, col)
-            lo, hi = boot_sections(part, lambda d: ratio(d, col))
-            rows.append({"mask": m, "subset": label, "auto ÷ consensus": round(r, 2), "CI": f"{lo:.2f}–{hi:.2f}"})
-        bias = lambda d: ratio(d[d.genotype == "WT3"], col) / ratio(d[d.genotype == "GD1"], col)  # noqa: E731
+            r = ratio(part, col, ref)
+            lo, hi = boot_sections(part, lambda d: ratio(d, col, ref))
+            rows.append({"against": ref, "mask": m, "subset": label, "auto ÷ human": round(r, 2), "CI": f"{lo:.2f}–{hi:.2f}"})
+        bias = lambda d: ratio(d[d.genotype == "WT3"], col, ref) / ratio(d[d.genotype == "GD1"], col, ref)  # noqa: E731
         lo, hi = boot_sections(t, bias)
-        rows.append({"mask": m, "subset": "WT3 ÷ GD1 (genotype bias)", "auto ÷ consensus": round(bias(t), 2),
+        rows.append({"against": ref, "mask": m, "subset": "WT3 ÷ GD1 (genotype bias)", "auto ÷ human": round(bias(t), 2),
                      "CI": f"{lo:.2f}–{hi:.2f}"})
     agree = pd.DataFrame(rows)
     print(agree.to_string(index=False), "\n")
     agree.to_csv(res / "automated_vs_consensus.csv", index=False)
 
 
-def genotype_on_squares(t: pd.DataFrame, res: Path) -> None:
+def genotype_on_squares(t: pd.DataFrame, res: Path, refs: list[str]) -> None:
     print("3. WT3 ÷ GD1, mean count per square (95 % CI, section bootstrap)")
     rows = []
     for comp in ("crossed", "junction", "home"):
         part = t[t.compartment == comp]
-        for col in ("consensus", *[f"auto_{m}" for m in MASKS_AUTO]):
+        for col in (*refs, *[f"auto_{m}" for m in MASKS_AUTO]):
             f = lambda d: d[d.genotype == "WT3"][col].mean() / d[d.genotype == "GD1"][col].mean()  # noqa: E731
             lo, hi = boot_sections(part, f)
             rows.append({"compartment": comp, "count": col, "WT3 ÷ GD1": round(f(part), 2), "CI": f"{lo:.2f}–{hi:.2f}"})

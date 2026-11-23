@@ -338,7 +338,7 @@ Package built {built}.
   (home white, crossed magenta), the objects too small to count (removed by the size filter, a toggle), the human
   annotators' dots and the blinded count squares, a table and plots; zoom in for the full-resolution image
   and outlines. `figure_builder.html` beside it re-draws the paper's figures with any normalisation and writes the
-  Methods text for them. Both pages can also count with a smaller size filter (objects > 10 or > 5 µm² instead of
+  Methods text for them. Both pages can also count with a smaller size filter (objects > 10, > 5 or > 3 µm² instead of
   > 20 µm²), to show what the filter does to the counts and the statistics.
 - **Paper figures**: `figures/` (PDF, PNG, SVG); their tables in `results/tables/`.
 - **Methods**: `methods/METHODS.md`; the executed analysis notebooks in `methods/notebooks/` (`.html` to read).

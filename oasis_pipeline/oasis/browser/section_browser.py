@@ -19,7 +19,7 @@ The methods:
   objects of 20 µm² or less dropped, holes of 10 µm² or less filled. One object = one AF488⁺ cell body. 8 SD is the
   counting method of the official analysis (the page's default; until 9 Nov 2026 it was 5 SD). The median and
   robust SD are each section's own, from its tissue pixels, so the threshold is set per section.
-- **The same mask with a smaller size filter** (:data:`SIZE_VARIANTS`: objects > 10 µm² and > 5 µm² kept; 3, 5,
+- **The same mask with a smaller size filter** (:data:`SIZE_VARIANTS`: objects > 10, > 5 and > 3 µm² kept; 3, 5,
   8 SD): the same thresholds and hole filling, only fewer small objects dropped, to see what the 20 µm² filter
   does to the counts and the statistics.
 - **AF488 mask, local median 45 µm background** (3, 5, 7, 8 SD) — as a local-median mask:
@@ -84,6 +84,8 @@ METHODS = {
                 "default": 8, "min_um2": 10.0, "of": "gauss"},
     "gauss5": {"label": "AF488 mask, Gaussian 20 µm background, objects > 5 µm²", "kind": "mask", "ks": (3, 5, 8),
                "default": 8, "min_um2": 5.0, "of": "gauss"},
+    "gauss3": {"label": "AF488 mask, Gaussian 20 µm background, objects > 3 µm²", "kind": "mask", "ks": (3, 5, 8),
+               "default": 8, "min_um2": 3.0, "of": "gauss"},
     "median": {"label": "AF488 mask, local median 45 µm background", "kind": "mask", "ks": (3, 5, 7, 8), "default": 5,
                "min_um2": 20.0},
     "cellmf": {"label": "Per-nucleus rule, median-filtered mean", "kind": "cell", "ks": (3, 5, 7), "default": 7,
@@ -103,7 +105,7 @@ SQUARES_KEY = paths.SQUARES_KEY
 SQUARES_COUNTS = paths.SQUARES_COUNTS
 #: who counted the squares (the name typed into annotate.html, lower case) → their number as an annotator above; the
 #: browser shows the number, never the name. Squares of annotator a are the human count n = 2 + a ("squares, annotator a").
-SQUARE_ANNOTATORS = {"james": 1, "quillan": 2}
+SQUARE_ANNOTATORS = {"james": 1, "quillan": 2, "annotator 3": 3}
 TARGET_UM = 1.3                   #: picture pixel size (whole pixels of the scan are averaged)
 THUMB_PX = 300                    #: longest side of a thumbnail
 DISPLAY_PCT = (1.0, 99.7)         #: display range: these percentiles of AF488 inside the tissue

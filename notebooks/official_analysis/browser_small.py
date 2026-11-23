@@ -11,7 +11,7 @@ marked as in or outside the section (``section_outline``: the rule that drops co
     parts/small/index.js         window.SMALL_INDEX = {id: {key: number of small objects in the section}}
 
 Rings as ``browser_outlines.fine_rings``. ``key`` is ``gauss-3``, ``gauss-5`` or ``gauss-8`` (the counting method),
-or the same for the variants with a 10 or 5 µm² size filter (``gauss10-8`` …: what that filter removes).
+or the same for the variants with a 10, 5 or 3 µm² size filter (``gauss10-8`` …: what that filter removes).
 A section with all its files is done, so a rerun skips it; the index is rebuilt from the files at the end.
 
     python notebooks/official_analysis/browser_small.py            # every section not done yet
@@ -41,7 +41,7 @@ sys.path.insert(0, str(HERE))
 DATA = Path(r"D:\Slidescanner extracted")
 RUN = DATA / "cells_analysis" / "2026-10-28_090440 re-scored"     # the cells-analysis run
 BROWSER = DATA / "run_analysis_20261028" / "section_browser"      # section_browser.py's folder
-KEYS = tuple(f"{m}-{k}" for m in ("gauss", "gauss10", "gauss5") for k in (3, 5, 8))   #: the Gaussian mask (and its size variants)
+KEYS = tuple(f"{m}-{k}" for m in ("gauss", "gauss10", "gauss5", "gauss3") for k in (3, 5, 8))   #: the Gaussian mask (and its size variants)
 WORKERS = 4                       #: each holds a slide scan's planes (~2 GB)
 VERSION = 3                       #: 2: tissue | outline; 3: threshold and objects from the outline only
 # --------------------------------------------------------------------------

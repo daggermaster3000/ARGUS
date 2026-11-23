@@ -3,7 +3,7 @@
 ``section_browser.py`` stores every method's outlines simplified to 0.5 overview pixels (~0.65 µm), which is right
 for the overview but cuts corners once the page shows the full-resolution tiles (``browser_tiles.py``). This script
 traces the objects of the Gaussian 20 µm background mask (:data:`KEYS`: 3, 5 and 8 SD; 8 SD is the counting method;
-and its variants with a 10 or 5 µm² size filter)
+and its variants with a 10, 5 or 3 µm² size filter)
 again, at ~0.325 µm per pixel, without simplifying (only points on a straight run are dropped), so an outline
 follows the pixels of the mask that was counted.
 
@@ -38,7 +38,7 @@ from .. import paths  # noqa: E402
 
 # ---------------------------------------------------------------- Settings
 BROWSER = paths.BROWSER                                          # section_browser.py's folder
-KEYS = tuple(f"{m}-{k}" for m in ("gauss", "gauss10", "gauss5") for k in (3, 5, 8))   #: the Gaussian mask (and its size variants)
+KEYS = tuple(f"{m}-{k}" for m in ("gauss", "gauss10", "gauss5", "gauss3") for k in (3, 5, 8))   #: the Gaussian mask (and its size variants)
                                   #: at each threshold, traced at full resolution
 STRAIGHT_PX = 0.05                #: points within this many scan pixels of a straight run are dropped
 WORKERS = 4                       #: each holds a slide scan's planes (~2 GB)

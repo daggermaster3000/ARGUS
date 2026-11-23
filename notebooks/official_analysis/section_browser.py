@@ -19,7 +19,7 @@ The methods:
   objects of 20 µm² or less dropped, holes of 10 µm² or less filled. One object = one AF488⁺ cell body. 8 SD is the
   counting method of the official analysis (the page's default; until 9 Nov 2026 it was 5 SD). The median and
   robust SD are each section's own, from its tissue pixels, so the threshold is set per section.
-- **The same mask with a smaller size filter** (:data:`SIZE_VARIANTS`: objects > 10 µm² and > 5 µm² kept; 3, 5,
+- **The same mask with a smaller size filter** (:data:`SIZE_VARIANTS`: objects > 10, > 5 and > 3 µm² kept; 3, 5,
   8 SD): the same thresholds and hole filling, only fewer small objects dropped, to see what the 20 µm² filter
   does to the counts and the statistics. Added on 19 Nov 2026; a section made before gets them from
   :func:`run_sizes` (the other methods are not computed again).
@@ -104,6 +104,8 @@ METHODS = {
                 "default": 8, "min_um2": 10.0, "of": "gauss"},
     "gauss5": {"label": "AF488 mask, Gaussian 20 µm background, objects > 5 µm²", "kind": "mask", "ks": (3, 5, 8),
                "default": 8, "min_um2": 5.0, "of": "gauss"},
+    "gauss3": {"label": "AF488 mask, Gaussian 20 µm background, objects > 3 µm²", "kind": "mask", "ks": (3, 5, 8),
+               "default": 8, "min_um2": 3.0, "of": "gauss"},
     "median": {"label": "AF488 mask, local median 45 µm background", "kind": "mask", "ks": (3, 5, 7, 8), "default": 5,
                "min_um2": 20.0},
     "cellmf": {"label": "Per-nucleus rule, median-filtered mean", "kind": "cell", "ks": (3, 5, 7), "default": 7,
@@ -123,7 +125,7 @@ SQUARES_KEY = OUT / "annotation_v2_key.csv"
 SQUARES_COUNTS = OUT / "annotation_v2" / "counts"
 #: who counted the squares (the name typed into annotate.html, lower case) → their number as an annotator above; the
 #: browser shows the number, never the name. Squares of annotator a are the human count n = 2 + a ("squares, annotator a").
-SQUARE_ANNOTATORS = {"james": 1, "quillan": 2}
+SQUARE_ANNOTATORS = {"james": 1, "quillan": 2, "annotator 3": 3}
 TARGET_UM = 1.3                   #: picture pixel size (whole pixels of the scan are averaged)
 THUMB_PX = 300                    #: longest side of a thumbnail
 DISPLAY_PCT = (1.0, 99.7)         #: display range: these percentiles of AF488 inside the tissue
@@ -795,7 +797,7 @@ def main(argv: list[str]) -> int:
     todo = [n for n in table["name"] if not masks_done(out, n)][:limit]
     pool_run("outlines and counts", run_masks, todo, out)
     todo = [n for n in table["name"] if masks_done(out, n) and not sizes_done(out, n)][:limit]
-    pool_run("size variants (objects > 10 and > 5 µm²)", run_sizes, todo, out)
+    pool_run("size variants (objects > 10, > 5 and > 3 µm²)", run_sizes, todo, out)
     n = assemble(out, table)
     print(f"written {out / 'data.json'}: {n} sections", flush=True)
     import objects_data                         # every counted object, for the figure builder (objects.js)
