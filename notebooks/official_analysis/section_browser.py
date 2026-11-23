@@ -118,6 +118,12 @@ MEDIAN_BACKGROUND_UM = 45.0       #: junction_analysis.less_local_median's windo
 SIMPLIFY_PX = 0.5                 #: outlines simplified to within this many picture pixels
 AREA_2_UM = -50.0                 #: annotator 2 counted from 50 µm before the line to the far edge
 ANNOTATORS = {"human annotator 1": OUT / "james_counts", "human annotator 2": OUT / "quillan_counts"}
+#: the blinded count squares (annotation_squares.py): the key (code → section, frame) and the annotators' exports
+SQUARES_KEY = OUT / "annotation_v2_key.csv"
+SQUARES_COUNTS = OUT / "annotation_v2" / "counts"
+#: who counted the squares (the name typed into annotate.html, lower case) → their number as an annotator above; the
+#: browser shows the number, never the name. Squares of annotator a are the human count n = 2 + a ("squares, annotator a").
+SQUARE_ANNOTATORS = {"james": 1, "quillan": 2}
 TARGET_UM = 1.3                   #: picture pixel size (whole pixels of the scan are averaged)
 THUMB_PX = 300                    #: longest side of a thumbnail
 DISPLAY_PCT = (1.0, 99.7)         #: display range: these percentiles of AF488 inside the tissue
@@ -608,6 +614,80 @@ def human_numbers(table: pd.DataFrame, methods: dict[str, dict]) -> dict[str, di
     return out
 
 
+def ring_centroid(ring: list[float]) -> tuple[float, float, float]:
+    """(x, y, |area|) of a flat ``[x0, y0, x1, y1, …]`` polygon (its vertices' mean when it has no area)."""
+    x, y = np.asarray(ring[0::2], float), np.asarray(ring[1::2], float)
+    cross = x * np.roll(y, -1) - np.roll(x, -1) * y
+    a = cross.sum() / 2
+    if abs(a) < 1e-9:
+        return float(x.mean()), float(y.mean()), 0.0
+    return (float(((x + np.roll(x, -1)) * cross).sum() / (6 * a)), float(((y + np.roll(y, -1)) * cross).sum() / (6 * a)),
+            abs(float(a)))
+
+
+def mask_centroids(out: Path, name: str, key: str) -> np.ndarray:
+    """(x, y) in picture pixels of every object drawn for a method-threshold (its largest ring's centroid)."""
+    text = mask_file(out, name, key).read_text(encoding="utf-8")
+    payload = json.loads(text[text.index(",{") + 1:text.rindex(");")])
+    points = [max((ring_centroid(r) for r in rings), key=lambda c: c[2])[:2] for rings in payload["rings"] if rings]
+    return np.asarray(points, float).reshape(-1, 2)
+
+
+def square_numbers(out: Path, parts: dict[str, dict]) -> tuple[dict[str, dict], dict[str, list]]:
+    """The blinded count squares, per section: (1) per annotator one human count — the dots in the section's squares
+    (one in each of home, junction region and crossed), the automated count per method-threshold of the objects whose
+    centroid lies in the same squares, the dots in picture pixels; (2) each square's frame (picture pixels), its
+    compartment and per annotator its count and per method-threshold the automated count. A square counts when the
+    annotator saw it: marked Done, or before the last square dotted or marked Done in the page's order (key ``shown``)."""
+    files = sorted(SQUARES_COUNTS.glob("square_counts_*.csv")) if SQUARES_KEY.exists() else []
+    if not files:
+        return {}, {}
+    key = pd.read_csv(SQUARES_KEY)
+    counts = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+    counts["who"] = counts["annotator"].str.strip().str.lower().map(
+        lambda w: SQUARE_ANNOTATORS.get(w, len(SQUARE_ANNOTATORS) + 1))
+    sq = counts[counts["kind"] == "square"].copy()
+    sq["pos"] = sq["code"].map(key.set_index("code")["shown"])
+    reached = sq[(sq["done"] == 1) | (sq["n_dots"] > 0)].groupby("who")["pos"].max()
+    seen = sq[(sq["done"] == 1) | (sq["pos"] <= sq["who"].map(reached))]
+    dots = counts[counts["kind"] == "dot"]
+    keys = method_keys()
+    humans: dict[str, dict] = {}
+    frames: dict[str, list] = {}
+    for name, g in key.groupby("name"):
+        if name not in parts:
+            continue
+        voxel, f = parts[name]["voxel"], parts[name]["f"]
+        centroids = {k: mask_centroids(out, name, k) for k in keys if mask_file(out, name, k).exists()}
+        for _, k in g.sort_values("compartment").iterrows():
+            # frame and dots: µm from the scan's corner (pixel edges) → picture pixels
+            x0, y0, side = k["frame_left_um"] / voxel / f, k["frame_top_um"] / voxel / f, k["frame_um"] / voxel / f
+            auto = {m: int(((c[:, 0] >= x0) & (c[:, 0] < x0 + side) & (c[:, 1] >= y0) & (c[:, 1] < y0 + side)).sum())
+                    for m, c in centroids.items()}
+            entry = {"compartment": k["compartment"], "x": round(x0, 1), "y": round(y0, 1), "size": round(side, 1),
+                     "human": {}, "automated": auto}
+            for who, s in seen[seen["code"] == k["code"]].groupby("who"):
+                d = dots[(dots["code"] == k["code"]) & (dots["who"] == who)]
+                n = 2 + int(who)
+                entry["human"][str(n)] = int(s["n_dots"].iloc[0])
+                h = humans.setdefault(name, {}).setdefault(f"squares, annotator {who}", {
+                    "n": n, "human": 0, "automated": {m: 0 for m in auto}, "squares": 0,
+                    "area": "blinded 120 µm squares, one each at home, in the junction region and crossed",
+                    "_dots": [], "_in": []})
+                h["human"] += entry["human"][str(n)]
+                h["squares"] += 1
+                for m, v in auto.items():
+                    h["automated"][m] += v
+                h["_dots"] += [[k["frame_top_um"] + y, k["frame_left_um"] + x] for x, y in zip(d["x_um"], d["y_um"])]
+            frames.setdefault(name, []).append(entry)
+    for per in humans.values():
+        for h in per.values():
+            h["_dots"] = np.asarray(h["_dots"], float).reshape(-1, 2)
+            h["_in"] = np.ones(len(h["_dots"]), bool)
+            h["_edges"] = True                            # the dots are µm from the scan's corner, not pixel centres
+    return humans, frames
+
+
 def _clean(value):
     """NaN / inf → None, numpy scalars → Python, all the way down (JSON has no NaN)."""
     if isinstance(value, dict):
@@ -632,12 +712,15 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
         if methods_file(out, name).exists():
             methods[name] = json.loads(methods_file(out, name).read_text(encoding="utf-8"))
     humans = human_numbers(table, methods)
+    parts = {n: json.loads(part_file(out, n).read_text(encoding="utf-8")) for n in methods if part_file(out, n).exists()}
+    square_humans, squares = square_numbers(out, parts)
+    for name, per in square_humans.items():
+        humans.setdefault(name, {}).update(per)
     sections = []
     for _, s in table.iterrows():
-        target = part_file(out, s["name"])
-        if not target.exists() or s["name"] not in methods:
+        if s["name"] not in parts:
             continue
-        part = json.loads(target.read_text(encoding="utf-8"))
+        part = parts[s["name"]]
         length_mm = float(s["length_um"]) / 1000 if pd.notna(s["length_um"]) else np.nan
         red = json.loads(red_file(out, s["name"]).read_text(encoding="utf-8")) if red_file(out, s["name"]).exists() else None
         entry = {
@@ -649,10 +732,14 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
             "region_by": s["region_drawn_by"] or s["region_by"], "qc": s["qc"], "review": s["review"],
             "decision": s["decision"], "status": s["status"], "humans": [],
             "red": None if red is None else {"channel": red["channel"], "display": red["display"]},
+            "squares": squares.get(s["name"], []),          # the blinded count squares on this section (frames)
         }
         for annotator, h in humans.get(s["name"], {}).items():
             dots_um, inside = h["_dots"], h["_in"]
-            y, x = to_px(dots_um[:, 0], dots_um[:, 1], part["voxel"], part["f"])
+            if h.get("_edges"):
+                y, x = dots_um[:, 0] / part["voxel"] / part["f"], dots_um[:, 1] / part["voxel"] / part["f"]
+            else:
+                y, x = to_px(dots_um[:, 0], dots_um[:, 1], part["voxel"], part["f"])
             entry["humans"].append({**{k2: v for k2, v in h.items() if not k2.startswith("_")}, "label": annotator,
                                     "dots": {"x": np.round(x, 1).tolist(), "y": np.round(y, 1).tolist(),
                                              "in": inside.astype(int).tolist()}})

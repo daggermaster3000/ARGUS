@@ -123,8 +123,9 @@ body.gallery #gallery { display: grid; }
     <div id="plots">
       <div class="plotbox">
         <h2>Automated against human count</h2>
-        <p class="note">Human-counted sections, in the area each human counted. Circles annotator 1, squares annotator 2; WT3 filled, GD1 open.</p>
+        <p class="note">Human-counted sections, in the area each human counted. Circles annotator 1, squares annotator 2 (whole-section counts); diamonds the blinded count squares (a section's three 120 µm squares together); WT3 filled, GD1 open.</p>
         <div id="p1" class="plot"></div>
+        <p class="note" id="sqNote"></p>
       </div>
       <div class="plotbox">
         <h2 id="stripTitle">Crossed AF488⁺ objects per mm of junction</h2>
@@ -166,12 +167,14 @@ body.gallery #gallery { display: grid; }
           <g id="gObjects" fill="#ffffff" fill-opacity="0" stroke-width="1.2" stroke-linejoin="round"></g>
           <g id="gCellpose" fill="#ffffff" fill-opacity="0" stroke-width="1.2" stroke-linejoin="round"></g>
           <g id="gHumans" fill="none" stroke="#ffffff" stroke-width="1.3"></g>
+          <g id="gSquares" fill="none" stroke="#ffff00" stroke-width="1.3"></g>
         </svg>
         <div id="toggles">
           <label><input type="checkbox" id="tLine" checked> junction interface</label>
           <label><input type="checkbox" id="tRegion" checked> junction region</label>
           <label><input type="checkbox" id="tObjects" checked> automated outlines</label>
           <label><input type="checkbox" id="tHumans" checked> human dots</label>
+          <label title="The blinded count squares (annotation_squares.py): 120 µm frames, one at home, one in the junction region and one crossed, on 48 sections. Their human dots are drawn with the human dots."><input type="checkbox" id="tSquares" checked> squares</label>
           <label title="Cellpose fine-tuned on the annotators' AF488+ dots (cellpose488_retrain.py), on the 27 human-counted sections only. Yellow at home, orange crossed, grey dashed outside the section (not counted). Drawn over the chosen method's outlines."><input type="checkbox" id="tCellpose"> retrained Cellpose
             <select id="tCpModel"><option value="cv">cross-validated</option><option value="other">trained on the other annotator</option></select></label>
           <label title="AF488 mask objects at or below the chosen method's size filter (20, 10 or 5 µm²), which it removes before counting (browser_small.py). Gaussian mask only, at the chosen threshold. Cyan in the section, grey dashed outside it. Not counted anywhere."><input type="checkbox" id="tSmall"> too small to count</label>
@@ -389,24 +392,37 @@ function hoverText(s) {
     (s.human !== null ? "<br>" + s.annotator + ": human " + s.human + ", automated " + s.automated_area + " (×" + fmt(s.ratio, 2) + ")" : "");
 }
 
+// Every human count of every section (a section may have a whole-section count and the blinded squares): one point each.
+const HUMAN_SYMBOL = (h) => (h.n === 1 ? "circle" : h.n === 2 ? "square" : "diamond");
+function humanPoints() {
+  const out = [];
+  for (const s of S) for (const h of s.humans || []) {
+    const auto = h.automated ? h.automated[KEY] : undefined;
+    if (auto !== undefined && auto !== null) out.push({ s, h, human: h.human, auto });
+  }
+  return out;
+}
 function plotHuman() {
   const traces = [];
-  const counted = S.filter((s) => s.human !== null && s.automated_area !== null);
-  const vals = counted.flatMap((s) => [Math.max(s.human, 0.5), Math.max(s.automated_area, 0.5)]);
+  const pts = humanPoints();
+  const vals = pts.flatMap((p) => [Math.max(p.human, 0.5), Math.max(p.auto, 0.5)]);
   const lo = Math.pow(10, Math.floor(Math.log10(Math.min(...vals, 10)) * 2) / 2), hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...vals, 10)) * 4) / 4);
   traces.push({ x: [lo, hi], y: [lo, hi], mode: "lines", line: { color: MID, dash: "dash", width: 1 }, hoverinfo: "skip" });
-  for (const ann of ["human annotator 1", "human annotator 2"]) {
+  for (const ann of [...new Set(pts.map((p) => p.h.label))]) {
     for (const g of ["WT3", "GD1"]) {
-      const part = counted.filter((s) => s.annotator === ann && s.genotype === g);
+      const part = pts.filter((p) => p.h.label === ann && p.s.genotype === g);
       traces.push({
-        x: part.map((s) => Math.max(s.human, 0.5)), y: part.map((s) => Math.max(s.automated_area, 0.5)),
-        customdata: part.map((s) => s.id), text: part.map(hoverText), hovertemplate: "%{text}<extra></extra>",
+        x: part.map((p) => Math.max(p.human, 0.5)), y: part.map((p) => Math.max(p.auto, 0.5)),
+        customdata: part.map((p) => p.s.id), hovertemplate: "%{text}<extra></extra>",
+        text: part.map((p) => "<b>" + p.s.id + "</b> (" + p.s.genotype + ", exp " + p.s.experiment + ")<br>" + p.h.label + ": human " + p.human +
+          ", automated " + p.auto + " (×" + fmt(p.human ? p.auto / p.human : null, 2) + ")"),
         mode: "markers", name: g + ", " + ann,
-        marker: { symbol: ann.endsWith("1") ? "circle" : "square", size: 9, color: FACE[g], line: { color: INK, width: 1 } },
+        marker: { symbol: part.length ? HUMAN_SYMBOL(part[0].h) : "circle", size: 9, color: FACE[g], line: { color: INK, width: 1 } },
       });
     }
   }
   traces.push(selTrace());
+  squareNote(pts);
   const ticks = [1, 3, 10, 30, 100, 300, 1000, 3000, 10000];
   Plotly.newPlot("p1", traces, {
     ...PLOT_LAYOUT,
@@ -414,6 +430,18 @@ function plotHuman() {
     yaxis: { ...AXIS, type: "log", range: [Math.log10(lo), Math.log10(hi)], tickvals: ticks, title: { text: "Automated count (" + noun() + ")" } },
   }, { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
   $("p1").on("plotly_click", (ev) => { const id = ev.points[0].customdata; if (id) open(id); });
+}
+
+// Under the plot: Σ automated ÷ Σ human over the blinded squares, all and per genotype, for the method shown.
+function squareNote(pts) {
+  const parts = [];
+  for (const ann of [...new Set(pts.filter((p) => p.h.n > 2).map((p) => p.h.label))]) {
+    const sq = pts.filter((p) => p.h.label === ann);
+    const r = (ps) => { const h = ps.reduce((a, p) => a + p.human, 0), m = ps.reduce((a, p) => a + p.auto, 0); return h ? (m / h).toFixed(2) : "–"; };
+    parts.push("Blinded " + ann + " (" + sq.reduce((a, p) => a + p.h.squares, 0) + " squares, " + sq.length + " sections): Σ automated ÷ Σ human " + r(sq) +
+      " (WT3 " + r(sq.filter((p) => p.s.genotype === "WT3")) + ", GD1 " + r(sq.filter((p) => p.s.genotype === "GD1")) + ").");
+  }
+  $("sqNote").textContent = parts.join(" ");
 }
 
 let STRIP_GROUPS = [];
@@ -642,8 +670,14 @@ function draw(s) {
   $("imgR").setAttribute("height", s.height);
   $("tilesG").innerHTML = ""; $("tilesR").innerHTML = "";
   scheduleTiles();
-  const gL = $("gLine"), gR = $("gRegion"), gO = $("gObjects"), gH = $("gHumans");
-  for (const g of [gL, gR, gO, gH, $("gCellpose"), $("gSmall")]) g.innerHTML = "";
+  const gL = $("gLine"), gR = $("gRegion"), gO = $("gObjects"), gH = $("gHumans"), gQ = $("gSquares");
+  for (const g of [gL, gR, gO, gH, gQ, $("gCellpose"), $("gSmall")]) g.innerHTML = "";
+  for (const q of s.squares || []) {
+    gQ.appendChild(el("rect", { x: q.x, y: q.y, width: q.size, height: q.size, "vector-effect": "non-scaling-stroke" }));
+    const t = el("text", { x: q.x, y: q.y - 2, fill: "#ffff00", stroke: "none", "font-size": Math.max(q.size / 14, 3), "font-family": "Arial" });
+    t.textContent = q.compartment;
+    gQ.appendChild(t);
+  }
   if (s.line && s.line.length) gL.appendChild(el("polyline", { points: s.line.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
   for (const c of s.region || []) gR.appendChild(el("polygon", { points: c.map((p) => p[0] + "," + p[1]).join(" "), "vector-effect": "non-scaling-stroke" }));
   drawObjects(s);
@@ -911,6 +945,7 @@ function applyToggles() {
   $("gRegion").style.display = $("tRegion").checked ? "" : "none";
   $("gObjects").style.display = $("tObjects").checked ? "" : "none";
   $("gHumans").style.display = $("tHumans").checked ? "" : "none";
+  $("gSquares").style.display = $("tSquares").checked ? "" : "none";
   const ch = $("tChannel").value, shown = $("tImage").checked;
   $("chG").style.display = shown && ch.includes("g") ? "" : "none";
   $("chR").style.display = shown && ch.includes("r") ? "" : "none";
@@ -939,12 +974,18 @@ function info(s) {
       row("Human count", h.human) + row("Automated, same area", fmt(auto)) + row("Automated ÷ human", fmt(auto !== null && auto !== undefined && h.human ? auto / h.human : null, 2)) +
       row("Dots shown", h.dots.x.length) + "</dl>";
   }
+  if (s.squares && s.squares.length) {
+    const anns = [...new Set(s.squares.flatMap((q) => Object.keys(q.human)))].sort();
+    html += '<h2>Blinded count squares</h2><div style="color:' + DARK + '">120 µm frames (yellow); the human count per annotator, the automated count of ' + methodText() + "</div><dl>" +
+      s.squares.map((q) => row(q.compartment, anns.map((a) => "human " + (a - 2) + ": " + fmt(q.human[a])).concat(["automated " + fmt(q.automated ? q.automated[KEY] : null)]).join(", "))).join("") + "</dl>";
+  }
   const blob = (c) => '<path d="M4 9C4 5 7 3 10 4S15 7 14 11 9 15 6 13 4 11 4 9Z" fill="none" stroke="' + c + '" stroke-width="1.5"/>';
   const one = METHOD.kind === "cell" ? "AF488⁺ cell (its grown region)" : "AF488⁺ object (mask outline)";
   html += '<h2>Overlays</h2><div id="legend">' +
     legendItem(blob("#ffffff"), one + " at home: not past the junction interface") +
     legendItem(blob(MAGENTA), one + " crossed: past the junction interface, extended straight past its ends") +
     legendItem('<path d="M5 9h8M9 5v8" stroke="#ffffff" stroke-width="1.5"/>', "human dot (faint: outside the counted area)") +
+    (s.squares && s.squares.length ? legendItem('<rect x="3" y="3" width="12" height="12" fill="none" stroke="#ffff00" stroke-width="1.5"/>', "blinded count square (120 µm)") : "") +
     legendItem('<path d="M2 14L16 4" stroke="#ffffff" stroke-width="2"/>', "junction interface") +
     legendItem('<rect x="3" y="4" width="12" height="10" fill="none" stroke="#d9d9d9" stroke-dasharray="3 2" stroke-width="1.5"/>', "junction region") +
     '<div style="color:' + DARK + ';margin-top:6px">AF488 (green), maximum-intensity projection over z, display ' + s.display[0] + "–" + s.display[1] +
@@ -1009,7 +1050,7 @@ function setupStage() {
   svg.addEventListener("pointerup", end);
   svg.addEventListener("pointercancel", end);
   window.addEventListener("resize", () => { scaleBar(); scheduleTiles(); });
-  for (const id of ["tLine", "tRegion", "tObjects", "tHumans", "tImage", "tChannel"]) $(id).onchange = applyToggles;
+  for (const id of ["tLine", "tRegion", "tObjects", "tHumans", "tSquares", "tImage", "tChannel"]) $(id).onchange = applyToggles;
   for (const id of ["tCellpose", "tCpModel"]) $(id).onchange = () => { drawCellpose(CUR); saveUI(); };
   $("tSmall").onchange = () => { drawSmall(CUR); saveUI(); };
   $("prev").onclick = () => step(-1);
@@ -1047,7 +1088,7 @@ function saveUI() {
   const ui = {
     filters: { geno: $("fGeno").value, exp: $("fExp").value, qc: $("fQc").value, human: $("fHuman").checked, name: $("fName").value },
     sort: [sortKey, sortDir], method: KEY,
-    toggles: Object.fromEntries(["tLine", "tRegion", "tObjects", "tHumans", "tImage", "tCellpose", "tSmall"].map((id) => [id, $(id).checked])),
+    toggles: Object.fromEntries(["tLine", "tRegion", "tObjects", "tHumans", "tSquares", "tImage", "tCellpose", "tSmall"].map((id) => [id, $(id).checked])),
     cpModel: $("tCpModel").value,
     channel: $("tChannel").value, contrast: CONTRAST,
     size: { x: $("sizeX").value, y: $("sizeY").value, logX: $("logX").checked, logY: $("logY").checked },

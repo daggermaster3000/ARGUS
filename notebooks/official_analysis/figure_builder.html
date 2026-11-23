@@ -146,7 +146,7 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
     <div class="row"><label><input type="checkbox" id="qcOnly">QC status ok only</label></div>
     <div class="row"><label title="Sections where fewer than half of the run's AF488+ nuclei near the line lie on the side called home."><input type="checkbox" id="noUncertain">leave out the sections whose home side is uncertain</label></div>
     <div class="row"><label><input type="checkbox" id="humanOnly">human-counted sections only</label></div>
-    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label></div>
+    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="3">squares, annotator 1</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="4">squares, annotator 2</label></div>
     <div class="row"><label>Junction region <select id="region"><option value="all">all</option><option value="hand">drawn by hand</option><option value="auto">found automatically</option></select></label></div>
   </details>
   <details open>
@@ -416,7 +416,7 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
 
   <!-- ---------------------------------------------------------------- the human against automated panel -->
   <div class="pane" id="pane-hv-data">
-    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label></div>
+    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="3">squares, annotator 1</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="4">squares, annotator 2</label></div>
     <p class="hint">Every human-counted section of the annotators ticked: the human count against the automated count of the positivity method chosen in the sidebar, in the area the human counted (annotator 1 the whole section; annotator 2 from 50 µm before the junction interface on). The same ticks also apply to the human counts everywhere else on the page.</p>
     <div class="row"><label>Plot <select id="hvPlot"><option value="scatter">automated against human (log–log)</option><option value="ba">Bland–Altman (ratio)</option><option value="groups">ratio by group: sections, slide means and tests</option></select></label></div>
     <div class="row"><label title="The groups of the ratio-by-group plot and of its table. Genotype × experiment compares WT3 with GD1 within each experiment; experiment compares the experiments (both genotypes together).">Group by <select id="hvGroup"><option value="genotype">genotype</option><option value="geno_exp">genotype × experiment</option><option value="experiment">experiment</option></select></label></div>
@@ -1464,8 +1464,13 @@ const objectsMethod = () => (window.OBJECT_DATA && window.OBJECT_DATA.method) ||
 const maskName = (key) => (window.OBJECT_DATA && window.OBJECT_DATA.mask && key === window.OBJECT_DATA.method ? window.OBJECT_DATA.mask
   : String(key).startsWith("gauss-") ? "kmad" + String(key).split("-")[1] : "");
 
+// the human counts: 1, 2 the whole-section counts of annotators 1 and 2; 3, 4 the blinded count squares of annotators 1 and 2
+const ALL_ANN = [1, 2, 3, 4], ANN_NAME = { 1: "annotator 1", 2: "annotator 2", 3: "squares, annotator 1", 4: "squares, annotator 2" };
 const annotatorOn = (n) => (ST.annotators || []).includes(n);
-const annotatorWords = () => (ST.annotators.length === 2 ? "human annotators 1 and 2" : ST.annotators.length ? "human annotator " + ST.annotators[0] : "no human annotator");
+const annotatorWords = () => {
+  const names = ST.annotators.map((a) => (a > 2 ? "the blinded squares of human annotator " + (a - 2) : "human annotator " + a));
+  return names.length ? (names.length > 1 ? names.slice(0, -1).join(", ") + " and " + names[names.length - 1] : names[0]) : "no human annotator";
+};
 
 function applyMethod() {
   for (const r of ROWS) {
@@ -1548,7 +1553,7 @@ function buildControls() {
   $("bYAuto").onclick = () => { Object.assign(ST, { ymin: null, ymax: null, yticks: "", yticklabels: "" }); writeControls(); update(); };
   for (const box of document.querySelectorAll(".annBoxes input")) box.addEventListener("change", () => {
     const a = +box.dataset.ann;
-    ST.annotators = [1, 2].filter((n) => (n === a ? box.checked : annotatorOn(n)));
+    ST.annotators = ALL_ANN.filter((n) => (n === a ? box.checked : annotatorOn(n)));
     applyMethod();
     writeControls();
     update();
@@ -1611,7 +1616,10 @@ function writeControls() {
   writeScatterControls();
   writePanelControls();
   for (const box of document.querySelectorAll("#expBoxes input")) box.checked = !ST.exps || ST.exps.includes(box.dataset.exp);
-  for (const box of document.querySelectorAll(".annBoxes input")) box.checked = annotatorOn(+box.dataset.ann);
+  for (const box of document.querySelectorAll(".annBoxes input")) {
+    box.checked = annotatorOn(+box.dataset.ann);
+    if (+box.dataset.ann > 2) box.parentElement.style.display = ((window.SECTION_DATA && window.SECTION_DATA.sections) || []).some((s) => (s.humans || []).some((h) => h.n === +box.dataset.ann)) ? "" : "none";
+  }
 }
 
 const dotShowValue = () => (ST.showSections && ST.showSlides ? "both" : ST.showSections ? "sections" : ST.showSlides ? "slides" : "none");
@@ -1637,7 +1645,7 @@ function setState(s) {
   if (!["scatter", "ba", "groups"].includes(ST.hv.plot)) ST.hv.plot = "scatter";
   if (!["genotype", "geno_exp", "experiment"].includes(ST.hv.group)) ST.hv.group = "genotype";
   ST.hv.gstats = Object.fromEntries(Object.entries(ST.hv.gstats || {}).filter(([, v]) => isEdit(v)));
-  ST.annotators = Array.isArray(ST.annotators) ? [1, 2].filter((a) => ST.annotators.map(Number).includes(a)) : [1, 2];
+  ST.annotators = Array.isArray(ST.annotators) ? ALL_ANN.filter((a) => ST.annotators.map(Number).includes(a)) : [1, 2];
   if (!METHODS.some((m) => m.ks.some((k) => m.key + "-" + k === ST.method)) && METHODS.length) ST.method = DEFAULTS.method;
   if (!["dots", "violin", "violinDots"].includes(ST.dotKind)) ST.dotKind = "dots";
   if (!["none", "box", "mean"].includes(ST.violinInner)) ST.violinInner = "none";
@@ -3446,7 +3454,7 @@ function distMethods() {
 const HV_INPUTS = { hvOn: "on", hvPlot: "plot", hvGroup: "group", hvShow: "show", hvFilters: "filters", hvSize: "size", hvWidthMm: "widthMm", hvHeightMm: "heightMm",
   hvTitle: "title", hvXlabel: "xlabel", hvYlabel: "ylabel" };
 const HV_NUMERIC = new Set(["size", "widthMm", "heightMm"]);
-const HV_BOOT = 2000, HV_SEED = 20261105, ANN_SYMBOL = { 1: "circle", 2: "square" };
+const HV_BOOT = 2000, HV_SEED = 20261105, ANN_SYMBOL = { 1: "circle", 2: "square", 3: "triangle-up", 4: "diamond" };
 let HV = null, HV_KEY = "", DRAWN4 = false, BUSY4 = false;
 
 function buildHumanControls() {
@@ -3488,7 +3496,7 @@ function agreementNumbers(rows) {
   const A = rows.map((e) => 0.5 * Math.log(Math.max(e.human, 0.5) * Math.max(e.auto, 0.5)));
   const bias = STATS.mean(D), sd = rows.length > 1 ? Math.sqrt(STATS.variance(D)) : NaN;
   const rho = STATS.spearman(h, m), f = ols(A, D);
-  const out = { ccc: STATS.linCcc(h.map(Math.log10), m.map((v) => Math.log10(Math.max(v, 0.5)))), cccRaw: STATS.linCcc(h, m),
+  const out = { ccc: STATS.linCcc(h.map((v) => Math.log10(Math.max(v, 0.5))), m.map((v) => Math.log10(Math.max(v, 0.5)))), cccRaw: STATS.linCcc(h, m),
     rho: rho ? rho.rho : NaN, bias, lo: bias - 1.96 * sd, hi: bias + 1.96 * sd, slope: f.b1, intercept: f.b0, sdRes: f.sdRes };
   for (const g of GENOTYPES) {
     const d = D.filter((v, i) => rows[i].r.genotype === g);
@@ -3606,7 +3614,7 @@ function computeHuman() {
     return { ...e, human: num(e.h.human), auto, ratio: auto / e.h.human, log2: Math.log2(Math.max(auto, 0.5) / Math.max(e.h.human, 0.5)) };
   }).filter((e) => Number.isFinite(e.auto) && Number.isFinite(e.human));
   // pooled = the annotators chosen; with one annotator only its own row
-  const sets = [...(ST.annotators.length > 1 ? [["both annotators", rows]] : []), ...ST.annotators.map((a) => ["annotator " + a, rows.filter((e) => e.ann === a)])];
+  const sets = [...(ST.annotators.length > 1 ? [[ST.annotators.length === 2 ? "both" : "all chosen", rows]] : []), ...ST.annotators.map((a) => [ANN_NAME[a], rows.filter((e) => e.ann === a)])];
   const groups = hvGroupsOf(rows, ST.hv.group);
   return { rows, sets: sets.map(([name, rs]) => ({ name, rows: rs, a: withCi(rs) })), groups, comps: hvComparisons(groups, ST.hv.group) };
 }
@@ -3713,7 +3721,7 @@ function humanFigure(z) {
     const pts = rows.filter((e) => e.ann === ann && e.r.genotype === g);
     if (!pts.length) continue;
     const gc = groupColor({ key: g, g }), key = g + " a" + ann;
-    traces.push({ type: "scatter", mode: "markers", meta: "leg:" + key, name: name(key, g + ", annotator " + ann), x: pts.map(fx), y: pts.map(fy),
+    traces.push({ type: "scatter", mode: "markers", meta: "leg:" + key, name: name(key, g + ", " + ANN_NAME[ann]), x: pts.map(fx), y: pts.map(fy),
       customdata: pts.map((e) => [e.code, e.r.id, e.human, e.auto]),
       hovertemplate: "%{customdata[0]} %{customdata[1]}<br>human %{customdata[2]}, automated %{customdata[3]}<extra></extra>",
       marker: { symbol: ANN_SYMBOL[ann], size: (hv.size || 4) * z, color: gc.fill, line: { color: gc.edge, width: 0.8 * z } } });
@@ -3917,8 +3925,11 @@ function humanMethods() {
   const n = (a) => HV.rows.filter((e) => e.ann === a).length;
   const area = { 1: "human annotator 1 the whole section (" + n(1) + " sections)",
     2: "human annotator 2 from 50 µm before the junction interface (extended past both ends) across the whole partner organoid (" + n(2) + " sections)" };
-  const two = ST.annotators.length > 1;
-  return "Agreement with human counts. " + (two ? "Two investigators" : "An investigator") + " counted AF488⁺ cells by hand, one point per labelled cell on the AF488 image " +
+  for (const a of [1, 2]) area[a + 2] = "human annotator " + a + " in blinded 120 µm squares, one each on the home side, in the junction region and on the crossed side, " +
+    "placed at random in each compartment of " + n(a + 2) + " sections drawn at random (stratified by genotype and experiment) and shown in a shuffled order with no genotype, " +
+    "section or automated result (the section's count is the sum of its squares)";
+  const two = ST.annotators.length > 1, people = new Set(ST.annotators.map((a) => (a > 2 ? a - 2 : a))).size;
+  return "Agreement with human counts. " + (people > 1 ? "Two investigators" : "An investigator") + " counted AF488⁺ cells by hand, one point per labelled cell on the AF488 image " +
     "(maximum over z): " + ST.annotators.map((a) => area[a]).join("; ") + ". The automated count (" + (meth ? methodPhrase(meth, k) : ST.method) +
     ") was taken in the same area of the same sections. Agreement was summarised by Lin's concordance correlation coefficient on log₁₀ counts, " +
     "Bland–Altman analysis of the ratio automated / human on the log scale (bias, the geometric mean of the ratios; ln(ratio) regressed on ln(geometric mean of the two " +

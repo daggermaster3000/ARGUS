@@ -1,14 +1,17 @@
 """Analysis of the blinded square counts (``annotation_squares.py``): how well two people agree, and the automated count
-against their consensus.
+against their consensus (or against the one annotator, while only one has counted).
 
 Reads ``annotation_v2_key.csv`` and every ``annotation_v2/counts/square_counts_*.csv`` (the annotators' exports; one
-file each). The automated count of a square is the number of counting-method objects (``af488_mask/<section>/
+file each). A square counts as seen when it was marked Done, or when it comes before the last square the annotator
+dotted or marked Done in the order the page shows them (annotators go through the squares in order and may not press
+Done on empty ones). The automated count of a square is the number of counting-method objects (``af488_mask/<section>/
 objects.parquet``, mask ``kmad8``; also ``kmad5``) whose centroid lies in the 120 µm frame.
 
-1. **Inter-rater agreement** per square: Lin's CCC on counts and on log(1 + count), ICC(2,1), Bland–Altman on
+1. **Inter-rater agreement** (with two annotators) per square: Lin's CCC on counts and on log(1 + count), ICC(2,1), Bland–Altman on
    log(1 + count); per cell: dots of the two annotators matched within :data:`MATCH_UM` (one-to-one, nearest first),
    giving each annotator's share of the other's cells.
-2. **Automated against the consensus** (the mean of the annotators): the ratio Σ automated ÷ Σ consensus overall, per
+2. **Automated against the consensus** (the mean of the annotators; the annotator's own count while there is one);
+   per square CCC, Spearman and Bland–Altman on log(1 + count): the ratio Σ automated ÷ Σ consensus overall, per
    genotype and per compartment, with 95 % CIs from :data:`BOOT` bootstrap resamples of *sections* (the squares of a
    section are not independent); the WT3 ÷ GD1 ratio of those ratios (the genotype bias) with its CI.
 3. **The genotype difference on the same squares**: WT3 ÷ GD1 of the mean count per square by the consensus and by the
@@ -32,18 +35,28 @@ import annotation_squares as aq  # noqa: E402
 
 OUT = aq.OUT
 MATCH_UM = 4.0                    #: two annotators' dots within this are the same cell
+AUTO_MATCH_UM = 6.0               #: a dot and an object centroid within this are the same cell (a soma's radius)
 BOOT = 2000
 SEED = 1
 MASKS_AUTO = ("kmad8", "kmad5")
 
 
-def load_counts() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Per square and annotator the count (done squares only), and every dot (µm in the frame)."""
+def seen_squares(counts: pd.DataFrame, shown: pd.Series) -> pd.DataFrame:
+    """The square rows of the annotators' exports that were seen: marked Done, or placed before the last square the
+    annotator dotted or marked Done in the page's order (*shown*: code → place). Also used by section_browser.py."""
+    sq = counts[counts["kind"] == "square"].copy()
+    sq["pos"] = sq["code"].map(shown)
+    reached = sq[(sq["done"] == 1) | (sq["n_dots"] > 0)].groupby("annotator")["pos"].max()   # last square worked on
+    return sq[(sq["done"] == 1) | (sq["pos"] <= sq["annotator"].map(reached))]
+
+
+def load_counts(key: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Per square and annotator the count (squares seen only), and every dot (µm in the frame)."""
     files = sorted((OUT / "counts").glob("square_counts_*.csv"))
-    if len(files) < 2:
-        raise SystemExit(f"need two annotators' CSVs in {OUT / 'counts'}, found {len(files)}")
+    if not files:
+        raise SystemExit(f"no annotator CSVs in {OUT / 'counts'}")
     t = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
-    squares = t[(t["kind"] == "square") & (t["done"] == 1)][["annotator", "code", "n_dots"]]
+    squares = seen_squares(t, key.set_index("code")["shown"])[["annotator", "code", "n_dots"]]
     dots = t[t["kind"] == "dot"][["annotator", "code", "x_um", "y_um"]]
     return squares, dots
 
@@ -109,7 +122,7 @@ def ratio(df, col, ref="consensus"):
 
 def main() -> int:
     key = pd.read_csv(aq.KEY)
-    squares, dots = load_counts()
+    squares, dots = load_counts(key)
     who = sorted(squares["annotator"].unique())[:2]
     wide = squares.pivot_table(index="code", columns="annotator", values="n_dots").dropna()[who]
     t = key.merge(wide.reset_index(), on="code").merge(automated(key), on="code")
@@ -117,9 +130,74 @@ def main() -> int:
     res = OUT / "results"
     res.mkdir(exist_ok=True)
     t.to_csv(res / "squares.csv", index=False)
-    print(f"{len(t)} squares counted by both ({who[0]}, {who[1]}), from {t['name'].nunique()} sections\n")
+    print(f"{len(t)} squares counted by {', '.join(who)}, from {t['name'].nunique()} sections\n")
+    if len(who) < 2:
+        print(f"1. Inter-rater agreement: needs a second annotator; 'consensus' below is {who[0]}'s count\n")
+    else:
+        inter_rater(t, who, dots)
+    per_square(t, res)
+    cell_match(t, key, dots, res)
+    automated_vs_human(t, res)
+    genotype_on_squares(t, res)
+    return 0
 
-    # 1. inter-rater
+
+def per_square(t: pd.DataFrame, res: Path) -> None:
+    """Per square, the automated count against the human one: CCC, Spearman, Bland–Altman on log(1 + n)."""
+    print("2a. Automated vs human, per square")
+    h = t["consensus"].to_numpy(float)
+    rows = []
+    for m in MASKS_AUTO:
+        a = t[f"auto_{m}"].to_numpy(float)
+        d = np.log1p(a) - np.log1p(h)
+        rows.append({"mask": m, "CCC": round(ccc(a, h), 2), "CCC log(1+n)": round(ccc(np.log1p(a), np.log1p(h)), 2),
+                     "Spearman": round(pd.Series(a).corr(pd.Series(h), method="spearman"), 2),
+                     "BA bias ×": round(float(np.exp(d.mean())), 2),
+                     "BA 95 % LoA ×": f"{np.exp(d.mean() - 1.96 * d.std(ddof=1)):.2f}–"
+                                      f"{np.exp(d.mean() + 1.96 * d.std(ddof=1)):.2f}"})
+    out = pd.DataFrame(rows)
+    print(out.to_string(index=False), "\n")
+    out.to_csv(res / "per_square_agreement.csv", index=False)
+
+
+def frame_objects(key: pd.DataFrame) -> dict[tuple[str, str], np.ndarray]:
+    """Per (square code, mask) the automated objects' centroids in the frame, µm from its top-left corner (x, y)."""
+    out = {}
+    for name, g in key.groupby("name"):
+        o = pd.read_parquet(aq.MASKS / name / "objects.parquet")
+        for _, k in g.iterrows():
+            x = o["Centroid X (µm)"] - k["frame_left_um"]
+            y = o["Centroid Y (µm)"] - k["frame_top_um"]
+            inside = (x >= 0) & (x < k["frame_um"]) & (y >= 0) & (y < k["frame_um"])
+            for m in MASKS_AUTO:
+                sel = inside & (o["mask"] == m)
+                out[(k["code"], m)] = np.column_stack([x[sel], y[sel]])
+    return out
+
+
+def cell_match(t: pd.DataFrame, key: pd.DataFrame, dots: pd.DataFrame, res: Path) -> None:
+    """Human dots against automated objects, one-to-one within :data:`AUTO_MATCH_UM`: the share of human cells the
+    automated count finds (sensitivity) and the share of automated objects a human dotted (precision)."""
+    print(f"2b. Cell by cell (one-to-one within {AUTO_MATCH_UM:g} µm), per annotator")
+    objs = frame_objects(key)
+    rows = []
+    for who, d in dots.groupby("annotator"):
+        for m in MASKS_AUTO:
+            for label, part in [("all", t)] + [(g, t[t.genotype == g]) for g in ("WT3", "GD1")]:
+                n_h = n_a = n_m = 0
+                for c in part["code"]:
+                    h = d[d.code == c][["x_um", "y_um"]].to_numpy(float)
+                    a = objs[(c, m)]
+                    n_h, n_a, n_m = n_h + len(h), n_a + len(a), n_m + match(h, a, AUTO_MATCH_UM)
+                rows.append({"annotator": who, "mask": m, "subset": label, "human cells": n_h, "auto objects": n_a,
+                             "matched": n_m, "found (of human)": round(n_m / max(n_h, 1), 2),
+                             "dotted (of auto)": round(n_m / max(n_a, 1), 2)})
+    out = pd.DataFrame(rows)
+    print(out.to_string(index=False), "\n")
+    out.to_csv(res / "cell_match.csv", index=False)
+
+
+def inter_rater(t: pd.DataFrame, who: list[str], dots: pd.DataFrame) -> None:
     a, b = t[who[0]].to_numpy(float), t[who[1]].to_numpy(float)
     la, lb = np.log1p(a), np.log1p(b)
     diff = la - lb
@@ -135,8 +213,9 @@ def main() -> int:
     print(f"   cells matched within {MATCH_UM:g} µm: {matched}; that is {matched / max(a.sum(), 1):.0%} of {who[0]}'s and "
           f"{matched / max(b.sum(), 1):.0%} of {who[1]}'s dots\n")
 
-    # 2. automated against the consensus
-    print("2. Automated ÷ consensus (Σ over squares; 95 % CI, section bootstrap)")
+
+def automated_vs_human(t: pd.DataFrame, res: Path) -> None:
+    print("2c. Automated ÷ consensus (Σ over squares; 95 % CI, section bootstrap)")
     rows = []
     for m in MASKS_AUTO:
         col = f"auto_{m}"
@@ -153,7 +232,8 @@ def main() -> int:
     print(agree.to_string(index=False), "\n")
     agree.to_csv(res / "automated_vs_consensus.csv", index=False)
 
-    # 3. the genotype difference on the same squares
+
+def genotype_on_squares(t: pd.DataFrame, res: Path) -> None:
     print("3. WT3 ÷ GD1, mean count per square (95 % CI, section bootstrap)")
     rows = []
     for comp in ("crossed", "junction", "home"):
@@ -165,7 +245,6 @@ def main() -> int:
     fold = pd.DataFrame(rows)
     print(fold.to_string(index=False))
     fold.to_csv(res / "genotype_fold_on_squares.csv", index=False)
-    return 0
 
 
 if __name__ == "__main__":

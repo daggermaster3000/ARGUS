@@ -26,6 +26,9 @@ SHIPPED_SEGMENTATION = DATA / "segmentation"                  #: cells/<s>.csv, 
 ANNOTATIONS = DATA / "annotations"
 ANNOTATORS = {"human annotator 1": ANNOTATIONS / "annotator_1", "human annotator 2": ANNOTATIONS / "annotator_2"}
 JUNCTIONS_HAND_DRAWN = ANNOTATIONS / "junctions_hand_drawn"
+COUNT_SQUARES = ANNOTATIONS / "count_squares"                  #: the blinded count squares (annotation_squares.py)
+SQUARES_KEY = COUNT_SQUARES / "key.csv"                       #: code → section, compartment, frame (µm)
+SQUARES_COUNTS = COUNT_SQUARES / "counts"                     #: square_counts_<annotator>.csv, as annotate.html exports
 
 # ---------------------------------------------------------------- outputs
 RERUN_SEGMENTATION = OUT / "segmentation"

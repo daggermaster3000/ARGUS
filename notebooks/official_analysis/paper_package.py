@@ -14,7 +14,7 @@ Builds ``D:\\Slidescanner extracted\\oasis-paper\\`` from the analysis folders a
       counting/             per section: the counting method's AF488 mask objects (median + 8 robust SD; also 3, 5),
                             thresholds, each cell's cover, the section outline used to drop objects outside the section
       annotations/          the two annotators' AF488+ clicks (and a comparison method's objects on their sections);
-                            the hand-drawn junctions and their evaluation
+                            the blinded count squares; the hand-drawn junctions and their evaluation
       derived/              section sizes and the slim cell cache the notebooks read
     pipeline/               the analysis code (python run.py re-makes everything into rerun/; python check.py compares)
     methods/                METHODS.md; the executed notebooks (.ipynb, .html)
@@ -62,6 +62,8 @@ PIPELINE = ROOT / "oasis_pipeline"
 VERIFIED_RUN = DATA / "_rerun_test"                               #: the pipeline's re-run checked identical
 #: the annotators, as the notebooks name them (folder → name in the package)
 ANNOTATORS = {"james_counts": "annotator_1", "quillan_counts": "annotator_2"}
+SQUARES = OUT / "annotation_v2"                                  #: the blinded count squares (annotation_squares.py)
+SQUARES_KEY = OUT / "annotation_v2_key.csv"
 CONDA_PYTHON = Path(r"C:/Users/qfavey/.conda/envs/napari-env-q/python.exe")   # converts the notebooks to HTML
 STORE_SUFFIX = ".junction.h5"
 #: what earlier versions of the package held and this one does not
@@ -203,6 +205,13 @@ def build_annotations() -> None:
         # a comparison method on the hand-counted sections (Cellpose fine-tuned on the dots; Table S1 of 01_validation)
         for f in sorted((OUT / folder / "methods" / "objects" / "cellpose488_retrained").glob("*.parquet")):
             n += copy(f, d / label / "methods" / "objects" / "cellpose488_retrained" / f.name)
+    # the blinded count squares (annotation_squares.py): the key, the annotators' exports, the protocol
+    q = d / "count_squares"
+    if SQUARES_KEY.exists():
+        n += copy(SQUARES_KEY, q / "key.csv")
+        n += copy(SQUARES / "PROTOCOL.md", q / "PROTOCOL.md")
+        for f in sorted((SQUARES / "counts").glob("square_counts_*.csv")):
+            n += copy(f, q / "counts" / f.name)
     h = d / "junctions_hand_drawn"
     for f in ("annotated_all.csv", "scores.csv", "seeding.jsonl"):
         n += copy(JUNCTION_EVAL / f, h / f)
@@ -327,7 +336,7 @@ Package built {built}.
 - **Results, interactive**: open `results/section_browser/section_browser.html` in a web browser (works straight from
   disk; Chrome, Edge or Firefox). Every section with its junction interface, junction region, counted AF488⁺ objects
   (home white, crossed magenta), the objects too small to count (removed by the size filter, a toggle), the human
-  annotators' dots, a table and plots; zoom in for the full-resolution image
+  annotators' dots and the blinded count squares, a table and plots; zoom in for the full-resolution image
   and outlines. `figure_builder.html` beside it re-draws the paper's figures with any normalisation and writes the
   Methods text for them. Both pages can also count with a smaller size filter (objects > 10 or > 5 µm² instead of
   > 20 µm²), to show what the filter does to the counts and the statistics.
@@ -382,6 +391,10 @@ data/
                            cell it fell on); cells/: the segmented cells of each hand-counted section; methods/: a
                            comparison method's objects on these sections (Cellpose fine-tuned on the dots).
                            Annotator 1 counted whole sections (14), annotator 2 from 50 µm before the junction interface on (13).
+    count_squares/         the blinded count squares: 144 squares of 120 µm (one at home, one in the junction region,
+                           one crossed, on 48 random sections), counted blind to genotype and section. key.csv: square →
+                           section, compartment, frame (µm); counts/square_counts_<annotator>.csv: each annotator's export
+                           (per square its dots, x and y in µm from the frame's corner); PROTOCOL.md: the counting rules
     junctions_hand_drawn/  the 138 sections with a hand-drawn junction (annotated_all.csv: tuning / held-out split,
                            section classes), the first 31 picks, the automatic finder's scores against them, and the
                            stores holding the hand-drawn lines ("manual annotated junction region")

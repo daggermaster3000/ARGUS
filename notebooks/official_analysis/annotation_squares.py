@@ -22,7 +22,7 @@ Written into ``OUT`` (``run_analysis_20261028/annotation_v2``):
   stain (its own 1st–99.8th percentile), maximum-intensity projection over z, at the scan's pixels (0.325 µm);
 - ``squares.js``: ``window.SQUARES`` — per square only its random code, image names and geometry, in a shuffled order;
 - ``../annotation_v2_key.csv`` (:data:`KEY`, outside the folder): code → section, genotype, experiment, compartment,
-  square position (µm). **Not for the annotators.**
+  square position (µm), its place in the order shown (``shown``). **Not for the annotators.**
 - ``annotate.html`` and ``PROTOCOL.md``, copied from beside this script.
 
     python notebooks/official_analysis/annotation_squares.py
@@ -157,6 +157,9 @@ def main() -> int:
         del af488, nuclear
         print(f"[{n_s}/{len(chosen)}] {s['id']} ({s['genotype']} e{s['experiment']}): {len(where)} compartments", flush=True)
     rng.shuffle(squares)                                    # the order annotators see: no section or genotype runs
+    shown = {q["code"]: i for i, q in enumerate(squares)}
+    for k in key:
+        k["shown"] = shown[k["code"]]                       # its place in that order (which squares were reached)
     (OUT / "squares.js").write_text("window.SQUARES = " + json.dumps(squares, separators=(",", ":")) + ";\n",
                                     encoding="utf-8")
     import csv
