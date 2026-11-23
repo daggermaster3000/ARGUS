@@ -422,6 +422,8 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
     <div class="row"><label>Plot <select id="hvPlot"><option value="scatter">compared against human (log–log)</option><option value="ba">Bland–Altman (ratio)</option><option value="groups">ratio by group: sections, slide means and tests</option></select></label></div>
     <div class="row"><label title="The groups of the ratio-by-group plot and of its table. Genotype × experiment compares WT3 with GD1 within each experiment; experiment compares the experiments (both genotypes together).">Group by <select id="hvGroup"><option value="genotype">genotype</option><option value="geno_exp">genotype × experiment</option><option value="experiment">experiment</option></select></label></div>
     <p class="hint">Ratio by group: one small marker per human-counted section (automated ÷ human), one large marker per slide (the geometric mean of its sections), and the geometric mean of the slide means with its 95 % CI. The tests use slides as the unit (sections of one slide are not independent): Welch t and Mann–Whitney on the slide means of ln(ratio), and a linear mixed model of ln(ratio) on the sections with the slide as a random intercept. Each group's ratio is also tested against 1 (one-sample t on its slide means).</p>
+    <div class="row"><label title="Blinded squares only. Per section: a section's three squares added up (the analysis unit; the statistics resample sections). Per square: one point per square, named by its code; the bootstrap and tests still resample sections and use slides, so the three squares of a section are kept together.">Points <select id="hvUnit"><option value="section">per section (its squares added up)</option><option value="square">per square</option></select></label>
+      <label title="Write each point's name beside it: the square's code (per square) or the section"><input type="checkbox" id="hvLabels">label points</label></div>
     <div class="row"><label><input type="checkbox" id="hvFilters">apply the page's filters (experiments, QC …)</label></div>
   </div>
   <div class="pane" id="pane-hv-layers">
@@ -1412,7 +1414,7 @@ const DEFAULTS = {
   ds: { on: true, unit: "section", f: "crossed / junction_mm", of: "away", group: "genotype", side: "all", region: "all", kind: "kde",
     hnorm: "density", binBy: "number", bins: 30, binWidth: 25, bw: "silverman", bwFactor: 1, layout: "overlay", logX: false, xmin: null, xmax: null,
     medians: true, stats: true, statsText: null, statsPos: null, widthMm: 80, heightMm: 60, sizeAuto: true, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null },
-  hv: { on: true, plot: "scatter", vs: "auto", group: "genotype", show: "both", gstats: {}, filters: false, size: 4, widthMm: 95, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null,
+  hv: { on: true, plot: "scatter", vs: "auto", unit: "section", labels: false, group: "genotype", show: "both", gstats: {}, filters: false, size: 4, widthMm: 95, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null,
     statsText: null, statsPos: null },
 };
 // publication greys: WT3 filled dark grey, GD1 open white, black edges; black bars, lines and text
@@ -1650,6 +1652,7 @@ function setState(s) {
   if (!(ST.ds.kind in KIND_NAMES)) ST.ds.kind = DEFAULTS.ds.kind;
   if (!["scatter", "ba", "groups"].includes(ST.hv.plot)) ST.hv.plot = "scatter";
   if (!["auto", "3", "4", "5"].includes(String(ST.hv.vs))) ST.hv.vs = "auto";
+  if (!["section", "square"].includes(ST.hv.unit)) ST.hv.unit = "section";
   if (!["genotype", "geno_exp", "experiment"].includes(ST.hv.group)) ST.hv.group = "genotype";
   ST.hv.gstats = Object.fromEntries(Object.entries(ST.hv.gstats || {}).filter(([, v]) => isEdit(v)));
   ST.annotators = Array.isArray(ST.annotators) ? ALL_ANN.filter((a) => ST.annotators.map(Number).includes(a)) : [1, 2];
@@ -3458,7 +3461,7 @@ function distMethods() {
 // positivity method in the same area (section_browser.py: annotator 1 the whole section, annotator 2 from 50 µm before
 // the extended junction interface on). Agreement as 01_validation: Lin's CCC on log10 counts, Bland–Altman on
 // log2(automated ÷ human), Spearman ρ; 95 % CIs from 2,000 section bootstraps (within annotator when pooled).
-const HV_INPUTS = { hvOn: "on", hvVs: "vs", hvPlot: "plot", hvGroup: "group", hvShow: "show", hvFilters: "filters", hvSize: "size", hvWidthMm: "widthMm", hvHeightMm: "heightMm",
+const HV_INPUTS = { hvOn: "on", hvVs: "vs", hvUnit: "unit", hvLabels: "labels", hvPlot: "plot", hvGroup: "group", hvShow: "show", hvFilters: "filters", hvSize: "size", hvWidthMm: "widthMm", hvHeightMm: "heightMm",
   hvTitle: "title", hvXlabel: "xlabel", hvYlabel: "ylabel" };
 const HV_NUMERIC = new Set(["size", "widthMm", "heightMm"]);
 const HV_BOOT = 2000, HV_SEED = 20261105, ANN_SYMBOL = { 1: "circle", 2: "square", 3: "triangle-up", 4: "diamond", 5: "star" };
@@ -3516,10 +3519,14 @@ function agreementNumbers(rows) {
 function withCi(rows) {
   if (rows.length < 3) return null;
   const point = agreementNumbers(rows), next = STATS.rng(HV_SEED);
-  const strata = [...new Set(rows.map((e) => e.ann))].map((a) => rows.filter((e) => e.ann === a));
+  const strata = [...new Set(rows.map((e) => e.ann))].map((a) => {
+    const by = {};
+    for (const e of rows.filter((x) => x.ann === a)) (by[e.sec || e.r.id] = by[e.sec || e.r.id] || []).push(e);
+    return Object.values(by);
+  });
   const draws = Object.fromEntries(Object.keys(point).map((k) => [k, []]));
   for (let b = 0; b < HV_BOOT; b++) {
-    const pick = strata.flatMap((g) => g.map(() => g[Math.floor(next() * g.length)]));
+    const pick = strata.flatMap((g) => g.flatMap(() => g[Math.floor(next() * g.length)]));
     const a = agreementNumbers(pick);
     for (const k of Object.keys(point)) if (Number.isFinite(a[k])) draws[k].push(a[k]);
   }
@@ -3533,14 +3540,14 @@ function withCi(rows) {
   ci.nBy = Object.fromEntries(GENOTYPES.map((g) => [g, rows.filter((e) => e.r.genotype === g).length]));
   const A = rows.map((e) => 0.5 * Math.log(Math.max(e.human, 0.5) * Math.max(e.auto, 0.5)));
   ci.aRange = [Math.min(...A), Math.max(...A)];
-  ci.medianRatio = STATS.median(rows.map((e) => e.auto / e.human));
+  ci.medianRatio = STATS.median(rows.map((e) => Math.max(e.auto, 0.5) / Math.max(e.human, 0.5)));     // a zero count as 0.5
   ci.anyZero = rows.some((e) => e.human === 0 || e.auto === 0);
   return ci;
 }
 // the squares of a row's section: "code compartment: human / compared" (the compared: automated or the other annotator)
 function squareLines(e, sep) {
   const vs = hvVsHuman() ? String(ST.hv.vs) : null, fmt = (v) => (v === undefined || v === null ? "–" : String(v));
-  return ((e.r.d && e.r.d.squares) || []).filter((q) => q.human && q.human[String(e.ann)] !== undefined).map((q) =>
+  return (e.sq ? [e.sq] : (e.r.d && e.r.d.squares) || []).filter((q) => q.human && q.human[String(e.ann)] !== undefined).map((q) =>
     q.code + " " + q.compartment + ": " + q.human[String(e.ann)] + " / " + (vs ? fmt(q.human[vs]) : fmt(q.automated ? q.automated[ST.method] : null))).join(sep);
 }
 // number formats for the panel: a ratio from ln, with its CI; a plain value with its CI
@@ -3627,7 +3634,13 @@ function computeHuman() {
     const other = vs === null ? null : ((e.r.d && e.r.d.humans) || []).find((h) => h.n === vs);
     const auto = vs === null ? (e.h.automated ? num(e.h.automated[ST.method]) : NaN) : other ? num(other.human) : NaN;
     return { ...e, human: num(e.h.human), auto, ratio: auto / e.h.human, log2: Math.log2(Math.max(auto, 0.5) / Math.max(e.h.human, 0.5)) };
-  }).filter((e) => Number.isFinite(e.auto) && Number.isFinite(e.human));
+  }).filter((e) => Number.isFinite(e.auto) && Number.isFinite(e.human)).flatMap((e) => {
+    if (ST.hv.unit !== "square" || e.ann <= 2) return [{ ...e, sec: e.r.id }];
+    return ((e.r.d && e.r.d.squares) || []).filter((q) => q.human && q.human[String(e.ann)] !== undefined).map((q) => {
+      const human = num(q.human[String(e.ann)]), auto = vs === null ? num(q.automated ? q.automated[ST.method] : NaN) : num(q.human[String(vs)]);
+      return { ...e, sec: e.r.id, sq: q, code: q.code, human, auto, ratio: auto / human, log2: Math.log2(Math.max(auto, 0.5) / Math.max(human, 0.5)) };
+    }).filter((x) => Number.isFinite(x.auto) && Number.isFinite(x.human));
+  });
   // pooled = the annotators chosen; with one annotator only its own row
   const sets = [...(ST.annotators.length > 1 ? [[ST.annotators.length === 2 ? "both" : "all chosen", rows]] : []), ...ST.annotators.map((a) => [ANN_NAME[a], rows.filter((e) => e.ann === a)])];
   const groups = hvGroupsOf(rows, ST.hv.group);
@@ -3649,7 +3662,7 @@ function humanGroupsFigure(z) {
       if (!sec.length) continue;
       const gc = groupColor({ key: grp.g ? grp.key : g, g });
       if (hSec) traces.push({ type: "scatter", mode: "markers", meta: "leg:" + g, legendgroup: g, name: name(g, g), showlegend: !seen.has(g),
-        x: sec.map((v) => cx + pos.sec + ST.jitter * seededJitter(v.e.r.id + v.e.ann, 1)), y: sec.map((v) => Math.exp(v.y)),
+        x: sec.map((v) => cx + pos.sec + ST.jitter * seededJitter((v.e.sq ? v.e.sq.code : v.e.r.id) + v.e.ann, 1)), y: sec.map((v) => Math.exp(v.y)),
         customdata: sec.map((v) => [v.e.r.id, v.e.r.slide, v.e.label, v.e.human, v.e.auto, Math.exp(v.y).toFixed(2), squareLines(v.e, "<br>")]),
         hovertemplate: "%{customdata[0]} (%{customdata[2]})<br>%{customdata[1]}<br>human %{customdata[3]}, " + yWord() + " %{customdata[4]}: %{customdata[5]}×<br>%{customdata[6]}<extra></extra>",
         marker: { symbol: SYMBOL[g], size: ST.secSize * z, color: gc.fill, opacity: ST.secOpacity, line: { color: gc.edge, width: 0.3 * z } } });
@@ -3736,7 +3749,8 @@ function humanFigure(z) {
     const pts = rows.filter((e) => e.ann === ann && e.r.genotype === g);
     if (!pts.length) continue;
     const gc = groupColor({ key: g, g }), key = g + " a" + ann;
-    traces.push({ type: "scatter", mode: "markers", meta: "leg:" + key, name: name(key, g + ", " + ANN_NAME[ann]), x: pts.map(fx), y: pts.map(fy),
+    traces.push({ type: "scatter", mode: hv.labels ? "markers+text" : "markers", meta: "leg:" + key, name: name(key, g + ", " + ANN_NAME[ann]), x: pts.map(fx), y: pts.map(fy),
+      text: pts.map((e) => (e.sq ? e.sq.code : e.r.id)), textposition: "middle right", textfont: { size: ST.fontPt * z * 0.6, color: COLORS().text },
       customdata: pts.map((e) => [e.code, e.r.id, e.human, e.auto, squareLines(e, "<br>")]),
       hovertemplate: "%{customdata[0]} %{customdata[1]}<br>human %{customdata[2]}, " + yWord() + " %{customdata[3]}<br>%{customdata[4]}<extra></extra>",
       marker: { symbol: ANN_SYMBOL[ann], size: (hv.size || 4) * z, color: gc.fill, line: { color: gc.edge, width: 0.8 * z } } });
@@ -3820,7 +3834,7 @@ function humanTicks(lo, hi, steps = [1, 3]) {
 function updateHuman() {
   $("humanBox").className = ST.hv.on ? "" : "off";
   if (!ST.hv.on) return;
-  const key = ST.method + "|" + ST.annotators + "|" + ST.hv.vs + "|" + ST.hv.group + "|" + ST.hv.filters + "|" + (ST.hv.filters ? JSON.stringify([ST.exps, ST.qcOnly, ST.noUncertain, ST.humanOnly, ST.region]) : "");
+  const key = ST.method + "|" + ST.annotators + "|" + ST.hv.vs + "|" + ST.hv.unit + "|" + ST.hv.group + "|" + ST.hv.filters + "|" + (ST.hv.filters ? JSON.stringify([ST.exps, ST.qcOnly, ST.noUncertain, ST.humanOnly, ST.region]) : "");
   if (key !== HV_KEY || !HV) {
     HV = computeHuman(); HV_KEY = key;
     const a = pooledAgreement();
@@ -3830,7 +3844,8 @@ function updateHuman() {
   const meth = METHODS.find((m) => ST.method.startsWith(m.key + "-")), k = ST.method.split("-")[1];
   $("humanBox").querySelector("h2").textContent = { scatter: "Human against " + yWord() + " counts", ba: "Bland–Altman (ratio)", groups: "Ratio " + yWord() + " / human by group" }[ST.hv.plot];
   $("hvMethod").textContent = (hvVsHuman() ? "against " + ANN_NAME[+ST.hv.vs] : meth ? meth.label + ", " + k + " SD" : ST.method) +
-    " · " + annotatorWords() + " · " + HV.rows.length + " human-counted section" + (HV.rows.length === 1 ? "" : "s") + (ST.hv.filters ? " (the page's filters applied)" : "");
+    " · " + annotatorWords() + " · " + (ST.hv.unit === "square" && HV.rows.some((e) => e.sq) ? HV.rows.length + " squares of " + new Set(HV.rows.map((e) => e.sec)).size + " sections"
+      : HV.rows.length + " human-counted section" + (HV.rows.length === 1 ? "" : "s")) + (ST.hv.filters ? " (the page's filters applied)" : "");
   if (!HV.rows.length) { $("hvStats").innerHTML = "<p class='note'>" + (ST.annotators.length ? "No human-counted section." : "No human annotator is ticked.") + "</p>"; $("hvTable").innerHTML = ""; Plotly.purge("plot4"); DRAWN4 = false; return; }
   if (editStale(ST.hv.statsText, hvAutoStats(), false)) ST.hv.statsText = null;
   for (const k of Object.keys(ST.hv.gstats)) if (!HV.comps[+k] || editStale(ST.hv.gstats[k], hvCompText(HV.comps[+k]), false)) delete ST.hv.gstats[k];
