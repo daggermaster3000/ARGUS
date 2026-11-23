@@ -146,7 +146,7 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
     <div class="row"><label><input type="checkbox" id="qcOnly">QC status ok only</label></div>
     <div class="row"><label title="Sections where fewer than half of the run's AF488+ nuclei near the line lie on the side called home."><input type="checkbox" id="noUncertain">leave out the sections whose home side is uncertain</label></div>
     <div class="row"><label><input type="checkbox" id="humanOnly">human-counted sections only</label></div>
-    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="3">squares, annotator 1</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="4">squares, annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="5">squares, annotator 3</label></div>
+    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="3">squares, annotator 1</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="4">squares, annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="5">squares, annotator 3</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="6">squares, annotator 4</label></div>
     <div class="row"><label>Junction region <select id="region"><option value="all">all</option><option value="hand">drawn by hand</option><option value="auto">found automatically</option></select></label></div>
   </details>
   <details open>
@@ -416,9 +416,9 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
 
   <!-- ---------------------------------------------------------------- the human against automated panel -->
   <div class="pane" id="pane-hv-data">
-    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="3">squares, annotator 1</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="4">squares, annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="5">squares, annotator 3</label></div>
+    <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="3">squares, annotator 1</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="4">squares, annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="5">squares, annotator 3</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="6">squares, annotator 4</label></div>
     <p class="hint">Every human-counted section of the annotators ticked: the human count against the automated count of the positivity method chosen in the sidebar (or, under Compare with, against another annotator's count of the same blinded squares), in the area the human counted (annotator 1 the whole section; annotator 2 from 50 µm before the junction interface on). The same ticks also apply to the human counts everywhere else on the page.</p>
-    <div class="row"><label title="What the human counts are compared with: the automated count of the positivity method chosen in the sidebar, or another annotator's blinded squares (human against human: the squares of every other annotator ticked, on the same squares)">Compare with <select id="hvVs"><option value="auto">the automated count</option><option value="3">squares, annotator 1</option><option value="4">squares, annotator 2</option><option value="5">squares, annotator 3</option></select></label></div>
+    <div class="row"><label title="What the human counts are compared with: the automated count of the positivity method chosen in the sidebar, or another annotator's blinded squares (human against human: the squares of every other annotator ticked, on the same squares)">Compare with <select id="hvVs"><option value="auto">the automated count</option><option value="3">squares, annotator 1</option><option value="4">squares, annotator 2</option><option value="5">squares, annotator 3</option><option value="6">squares, annotator 4</option></select></label></div>
     <div class="row"><label>Plot <select id="hvPlot"><option value="scatter">compared against human (log–log)</option><option value="ba">Bland–Altman (ratio)</option><option value="groups">ratio by group: sections, slide means and tests</option></select></label></div>
     <div class="row"><label title="The groups of the ratio-by-group plot and of its table. Genotype × experiment compares WT3 with GD1 within each experiment; experiment compares the experiments (both genotypes together).">Group by <select id="hvGroup"><option value="genotype">genotype</option><option value="geno_exp">genotype × experiment</option><option value="experiment">experiment</option></select></label></div>
     <p class="hint">Ratio by group: one small marker per human-counted section (automated ÷ human), one large marker per slide (the geometric mean of its sections), and the geometric mean of the slide means with its 95 % CI. The tests use slides as the unit (sections of one slide are not independent): Welch t and Mann–Whitney on the slide means of ln(ratio), and a linear mixed model of ln(ratio) on the sections with the slide as a random intercept. Each group's ratio is also tested against 1 (one-sample t on its slide means).</p>
@@ -1467,8 +1467,9 @@ const objectsMethod = () => (window.OBJECT_DATA && window.OBJECT_DATA.method) ||
 const maskName = (key) => (window.OBJECT_DATA && window.OBJECT_DATA.mask && key === window.OBJECT_DATA.method ? window.OBJECT_DATA.mask
   : String(key).startsWith("gauss-") ? "kmad" + String(key).split("-")[1] : "");
 
-// the human counts: 1, 2 the whole-section counts of annotators 1 and 2; 3, 4, 5 the blinded count squares of annotators 1, 2, 3
-const ALL_ANN = [1, 2, 3, 4, 5], ANN_NAME = { 1: "annotator 1", 2: "annotator 2", 3: "squares, annotator 1", 4: "squares, annotator 2", 5: "squares, annotator 3" };
+// the human counts: 1, 2 the whole-section counts of annotators 1 and 2; 3–6 the blinded count squares of annotators 1–4
+const ALL_ANN = [1, 2, 3, 4, 5, 6], ANN_NAME = { 1: "annotator 1", 2: "annotator 2", 3: "squares, annotator 1", 4: "squares, annotator 2", 5: "squares, annotator 3",
+  6: "squares, annotator 4" };
 const annotatorOn = (n) => (ST.annotators || []).includes(n);
 // the human panel compares the human counts with the automated count (vs "auto") or with another annotator's squares
 const hvVsHuman = () => !!ST.hv.vs && ST.hv.vs !== "auto";
@@ -1651,7 +1652,7 @@ function setState(s) {
   if (!["section", "object"].includes(ST.ds.unit)) ST.ds.unit = "section";
   if (!(ST.ds.kind in KIND_NAMES)) ST.ds.kind = DEFAULTS.ds.kind;
   if (!["scatter", "ba", "groups"].includes(ST.hv.plot)) ST.hv.plot = "scatter";
-  if (!["auto", "3", "4", "5"].includes(String(ST.hv.vs))) ST.hv.vs = "auto";
+  if (!["auto", "3", "4", "5", "6"].includes(String(ST.hv.vs))) ST.hv.vs = "auto";
   if (!["section", "square"].includes(ST.hv.unit)) ST.hv.unit = "section";
   if (!["genotype", "geno_exp", "experiment"].includes(ST.hv.group)) ST.hv.group = "genotype";
   ST.hv.gstats = Object.fromEntries(Object.entries(ST.hv.gstats || {}).filter(([, v]) => isEdit(v)));
@@ -3464,7 +3465,7 @@ function distMethods() {
 const HV_INPUTS = { hvOn: "on", hvVs: "vs", hvUnit: "unit", hvLabels: "labels", hvPlot: "plot", hvGroup: "group", hvShow: "show", hvFilters: "filters", hvSize: "size", hvWidthMm: "widthMm", hvHeightMm: "heightMm",
   hvTitle: "title", hvXlabel: "xlabel", hvYlabel: "ylabel" };
 const HV_NUMERIC = new Set(["size", "widthMm", "heightMm"]);
-const HV_BOOT = 2000, HV_SEED = 20261105, ANN_SYMBOL = { 1: "circle", 2: "square", 3: "triangle-up", 4: "diamond", 5: "star" };
+const HV_BOOT = 2000, HV_SEED = 20261105, ANN_SYMBOL = { 1: "circle", 2: "square", 3: "triangle-up", 4: "diamond", 5: "star", 6: "hexagon" };
 let HV = null, HV_KEY = "", DRAWN4 = false, BUSY4 = false;
 
 function buildHumanControls() {
@@ -3961,7 +3962,7 @@ function humanMethods() {
   const n = (a) => HV.rows.filter((e) => e.ann === a).length;
   const area = { 1: "human annotator 1 the whole section (" + n(1) + " sections)",
     2: "human annotator 2 from 50 µm before the junction interface (extended past both ends) across the whole partner organoid (" + n(2) + " sections)" };
-  for (const a of [1, 2, 3]) area[a + 2] = "human annotator " + a + " in blinded 120 µm squares, one each on the home side, in the junction region and on the crossed side, " +
+  for (const a of [1, 2, 3, 4]) area[a + 2] = "human annotator " + a + " in blinded 120 µm squares, one each on the home side, in the junction region and on the crossed side, " +
     "placed at random in each compartment of " + n(a + 2) + " sections drawn at random (stratified by genotype and experiment) and shown in a shuffled order with no genotype, " +
     "section or automated result (the section's count is the sum of its squares)";
   const two = ST.annotators.length > 1, people = new Set(ST.annotators.map((a) => (a > 2 ? a - 2 : a))).size;
@@ -3980,7 +3981,7 @@ function humanMethods() {
           "slide means of ln(ratio)) and by a linear mixed model of ln(ratio) with genotype" + (ST.hv.group === "genotype" ? " and experiment" : "") +
           " as fixed effects and slide as a random intercept (REML; Wald 95 % CI and P)") + "." : "");
   }
-  return "Agreement with human counts. " + (people > 2 ? "Three investigators" : people > 1 ? "Two investigators" : "An investigator") + " counted AF488⁺ cells by hand, one point per labelled cell on the AF488 image " +
+  return "Agreement with human counts. " + (people > 3 ? "Four investigators" : people > 2 ? "Three investigators" : people > 1 ? "Two investigators" : "An investigator") + " counted AF488⁺ cells by hand, one point per labelled cell on the AF488 image " +
     "(maximum over z): " + ST.annotators.map((a) => area[a]).join("; ") + ". The automated count (" + (meth ? methodPhrase(meth, k) : ST.method) +
     ") was taken in the same area of the same sections. Agreement was summarised by Lin's concordance correlation coefficient on log₁₀ counts, " +
     "Bland–Altman analysis of the ratio automated / human on the log scale (bias, the geometric mean of the ratios; ln(ratio) regressed on ln(geometric mean of the two " +

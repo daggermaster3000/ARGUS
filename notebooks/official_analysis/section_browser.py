@@ -134,7 +134,7 @@ SQUARES_KEY = OUT / "annotation_v2_key.csv"
 SQUARES_COUNTS = OUT / "annotation_v2" / "counts"
 #: who counted the squares (the name typed into annotate.html, lower case) → their number as an annotator above; the
 #: browser shows the number, never the name. Squares of annotator a are the human count n = 2 + a ("squares, annotator a").
-SQUARE_ANNOTATORS = {"james": 1, "quillan": 2, "annotator 3": 3}
+SQUARE_ANNOTATORS = {"james": 1, "quillan": 2, "annotator 3": 3, "annotator 4": 4}
 TARGET_UM = 1.3                   #: picture pixel size (whole pixels of the scan are averaged)
 THUMB_PX = 300                    #: longest side of a thumbnail
 DISPLAY_PCT = (1.0, 99.7)         #: display range: these percentiles of AF488 inside the tissue

@@ -1,5 +1,5 @@
 """Analysis of the blinded square counts (``annotation_squares.py``): how well two people agree, and the automated count
-against their consensus (or against the one annotator, while only one has counted).
+against their consensus (the mean of all annotators) and against each of them.
 
 Reads ``annotation_v2_key.csv`` and every ``annotation_v2/counts/square_counts_*.csv`` (the annotators' exports; one
 file each). A square counts as seen when it was marked Done, or when it comes before the last square the annotator
@@ -123,7 +123,7 @@ def ratio(df, col, ref="consensus"):
 def main() -> int:
     key = pd.read_csv(aq.KEY)
     squares, dots = load_counts(key)
-    who = sorted(squares["annotator"].unique())[:2]
+    who = sorted(squares["annotator"].unique())
     wide = squares.pivot_table(index="code", columns="annotator", values="n_dots").dropna()[who]
     t = key.merge(wide.reset_index(), on="code").merge(automated(key), on="code")
     t["consensus"] = t[who].mean(axis=1)
@@ -134,7 +134,9 @@ def main() -> int:
     if len(who) < 2:
         print(f"1. Inter-rater agreement: needs a second annotator; 'consensus' below is {who[0]}'s count\n")
     else:
-        inter_rater(t, who, dots)
+        for i, a in enumerate(who):                               # every pair of annotators
+            for b in who[i + 1:]:
+                inter_rater(t, [a, b], dots)
     refs = ["consensus"] + (who if len(who) > 1 else [])          # the automated count against each human reference
     per_square(t, res, refs)
     cell_match(t, key, dots, res)
@@ -205,7 +207,7 @@ def inter_rater(t: pd.DataFrame, who: list[str], dots: pd.DataFrame) -> None:
     matched = sum(match(dots[(dots.annotator == who[0]) & (dots.code == c)][["x_um", "y_um"]].to_numpy(float),
                         dots[(dots.annotator == who[1]) & (dots.code == c)][["x_um", "y_um"]].to_numpy(float), MATCH_UM)
                   for c in t["code"])
-    print("1. Inter-rater agreement")
+    print(f"1. Inter-rater agreement: {who[0]} and {who[1]}")
     print(f"   totals: {who[0]} {int(a.sum())}, {who[1]} {int(b.sum())} cells")
     print(f"   CCC counts {ccc(a, b):.2f}, CCC log(1+n) {ccc(la, lb):.2f}, ICC(2,1) {icc21(np.column_stack([a, b])):.2f}, "
           f"Spearman {pd.Series(a).corr(pd.Series(b), method='spearman'):.2f}")
