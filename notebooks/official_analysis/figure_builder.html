@@ -417,8 +417,9 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
   <!-- ---------------------------------------------------------------- the human against automated panel -->
   <div class="pane" id="pane-hv-data">
     <div class="row annBoxes" title="Whose hand counts are used: the human against automated panel, the human-counted filter, the variables human and auto_in_human_area, the Data panel and the Methods text"><span>Human counts by</span><label><input type="checkbox" data-ann="1" checked>annotator 1</label><label><input type="checkbox" data-ann="2" checked>annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="3">squares, annotator 1</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="4">squares, annotator 2</label><label title="The blinded count squares: three 120 µm squares per section (home, junction region, crossed), counted blind to genotype and section"><input type="checkbox" data-ann="5">squares, annotator 3</label></div>
-    <p class="hint">Every human-counted section of the annotators ticked: the human count against the automated count of the positivity method chosen in the sidebar, in the area the human counted (annotator 1 the whole section; annotator 2 from 50 µm before the junction interface on). The same ticks also apply to the human counts everywhere else on the page.</p>
-    <div class="row"><label>Plot <select id="hvPlot"><option value="scatter">automated against human (log–log)</option><option value="ba">Bland–Altman (ratio)</option><option value="groups">ratio by group: sections, slide means and tests</option></select></label></div>
+    <p class="hint">Every human-counted section of the annotators ticked: the human count against the automated count of the positivity method chosen in the sidebar (or, under Compare with, against another annotator's count of the same blinded squares), in the area the human counted (annotator 1 the whole section; annotator 2 from 50 µm before the junction interface on). The same ticks also apply to the human counts everywhere else on the page.</p>
+    <div class="row"><label title="What the human counts are compared with: the automated count of the positivity method chosen in the sidebar, or another annotator's blinded squares (human against human: the squares of every other annotator ticked, on the same squares)">Compare with <select id="hvVs"><option value="auto">the automated count</option><option value="3">squares, annotator 1</option><option value="4">squares, annotator 2</option><option value="5">squares, annotator 3</option></select></label></div>
+    <div class="row"><label>Plot <select id="hvPlot"><option value="scatter">compared against human (log–log)</option><option value="ba">Bland–Altman (ratio)</option><option value="groups">ratio by group: sections, slide means and tests</option></select></label></div>
     <div class="row"><label title="The groups of the ratio-by-group plot and of its table. Genotype × experiment compares WT3 with GD1 within each experiment; experiment compares the experiments (both genotypes together).">Group by <select id="hvGroup"><option value="genotype">genotype</option><option value="geno_exp">genotype × experiment</option><option value="experiment">experiment</option></select></label></div>
     <p class="hint">Ratio by group: one small marker per human-counted section (automated ÷ human), one large marker per slide (the geometric mean of its sections), and the geometric mean of the slide means with its 95 % CI. The tests use slides as the unit (sections of one slide are not independent): Welch t and Mann–Whitney on the slide means of ln(ratio), and a linear mixed model of ln(ratio) on the sections with the slide as a random intercept. Each group's ratio is also tested against 1 (one-sample t on its slide means).</p>
     <div class="row"><label><input type="checkbox" id="hvFilters">apply the page's filters (experiments, QC …)</label></div>
@@ -1411,7 +1412,7 @@ const DEFAULTS = {
   ds: { on: true, unit: "section", f: "crossed / junction_mm", of: "away", group: "genotype", side: "all", region: "all", kind: "kde",
     hnorm: "density", binBy: "number", bins: 30, binWidth: 25, bw: "silverman", bwFactor: 1, layout: "overlay", logX: false, xmin: null, xmax: null,
     medians: true, stats: true, statsText: null, statsPos: null, widthMm: 80, heightMm: 60, sizeAuto: true, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null },
-  hv: { on: true, plot: "scatter", group: "genotype", show: "both", gstats: {}, filters: false, size: 4, widthMm: 95, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null,
+  hv: { on: true, plot: "scatter", vs: "auto", group: "genotype", show: "both", gstats: {}, filters: false, size: 4, widthMm: 95, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null,
     statsText: null, statsPos: null },
 };
 // publication greys: WT3 filled dark grey, GD1 open white, black edges; black bars, lines and text
@@ -1467,6 +1468,10 @@ const maskName = (key) => (window.OBJECT_DATA && window.OBJECT_DATA.mask && key 
 // the human counts: 1, 2 the whole-section counts of annotators 1 and 2; 3, 4, 5 the blinded count squares of annotators 1, 2, 3
 const ALL_ANN = [1, 2, 3, 4, 5], ANN_NAME = { 1: "annotator 1", 2: "annotator 2", 3: "squares, annotator 1", 4: "squares, annotator 2", 5: "squares, annotator 3" };
 const annotatorOn = (n) => (ST.annotators || []).includes(n);
+// the human panel compares the human counts with the automated count (vs "auto") or with another annotator's squares
+const hvVsHuman = () => !!ST.hv.vs && ST.hv.vs !== "auto";
+const yWord = () => (hvVsHuman() ? "annotator " + (+ST.hv.vs - 2) : "automated");
+const yCap = () => yWord().charAt(0).toUpperCase() + yWord().slice(1);
 const annotatorWords = () => {
   const names = ST.annotators.map((a) => (a > 2 ? "the blinded squares of human annotator " + (a - 2) : "human annotator " + a));
   return names.length ? (names.length > 1 ? names.slice(0, -1).join(", ") + " and " + names[names.length - 1] : names[0]) : "no human annotator";
@@ -1619,6 +1624,7 @@ function writeControls() {
   for (const box of document.querySelectorAll(".annBoxes input")) {
     box.checked = annotatorOn(+box.dataset.ann);
     if (+box.dataset.ann > 2) box.parentElement.style.display = ((window.SECTION_DATA && window.SECTION_DATA.sections) || []).some((s) => (s.humans || []).some((h) => h.n === +box.dataset.ann)) ? "" : "none";
+    if (+box.dataset.ann > 2) for (const o of $("hvVs").options) if (o.value === box.dataset.ann) o.hidden = box.parentElement.style.display === "none";
   }
 }
 
@@ -1643,6 +1649,7 @@ function setState(s) {
   if (!["section", "object"].includes(ST.ds.unit)) ST.ds.unit = "section";
   if (!(ST.ds.kind in KIND_NAMES)) ST.ds.kind = DEFAULTS.ds.kind;
   if (!["scatter", "ba", "groups"].includes(ST.hv.plot)) ST.hv.plot = "scatter";
+  if (!["auto", "3", "4", "5"].includes(String(ST.hv.vs))) ST.hv.vs = "auto";
   if (!["genotype", "geno_exp", "experiment"].includes(ST.hv.group)) ST.hv.group = "genotype";
   ST.hv.gstats = Object.fromEntries(Object.entries(ST.hv.gstats || {}).filter(([, v]) => isEdit(v)));
   ST.annotators = Array.isArray(ST.annotators) ? ALL_ANN.filter((a) => ST.annotators.map(Number).includes(a)) : [1, 2];
@@ -3451,7 +3458,7 @@ function distMethods() {
 // positivity method in the same area (section_browser.py: annotator 1 the whole section, annotator 2 from 50 µm before
 // the extended junction interface on). Agreement as 01_validation: Lin's CCC on log10 counts, Bland–Altman on
 // log2(automated ÷ human), Spearman ρ; 95 % CIs from 2,000 section bootstraps (within annotator when pooled).
-const HV_INPUTS = { hvOn: "on", hvPlot: "plot", hvGroup: "group", hvShow: "show", hvFilters: "filters", hvSize: "size", hvWidthMm: "widthMm", hvHeightMm: "heightMm",
+const HV_INPUTS = { hvOn: "on", hvVs: "vs", hvPlot: "plot", hvGroup: "group", hvShow: "show", hvFilters: "filters", hvSize: "size", hvWidthMm: "widthMm", hvHeightMm: "heightMm",
   hvTitle: "title", hvXlabel: "xlabel", hvYlabel: "ylabel" };
 const HV_NUMERIC = new Set(["size", "widthMm", "heightMm"]);
 const HV_BOOT = 2000, HV_SEED = 20261105, ANN_SYMBOL = { 1: "circle", 2: "square", 3: "triangle-up", 4: "diamond", 5: "star" };
@@ -3609,8 +3616,10 @@ function hvCompText(c) {
 
 function computeHuman() {
   const keep = ST.hv.filters ? new Set(selected()) : null;
-  const rows = humanEntries().filter((e) => !keep || keep.has(e.r)).map((e) => {
-    const auto = e.h.automated ? num(e.h.automated[ST.method]) : NaN;
+  const vs = hvVsHuman() ? +ST.hv.vs : null;
+  const rows = humanEntries().filter((e) => (!keep || keep.has(e.r)) && (vs === null || (e.ann > 2 && e.ann !== vs))).map((e) => {
+    const other = vs === null ? null : ((e.r.d && e.r.d.humans) || []).find((h) => h.n === vs);
+    const auto = vs === null ? (e.h.automated ? num(e.h.automated[ST.method]) : NaN) : other ? num(other.human) : NaN;
     return { ...e, human: num(e.h.human), auto, ratio: auto / e.h.human, log2: Math.log2(Math.max(auto, 0.5) / Math.max(e.h.human, 0.5)) };
   }).filter((e) => Number.isFinite(e.auto) && Number.isFinite(e.human));
   // pooled = the annotators chosen; with one annotator only its own row
@@ -3636,7 +3645,7 @@ function humanGroupsFigure(z) {
       if (hSec) traces.push({ type: "scatter", mode: "markers", meta: "leg:" + g, legendgroup: g, name: name(g, g), showlegend: !seen.has(g),
         x: sec.map((v) => cx + pos.sec + ST.jitter * seededJitter(v.e.r.id + v.e.ann, 1)), y: sec.map((v) => Math.exp(v.y)),
         customdata: sec.map((v) => [v.e.r.id, v.e.r.slide, v.e.label, v.e.human, v.e.auto, Math.exp(v.y).toFixed(2)]),
-        hovertemplate: "%{customdata[0]} (%{customdata[2]})<br>%{customdata[1]}<br>human %{customdata[3]}, automated %{customdata[4]}: %{customdata[5]}×<extra></extra>",
+        hovertemplate: "%{customdata[0]} (%{customdata[2]})<br>%{customdata[1]}<br>human %{customdata[3]}, " + yWord() + " %{customdata[4]}: %{customdata[5]}×<extra></extra>",
         marker: { symbol: SYMBOL[g], size: ST.secSize * z, color: gc.fill, opacity: ST.secOpacity, line: { color: gc.edge, width: 0.3 * z } } });
       if (hSec) seen.add(g);
       if (hSl) traces.push({ type: "scatter", mode: "markers", legendgroup: g, ...(hSec ? { showlegend: false } : { meta: "leg:" + g, name: name(g, g), showlegend: !seen.has(g) }),
@@ -3694,7 +3703,7 @@ function humanGroupsFigure(z) {
     margin: { l: 10 * z, r: right, t: top, b: xLines * fs * 1.25 + 10 * z, pad: 0 },
     xaxis: { ...axb, range: xr, tickmode: "array", tickvals: xs.map((x) => x + DOT_TICK), ticktext: xticktext, fixedrange: true, title: { text: toHtml(hv.xlabel) } },
     yaxis: { ...axb, type: "log", range: [Math.log10(y0), Math.log10(y1)], tickmode: "array", tickvals: ticks, ticktext: ticks.map(String),
-      title: { text: toHtml(hv.ylabel || "Ratio, automated / human count"), standoff: 4 * z } } };
+      title: { text: toHtml(hv.ylabel || "Ratio, " + yWord() + " / human count"), standoff: 4 * z } } };
   const plotH = Math.max(H - top - layout.margin.b, 10);
   if (hv.title) annotations.push({ name: "title", text: toHtml(hv.title), xref: "paper", yref: "paper", x: 0.5, xanchor: "center",
     y: 1 + (top - 6 * z) / plotH, yanchor: "top", showarrow: false, font: { size: fs * 1.1, color: C.text } });
@@ -3723,7 +3732,7 @@ function humanFigure(z) {
     const gc = groupColor({ key: g, g }), key = g + " a" + ann;
     traces.push({ type: "scatter", mode: "markers", meta: "leg:" + key, name: name(key, g + ", " + ANN_NAME[ann]), x: pts.map(fx), y: pts.map(fy),
       customdata: pts.map((e) => [e.code, e.r.id, e.human, e.auto]),
-      hovertemplate: "%{customdata[0]} %{customdata[1]}<br>human %{customdata[2]}, automated %{customdata[3]}<extra></extra>",
+      hovertemplate: "%{customdata[0]} %{customdata[1]}<br>human %{customdata[2]}, " + yWord() + " %{customdata[3]}<extra></extra>",
       marker: { symbol: ANN_SYMBOL[ann], size: (hv.size || 4) * z, color: gc.fill, line: { color: gc.edge, width: 0.8 * z } } });
   }
   const xs = rows.map(fx), ys = rows.map(fy);
@@ -3745,7 +3754,8 @@ function humanFigure(z) {
   const legendRight = ST.showLegend && !hv.legendPos && !ba;
   if (ba && !hv.legendPos) Object.assign(layout.legend, { x: 0.02, y: 0.98, xanchor: "left", yanchor: "top", bgcolor: "rgba(255,255,255,0.85)" });
   layout.margin = { l: 10 * z, r: 6 * z + (legendRight ? 44 + Math.max(0, ...entries.map((t) => t.length)) * fs * 0.55 : 0), t: top + 4 * z, b: 10 * z, pad: 0 };
-  layout.xaxis = { ...axb, type: "log", range: [Math.log10(r0), Math.log10(r1)], title: { text: toHtml(hv.xlabel || (ba ? "Geometric mean of the two counts" : "Human count (AF488⁺ cells)")) },
+  layout.xaxis = { ...axb, type: "log", range: [Math.log10(r0), Math.log10(r1)], title: { text: toHtml(hv.xlabel || (ba ? "Geometric mean of the two counts" : hvVsHuman() && ST.annotators.filter((a) => a > 2 && a !== +ST.hv.vs).length === 1
+      ? "Annotator " + (ST.annotators.find((a) => a > 2 && a !== +ST.hv.vs) - 2) + " count (AF488⁺ cells)" : "Human count (AF488⁺ cells)")) },
     ...humanTicks(r0, r1, ba ? [1, 2, 5] : [1, 3]), constrain: "domain" };
   if (ba) {
     // ratio on a log axis, 0.4–2.5 (wider only if a section falls outside); 1 thin and dotted
@@ -3753,7 +3763,7 @@ function humanFigure(z) {
     const y0 = Math.min(0.4, ...ratios.map((v) => v / 1.12)), y1 = Math.max(2.5, ...ratios.map((v) => v * 1.12));
     const ticks = [0.125, 0.25, 0.5, 1, 2, 4, 8].filter((v) => v >= y0 * 0.999 && v <= y1 * 1.001);
     layout.yaxis = { ...axb, type: "log", range: [Math.log10(y0), Math.log10(y1)], tickmode: "array", tickvals: ticks, ticktext: ticks.map(String),
-      title: { text: toHtml(hv.ylabel || "Ratio, automated / human count"), standoff: 4 * z } };
+      title: { text: toHtml(hv.ylabel || "Ratio, " + yWord() + " / human count"), standoff: 4 * z } };
     const lines = [{ type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip", x: [r0, r1], y: [1, 1], line: { color: MID, width: 0.5 * z, dash: "dot" } }];
     const R = pooled;
     if (R && Number.isFinite(R.slope[0])) {     // the regression and its limits (fitted ×/÷ fold) over the sections' geometric means
@@ -3767,7 +3777,7 @@ function humanFigure(z) {
     traces.unshift(...lines);
     for (const t of traces) if (t.mode === "markers") t.y = t.y.map((v) => Math.pow(2, v));
   } else {
-    layout.yaxis = { ...axb, type: "log", range: [Math.log10(r0), Math.log10(r1)], title: { text: toHtml(hv.ylabel || "Automated count (AF488⁺ cells)"), standoff: 4 * z },
+    layout.yaxis = { ...axb, type: "log", range: [Math.log10(r0), Math.log10(r1)], title: { text: toHtml(hv.ylabel || yCap() + " count (AF488⁺ cells)"), standoff: 4 * z },
       ...humanTicks(r0, r1), scaleanchor: "x", scaleratio: 1, constrain: "domain" };
     traces.unshift({ type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip", x: [r0, r1], y: [r0, r1], line: { color: MID, width: 0.8 * z, dash: "dash" } });
   }
@@ -3804,16 +3814,16 @@ function humanTicks(lo, hi, steps = [1, 3]) {
 function updateHuman() {
   $("humanBox").className = ST.hv.on ? "" : "off";
   if (!ST.hv.on) return;
-  const key = ST.method + "|" + ST.annotators + "|" + ST.hv.group + "|" + ST.hv.filters + "|" + (ST.hv.filters ? JSON.stringify([ST.exps, ST.qcOnly, ST.noUncertain, ST.humanOnly, ST.region]) : "");
+  const key = ST.method + "|" + ST.annotators + "|" + ST.hv.vs + "|" + ST.hv.group + "|" + ST.hv.filters + "|" + (ST.hv.filters ? JSON.stringify([ST.exps, ST.qcOnly, ST.noUncertain, ST.humanOnly, ST.region]) : "");
   if (key !== HV_KEY || !HV) {
     HV = computeHuman(); HV_KEY = key;
     const a = pooledAgreement();
-    if (a) console.log("Geometric-mean ratio, automated / human (" + ST.method + ", " + annotatorWords() + "; 95 % CI, " + HV_BOOT + " bootstrap resamples): " +
+    if (a) console.log("Geometric-mean ratio, " + yWord() + " / human (" + ST.method + ", " + annotatorWords() + "; 95 % CI, " + HV_BOOT + " bootstrap resamples): " +
       GENOTYPES.map((g) => g + " " + fmtRatio(a["gm_" + g], 3) + ", n = " + a.nBy[g]).join("; "));
   }
   const meth = METHODS.find((m) => ST.method.startsWith(m.key + "-")), k = ST.method.split("-")[1];
-  $("humanBox").querySelector("h2").textContent = { scatter: "Human against automated counts", ba: "Bland–Altman (ratio)", groups: "Ratio automated / human by group" }[ST.hv.plot];
-  $("hvMethod").textContent = (meth ? meth.label + ", " + k + " SD" : ST.method) +
+  $("humanBox").querySelector("h2").textContent = { scatter: "Human against " + yWord() + " counts", ba: "Bland–Altman (ratio)", groups: "Ratio " + yWord() + " / human by group" }[ST.hv.plot];
+  $("hvMethod").textContent = (hvVsHuman() ? "against " + ANN_NAME[+ST.hv.vs] : meth ? meth.label + ", " + k + " SD" : ST.method) +
     " · " + annotatorWords() + " · " + HV.rows.length + " human-counted section" + (HV.rows.length === 1 ? "" : "s") + (ST.hv.filters ? " (the page's filters applied)" : "");
   if (!HV.rows.length) { $("hvStats").innerHTML = "<p class='note'>" + (ST.annotators.length ? "No human-counted section." : "No human annotator is ticked.") + "</p>"; $("hvTable").innerHTML = ""; Plotly.purge("plot4"); DRAWN4 = false; return; }
   if (editStale(ST.hv.statsText, hvAutoStats(), false)) ST.hv.statsText = null;
@@ -3835,9 +3845,9 @@ function updateHuman() {
   const showAll = ST.hv.plot !== "groups";
   let html = "";
   if (showAll) {
-    html += "<table class='st'><tr><th>Annotator</th><th>n</th><th>Lin's CCC, log counts</th><th>Lin's CCC, counts</th><th>Bias, automated / human (×)</th>" +
+    html += "<table class='st'><tr><th>Annotator</th><th>n</th><th>Lin's CCC, log counts</th><th>Lin's CCC, counts</th><th>Bias, " + yWord() + " / human (×)</th>" +
       "<th>Slope, log ratio on log mean</th><th>95 % LoA, regression-based (fitted ratio ×/÷)</th><th>Unadjusted 95 % LoA (×)</th>" +
-      "<th>Spearman ρ (human vs automated)</th><th>Median ratio</th></tr>";
+      "<th>Spearman ρ (human vs " + yWord() + ")</th><th>Median ratio</th></tr>";
     for (const st of HV.sets) {
       const a = st.a;
       html += "<tr><td>" + st.name + "</td><td>" + st.rows.length + "</td>" + (a ? "<td>" + fmtCi(a.ccc) + "</td><td>" + fmtCi(a.cccRaw) + "</td><td>" + fmtRatio(a.bias) +
@@ -3847,12 +3857,12 @@ function updateHuman() {
     html += "</table>";
     const a = pooledAgreement();
     if (a) {
-      html += "<table class='st'><tr><th>Genotype</th><th>n</th><th>Geometric-mean ratio, automated / human (95 % CI)</th></tr>" +
+      html += "<table class='st'><tr><th>Genotype</th><th>n</th><th>Geometric-mean ratio, " + yWord() + " / human (95 % CI)</th></tr>" +
         GENOTYPES.map((g) => "<tr><td>" + g + "</td><td>" + a.nBy[g] + "</td><td>" + fmtRatio(a["gm_" + g]) + "</td></tr>").join("") + "</table>";
       const dbl = Math.pow(2, a.slope[0]);
-      html += "<p class='note'>Agreement of the automated with the human count of AF488⁺ cells per section (" + annotatorWords() + "). Lin's concordance correlation " +
-        "coefficient on log₁₀ counts (1 only when every section lies on the identity line) and on counts; Spearman ρ between the human and the automated counts. " +
-        "Bland–Altman analysis on the ratio automated / human: bias, the geometric mean of the ratios; slope, the least-squares slope of ln(ratio) on ln(geometric mean " +
+      html += "<p class='note'>Agreement of " + (hvVsHuman() ? yWord() + "'s" : "the automated") + " count with the human count of AF488⁺ cells per section (" + annotatorWords() + "). Lin's concordance correlation " +
+        "coefficient on log₁₀ counts (1 only when every section lies on the identity line) and on counts; Spearman ρ between the human and the " + yWord() + " counts. " +
+        "Bland–Altman analysis on the ratio " + yWord() + " / human: bias, the geometric mean of the ratios; slope, the least-squares slope of ln(ratio) on ln(geometric mean " +
         "of the two counts): the ratio changes by ×2<sup>slope</sup> per doubling of the count (here ×" + dbl.toFixed(2) + ", " + (dbl >= 1 ? "+" : "−") +
         Math.abs((dbl - 1) * 100).toFixed(0) + " %). Regression-based 95 % limits of agreement: the fitted ratio ×/÷ exp(1.96 × residual SD of the regression) " +
         "(Bland &amp; Altman, 1999); unadjusted limits: bias ×/÷ exp(1.96 × SD of ln ratio). Geometric-mean ratio per genotype: the geometric mean of its sections' " +
@@ -3891,14 +3901,14 @@ function updateHuman() {
         html += "</table>";
       }
     }
-    html += "<p class='note'>Ratio = automated ÷ human count of a section" + (HV.rows.some((e) => e.human === 0 || e.auto === 0) ? " (a zero count taken as 0.5)" : "") + ", analysed as ln(ratio). A slide's value is the mean of its sections' ln(ratio) " +
+    html += "<p class='note'>Ratio = " + yWord() + " ÷ human count of a section" + (HV.rows.some((e) => e.human === 0 || e.auto === 0) ? " (a zero count taken as 0.5)" : "") + ", analysed as ln(ratio). A slide's value is the mean of its sections' ln(ratio) " +
       "(their geometric mean as a ratio); a group's is the mean of its slide means with a t-based 95 % CI, back-transformed. WT3 against GD1: Welch t and Mann–Whitney on the slide " +
       "means, Mann–Whitney on sections (overstates the evidence: sections of a slide are related), and a linear mixed model of ln(ratio) on the sections with genotype" +
       (ST.hv.group === "genotype" ? " and experiment" : "") + " fixed" + (ST.annotators.length > 1 ? ", annotator fixed (the annotators counted different areas)" : "") +
       " and slide as a random intercept (REML, Wald CI and P). Experiments: one-way ANOVA F test on the slide means. With few slides per group these tests have little power.</p>";
   }
   $("hvStats").innerHTML = html;
-  const head = ["", "Section", "Genotype", "Experiment", "Annotator", "Counted area", "Human", "Automated", "Automated ÷ human", "log₂ ratio"];
+  const head = ["", "Section", "Genotype", "Experiment", "Annotator", "Counted area", "Human", yCap(), yCap() + " ÷ human", "log₂ ratio"];
   $("hvTable").innerHTML = "<table class='st'><thead><tr>" + head.map((h) => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>" +
     HV.rows.map((e) => "<tr><td>" + e.code + "</td><td>" + e.r.id + "</td><td>" + e.r.genotype + "</td><td>" + e.r.experiment + "</td><td>" + e.label + "</td><td style='text-align:left;white-space:normal'>" +
       e.h.area + "</td><td>" + e.human + "</td><td>" + e.auto + "</td><td>" + e.ratio.toFixed(2) + "</td><td>" + minus(e.log2.toFixed(2)) + "</td></tr>").join("") + "</tbody></table>";
@@ -3909,6 +3919,11 @@ function humanCsv(all) {
   const head = ["code", "section", "name", "genotype", "experiment", "slide", "annotator", "counted area", "human"];   // the annotators chosen
   const keep = ST.hv.filters ? new Set(selected()) : null;
   const entries = humanEntries().filter((e) => !keep || keep.has(e.r));
+  if (!all && hvVsHuman()) {
+    const rows = (HV && HV.rows) || [];
+    return csvText([...head, "annotator " + (+ST.hv.vs - 2), "ratio", "log2 ratio"], rows.map((e) =>
+      [e.code, e.r.id, e.r.name, e.r.genotype, +e.r.experiment, e.r.slide, e.label, e.h.area, e.human, e.auto, e.auto / e.human, e.log2]));
+  }
   if (!all) {
     return csvText([...head, "automated_" + ST.method, "automated / human", "log2 ratio"], entries.map((e) => {
       const a = num(e.h.automated[ST.method]);
@@ -3929,6 +3944,21 @@ function humanMethods() {
     "placed at random in each compartment of " + n(a + 2) + " sections drawn at random (stratified by genotype and experiment) and shown in a shuffled order with no genotype, " +
     "section or automated result (the section's count is the sum of its squares)";
   const two = ST.annotators.length > 1, people = new Set(ST.annotators.map((a) => (a > 2 ? a - 2 : a))).size;
+  if (hvVsHuman()) {
+    const b = +ST.hv.vs - 2, xs = ST.annotators.filter((a) => a > 2 && a !== +ST.hv.vs);
+    return "Agreement between human counts. Human annotator " + b + " and " + xs.map((a) => "human annotator " + (a - 2)).join(" and ") +
+      " counted AF488⁺ cells by hand, independently, one point per labelled cell on the AF488 image (maximum over z), in the same blinded 120 µm squares: " +
+      "one each on the home side, in the junction region and on the crossed side, placed at random in each compartment of " + HV.rows.length / Math.max(xs.length, 1) +
+      " sections drawn at random (stratified by genotype and experiment) and shown in a shuffled order with no genotype, section, automated result or other annotator's " +
+      "count (a section's count is the sum of its squares). Agreement was summarised by Lin's concordance correlation coefficient on log₁₀ counts, Bland–Altman analysis " +
+      "of the ratio annotator " + b + " / other annotator on the log scale (bias, the geometric mean of the ratios; ln(ratio) regressed on ln(geometric mean of the two " +
+      "counts) by least squares, with regression-based 95 % limits of agreement (Bland and Altman, 1999), and unadjusted limits) and Spearman's ρ. All 95 % confidence " +
+      "intervals are percentiles of " + HV_BOOT.toLocaleString("en-US") + " bootstrap resamples of sections." +
+      (ST.hv.plot === "groups" ? " The ratio was compared " + (ST.hv.group === "experiment" ? "between experiments by a one-way ANOVA on slide means of ln(ratio)"
+        : "between WT3 and GD1" + (ST.hv.group === "geno_exp" ? " within each experiment" : "") + " with slides as the unit (Welch's t-test and the Mann–Whitney U test on " +
+          "slide means of ln(ratio)) and by a linear mixed model of ln(ratio) with genotype" + (ST.hv.group === "genotype" ? " and experiment" : "") +
+          " as fixed effects and slide as a random intercept (REML; Wald 95 % CI and P)") + "." : "");
+  }
   return "Agreement with human counts. " + (people > 2 ? "Three investigators" : people > 1 ? "Two investigators" : "An investigator") + " counted AF488⁺ cells by hand, one point per labelled cell on the AF488 image " +
     "(maximum over z): " + ST.annotators.map((a) => area[a]).join("; ") + ". The automated count (" + (meth ? methodPhrase(meth, k) : ST.method) +
     ") was taken in the same area of the same sections. Agreement was summarised by Lin's concordance correlation coefficient on log₁₀ counts, " +
