@@ -27,6 +27,11 @@ diffuse green haze; bright tissue edges or folds; anything outside the tissue.
 **Faint cells:** dot a cell when you are reasonably sure it is a labelled cell body. If you are unsure, leave it out.
 Try to apply the same rule in every square.
 
+**Reference cells:** beside each square, a column shows the brightest labelled cells of the same section (same staining,
+scan and display, and the same channel and brightness settings as the square). They show what a clearly positive cell
+looks like in that section; they are not part of the square and are not counted. A cell does not need to be as bright as
+the references to be dotted: compare its shape and its contrast with the tissue around it.
+
 ## The counting frame
 
 Each square is shown with a 20 µm margin of context around it. Only the **inner frame** (the white rectangle) is

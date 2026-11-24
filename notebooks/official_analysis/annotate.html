@@ -29,6 +29,10 @@ label { color: var(--mute); }
 #grid span.done { background: var(--accent); }
 #grid span.cur { outline: 2px solid var(--ink); }
 .seg button.on { background: var(--ink); color: var(--paper); }
+#refs { flex: 0 0 196px; margin-top: 42px; }
+#refs .strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+@media (max-width: 1100px) { #refs { flex: 1 1 100%; margin-top: 0; } }
+#refs canvas { width: 190px; height: 190px; cursor: default; }
 </style>
 </head>
 <body>
@@ -50,6 +54,8 @@ label { color: var(--mute); }
     </div>
     <canvas id="c" width="800" height="800" aria-label="square to count; left click adds a dot, right click removes one"></canvas>
   </div>
+  <div id="refs"><div class="mute">Positive reference: the brightest labelled cells of this section, same display; not counted</div>
+    <div class="strip" id="refStrip"></div></div>
   <aside>
     <div class="row"><button id="bPrev" aria-label="previous square">← prev</button><button id="bNext" aria-label="next square">next →</button>
       <button id="bDone" class="primary">Done (D)</button></div>
@@ -86,26 +92,50 @@ function image(src) {
 }
 function scale(q) { return cv.width / q.px; }
 
-function draw() {
-  const q = SQ[cur]; if (!q) return;
-  const k = scale(q);
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cv.width, cv.height);
-  ctx.filter = "brightness(" + $("bright").value + ") contrast(" + $("contrast").value + ")";
-  const g = image(q.img488), n = image(q.img405);
-  ctx.imageSmoothingEnabled = false;
+// AF488 (green) and / or the nuclei (blue, or grey alone) of one image pair onto a canvas, with the sliders' filter
+function paint(c, src488, src405) {
+  const x = c.getContext("2d"), W = c.width, H = c.height;
+  x.setTransform(1, 0, 0, 1, 0, 0);
+  x.fillStyle = "#000"; x.fillRect(0, 0, W, H);
+  x.filter = "brightness(" + $("bright").value + ") contrast(" + $("contrast").value + ")";
+  const g = image(src488), n = image(src405);
+  x.imageSmoothingEnabled = false;
   if (ch === "1" || ch === "2") {
-    if (g.complete) { ctx.globalCompositeOperation = "source-over"; ctx.drawImage(g, 0, 0, cv.width, cv.height); tint("#00ff00"); }
+    if (g.complete) {
+      x.globalCompositeOperation = "source-over"; x.drawImage(g, 0, 0, W, H);
+      x.globalCompositeOperation = "multiply"; x.fillStyle = "#00ff00"; x.fillRect(0, 0, W, H);
+    }
   }
   if (ch === "2" || ch === "3") {
     if (n.complete) {
-      const off = document.createElement("canvas"); off.width = cv.width; off.height = cv.height;
-      const o = off.getContext("2d"); o.imageSmoothingEnabled = false; o.drawImage(n, 0, 0, cv.width, cv.height);
-      o.globalCompositeOperation = "multiply"; o.fillStyle = ch === "2" ? "#3a6bff" : "#ffffff"; o.fillRect(0, 0, off.width, off.height);
-      ctx.globalCompositeOperation = ch === "2" ? "lighter" : "source-over"; ctx.drawImage(off, 0, 0);
+      const off = document.createElement("canvas"); off.width = W; off.height = H;
+      const o = off.getContext("2d"); o.imageSmoothingEnabled = false; o.drawImage(n, 0, 0, W, H);
+      o.globalCompositeOperation = "multiply"; o.fillStyle = ch === "2" ? "#3a6bff" : "#ffffff"; o.fillRect(0, 0, W, H);
+      x.globalCompositeOperation = ch === "2" ? "lighter" : "source-over"; x.drawImage(off, 0, 0);
     }
   }
-  ctx.filter = "none"; ctx.globalCompositeOperation = "source-over";
+  x.filter = "none"; x.globalCompositeOperation = "source-over";
+}
+// the reference cells of the square's section, each with a 10 µm bar
+function drawRefs(q) {
+  const strip = $("refStrip"), refs = q.refs || [];
+  $("refs").style.display = refs.length ? "" : "none";
+  while (strip.children.length < refs.length) { const c = document.createElement("canvas"); c.width = 190; c.height = 190; strip.appendChild(c); }
+  while (strip.children.length > refs.length) strip.lastChild.remove();
+  refs.forEach((r, i) => {
+    const c = strip.children[i], x = c.getContext("2d");
+    c.setAttribute("aria-label", "reference positive cell " + (i + 1));
+    paint(c, r.img488, r.img405);
+    const bar = 10 / r.um_per_px * c.width / r.px;
+    x.fillStyle = "#ffffff"; x.fillRect(8, c.height - 12, bar, 3);
+  });
+}
+
+function draw() {
+  const q = SQ[cur]; if (!q) return;
+  const k = scale(q);
+  paint(cv, q.img488, q.img405);
+  drawRefs(q);
   // the margin dimmed, the counting frame in white
   const [x0, y0, x1, y1] = q.frame.map((v) => v * k);
   ctx.fillStyle = "rgba(0,0,0,0.45)";
@@ -129,10 +159,6 @@ function draw() {
   const n_done = SQ.filter((s) => S[s.code] && S[s.code].done).length;
   $("progress").textContent = n_done + " / " + SQ.length + " squares done";
   [...$("grid").children].forEach((el, i) => { el.className = (S[SQ[i].code] && S[SQ[i].code].done ? "done" : "") + (i === cur ? " cur" : ""); });
-}
-function tint(color) {
-  ctx.globalCompositeOperation = "multiply"; ctx.fillStyle = color; ctx.fillRect(0, 0, cv.width, cv.height);
-  ctx.globalCompositeOperation = "source-over";
 }
 function at(ev) {
   const r = cv.getBoundingClientRect(), q = SQ[cur], k = scale(q);
