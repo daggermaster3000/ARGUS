@@ -29,7 +29,10 @@ label { color: var(--mute); }
 #grid span.done { background: var(--accent); }
 #grid span.cur { outline: 2px solid var(--ink); }
 .seg button.on { background: var(--ink); color: var(--paper); }
-#refs { flex: 0 0 196px; margin-top: 42px; }
+#refs { flex: 0 0 196px; margin-top: 74px; }
+.lims { display: grid; grid-template-columns: auto auto 1fr auto auto 1fr auto auto; gap: 4px 8px; align-items: center; margin: 0 0 8px; max-width: 800px; }
+.lims input[type=range] { width: 100%; }
+.lims input[type=number] { width: 6.5em; font: inherit; padding: 2px 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink); }
 #refs .strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 @media (max-width: 1100px) { #refs { flex: 1 1 100%; margin-top: 0; } }
 #refs canvas { width: 190px; height: 190px; cursor: default; }
@@ -48,13 +51,16 @@ label { color: var(--mute); }
   <div id="stageWrap">
     <div class="row">
       <span class="seg" role="group" aria-label="channels"><button data-ch="1" class="on">1 · AF488</button><button data-ch="2">2 · + nuclei</button><button data-ch="3">3 · nuclei</button></span>
-      <label>brightness <input type="range" id="bright" min="0.5" max="3" step="0.05" value="1"></label>
-      <label>contrast <input type="range" id="contrast" min="0.5" max="3" step="0.05" value="1"></label>
-      <button id="bReset">reset</button>
+      <label title="Keep the contrast limits when moving to another square (as a napari layer does); untick to start each square at its section's default"><input type="checkbox" id="keep" checked> keep limits between squares</label>
+    </div>
+    <!-- contrast limits on the raw intensities, as in napari: below min black, above max full colour, linear between -->
+    <div class="lims" role="group" aria-label="contrast limits">
+      <b>AF488</b><span>min</span><input type="range" id="g0" step="1"><input type="number" id="g0t" step="1" aria-label="AF488 min"><span>max</span><input type="range" id="g1" step="1"><input type="number" id="g1t" step="1" aria-label="AF488 max"><button id="gAuto" title="the section's default range">auto</button>
+      <b>Nuclei</b><span>min</span><input type="range" id="n0" step="1"><input type="number" id="n0t" step="1" aria-label="nuclei min"><span>max</span><input type="range" id="n1" step="1"><input type="number" id="n1t" step="1" aria-label="nuclei max"><button id="nAuto" title="this square's 1st–99.8th percentile">auto</button>
     </div>
     <canvas id="c" width="800" height="800" aria-label="square to count; left click adds a dot, right click removes one"></canvas>
   </div>
-  <div id="refs"><div class="mute">Positive reference: the brightest labelled cells of this section, same display; not counted</div>
+  <div id="refs"><div class="mute">Positive reference: the brightest labelled cells of this section, same contrast limits; not counted</div>
     <div class="strip" id="refStrip"></div></div>
   <aside>
     <div class="row"><button id="bPrev" aria-label="previous square">← prev</button><button id="bNext" aria-label="next square">next →</button>
@@ -92,12 +98,73 @@ function image(src) {
 }
 function scale(q) { return cv.width / q.px; }
 
-// AF488 (green) and / or the nuclei (blue, or grey alone) of one image pair onto a canvas, with the sliders' filter
+// ---------------------------------------------------------------- raw intensities (raw/<code>.js) and contrast limits
+const RAW = {}, LOADING = {};
+let LIM = null;                                 // {g: [min, max], n: [min, max]} in raw units
+function u16(b64) {
+  const s = atob(b64), bytes = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
+  return new Uint16Array(bytes.buffer);
+}
+window.RAW_LOADED = (code, d) => {
+  RAW[code] = { w: d.w, a: u16(d.a), n: u16(d.n), lim488: d.lim488, lim405: d.lim405,
+    refs: (d.refs || []).map((r) => ({ w: r.w, a: u16(r.a), n: u16(r.n), um_per_px: r.um_per_px })) };
+  if (SQ[cur] && SQ[cur].code === code) { setRanges(true); draw(); }
+};
+function needRaw(code) {
+  if (code in RAW || LOADING[code]) return;
+  LOADING[code] = true;
+  const el = document.createElement("script");
+  el.src = "raw/" + code + ".js";
+  el.onerror = () => { RAW[code] = null; draw(); };        // no raw file: the stretched PNGs are shown instead
+  document.head.appendChild(el);
+}
+function maxOf(arrs) { let m = 1; for (const a of arrs) for (let i = 0; i < a.length; i++) if (a[i] > m) m = a[i]; return m; }
+// the sliders span 0 … the brightest value of the square itself (the references, brighter, saturate above it; a value
+// typed in the box can go beyond); defaults from the data
+function setRanges(newSquare) {
+  const r = RAW[SQ[cur].code]; if (!r) return;
+  const top = { g: maxOf([r.a]), n: maxOf([r.n]) };
+  for (const c of ["g", "n"]) for (const k of [0, 1]) { $(c + k).min = 0; $(c + k).max = top[c]; }
+  if (!LIM || (newSquare && !$("keep").checked)) LIM = { g: r.lim488.slice(), n: r.lim405.slice() };
+  showLims();
+}
+function showLims() {
+  for (const c of ["g", "n"]) {
+    for (const k of [0, 1]) { $(c + k).value = LIM[c][k]; $(c + k + "t").value = Math.round(LIM[c][k]); }
+  }
+  try { localStorage.setItem("square-counting.limits", JSON.stringify(LIM)); } catch (e) { /* storage blocked */ }
+}
+function onLim(c, k, typed) {
+  let v = +$(c + k + (typed ? "t" : "")).value;
+  if (!Number.isFinite(v)) { showLims(); return; }
+  if (k === 0) v = Math.min(v, LIM[c][1] - 1); else v = Math.max(v, LIM[c][0] + 1);
+  LIM[c][k] = v; showLims(); draw();
+}
+// one raw image pair onto a canvas with the contrast limits: AF488 green, nuclei blue (2) or grey (3), added
+function paintRaw(c, w, a, n) {
+  const off = document.createElement("canvas"); off.width = w; off.height = a.length / w;
+  const o = off.getContext("2d"), img = o.createImageData(off.width, off.height), d = img.data;
+  const [g0, g1] = LIM.g, [n0, n1] = LIM.n, sg = 255 / Math.max(g1 - g0, 1), sn = 255 / Math.max(n1 - n0, 1);
+  const showG = ch === "1" || ch === "2", showN = ch === "2" || ch === "3";
+  for (let i = 0, j = 0; i < a.length; i++, j += 4) {
+    const g = showG ? Math.min(255, Math.max(0, (a[i] - g0) * sg)) : 0, nb = showN ? Math.min(255, Math.max(0, (n[i] - n0) * sn)) : 0;
+    if (ch === "3") { d[j] = d[j + 1] = d[j + 2] = nb; }
+    else { d[j] = 0.23 * nb; d[j + 1] = Math.min(255, g + 0.42 * nb); d[j + 2] = nb; }
+    d[j + 3] = 255;
+  }
+  o.putImageData(img, 0, 0);
+  const x = c.getContext("2d");
+  x.setTransform(1, 0, 0, 1, 0, 0); x.imageSmoothingEnabled = false;
+  x.drawImage(off, 0, 0, c.width, c.height);
+}
+
+// AF488 (green) and / or the nuclei (blue, or grey alone) of one image pair onto a canvas: the stretched PNGs, used only
+// when a square has no raw file
 function paint(c, src488, src405) {
   const x = c.getContext("2d"), W = c.width, H = c.height;
   x.setTransform(1, 0, 0, 1, 0, 0);
   x.fillStyle = "#000"; x.fillRect(0, 0, W, H);
-  x.filter = "brightness(" + $("bright").value + ") contrast(" + $("contrast").value + ")";
   const g = image(src488), n = image(src405);
   x.imageSmoothingEnabled = false;
   if (ch === "1" || ch === "2") {
@@ -114,7 +181,7 @@ function paint(c, src488, src405) {
       x.globalCompositeOperation = ch === "2" ? "lighter" : "source-over"; x.drawImage(off, 0, 0);
     }
   }
-  x.filter = "none"; x.globalCompositeOperation = "source-over";
+  x.globalCompositeOperation = "source-over";
 }
 // the reference cells of the square's section, each with a 10 µm bar
 function drawRefs(q) {
@@ -122,10 +189,12 @@ function drawRefs(q) {
   $("refs").style.display = refs.length ? "" : "none";
   while (strip.children.length < refs.length) { const c = document.createElement("canvas"); c.width = 190; c.height = 190; strip.appendChild(c); }
   while (strip.children.length > refs.length) strip.lastChild.remove();
+  const raw = RAW[q.code];
   refs.forEach((r, i) => {
     const c = strip.children[i], x = c.getContext("2d");
     c.setAttribute("aria-label", "reference positive cell " + (i + 1));
-    paint(c, r.img488, r.img405);
+    if (raw && raw.refs[i] && LIM) paintRaw(c, raw.refs[i].w, raw.refs[i].a, raw.refs[i].n);
+    else paint(c, r.img488, r.img405);
     const bar = 10 / r.um_per_px * c.width / r.px;
     x.fillStyle = "#ffffff"; x.fillRect(8, c.height - 12, bar, 3);
   });
@@ -134,7 +203,9 @@ function drawRefs(q) {
 function draw() {
   const q = SQ[cur]; if (!q) return;
   const k = scale(q);
-  paint(cv, q.img488, q.img405);
+  needRaw(q.code);
+  const raw = RAW[q.code];
+  if (raw && LIM) paintRaw(cv, raw.w, raw.a, raw.n); else paint(cv, q.img488, q.img405);
   drawRefs(q);
   // the margin dimmed, the counting frame in white
   const [x0, y0, x1, y1] = q.frame.map((v) => v * k);
@@ -175,17 +246,19 @@ cv.addEventListener("contextmenu", (ev) => {
   d.forEach(([a, b], i) => { const dd = Math.hypot(a - x, b - y); if (dd < bd) { bd = dd; best = i; } });
   if (best >= 0) { d.splice(best, 1); save(); draw(); }
 });
-function go(i) { cur = Math.max(0, Math.min(SQ.length - 1, i)); save(); draw(); }
+function go(i) { cur = Math.max(0, Math.min(SQ.length - 1, i)); save(); if (RAW[SQ[cur].code]) setRanges(true); draw(); }
 $("bPrev").onclick = () => go(cur - 1);
 $("bNext").onclick = () => go(cur + 1);
 $("bDone").onclick = () => { if (!who) { $("who").focus(); return; } const s = st(SQ[cur].code); s.done = !s.done; save(); if (s.done) go(nextUndone()); else draw(); };
 function nextUndone() { for (let j = 1; j <= SQ.length; j++) { const i = (cur + j) % SQ.length; if (!(S[SQ[i].code] && S[SQ[i].code].done)) return i; } return cur; }
 document.querySelectorAll(".seg button").forEach((b) => b.onclick = () => setCh(b.dataset.ch));
 function setCh(c) { ch = c; document.querySelectorAll(".seg button").forEach((b) => b.classList.toggle("on", b.dataset.ch === c)); draw(); }
-$("bright").oninput = draw; $("contrast").oninput = draw;
-$("bReset").onclick = () => { $("bright").value = 1; $("contrast").value = 1; draw(); };
+for (const c of ["g", "n"]) for (const k of [0, 1]) { $(c + k).oninput = () => onLim(c, k); $(c + k + "t").onchange = () => onLim(c, k, true); }
+$("gAuto").onclick = () => { const r = RAW[SQ[cur].code]; if (r) { LIM.g = r.lim488.slice(); showLims(); draw(); } };
+$("nAuto").onclick = () => { const r = RAW[SQ[cur].code]; if (r) { LIM.n = r.lim405.slice(); showLims(); draw(); } };
+try { const kept = JSON.parse(localStorage.getItem("square-counting.limits") || "null"); if (kept && kept.g && kept.n) LIM = kept; } catch (e) { /* none */ }
 document.addEventListener("keydown", (ev) => {
-  if (ev.target.tagName === "INPUT" && ev.target.type === "text") return;
+  if (ev.target.tagName === "INPUT" && (ev.target.type === "text" || ev.target.type === "number")) return;
   if (ev.key === "ArrowRight") go(cur + 1);
   else if (ev.key === "ArrowLeft") go(cur - 1);
   else if (ev.key === "1" || ev.key === "2" || ev.key === "3") setCh(ev.key);

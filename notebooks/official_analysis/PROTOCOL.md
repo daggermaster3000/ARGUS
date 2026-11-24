@@ -14,7 +14,7 @@ Dot a structure when **all** of these hold:
 
 1. **It is a cell body (soma):** a compact, roughly round or oval bright structure, about 5–15 µm across (the scale
    bar in the page is 10 µm). A labelled cell may have processes; dot its body once, not its processes.
-2. **It is clearly brighter than the tissue around it** in the green (AF488) image. Use the brightness slider if you
+2. **It is clearly brighter than the tissue around it** in the green (AF488) image. Adjust the contrast limits if you
    need to, but judge against the local background, not against the brightest cell in the square.
 3. **It has a nucleus** in the blue (AF405) image when you switch it on (key **2**). A bright green blob with no
    nucleus under or beside it is usually a process, a fragment or debris: do not dot it.
@@ -28,7 +28,7 @@ diffuse green haze; bright tissue edges or folds; anything outside the tissue.
 Try to apply the same rule in every square.
 
 **Reference cells:** beside each square, a column shows the brightest labelled cells of the same section (same staining,
-scan and display, and the same channel and brightness settings as the square). They show what a clearly positive cell
+scan and raw intensities, drawn with the same channel and contrast limits as the square). They show what a clearly positive cell
 looks like in that section; they are not part of the square and are not counted. A cell does not need to be as bright as
 the references to be dotted: compare its shape and its contrast with the tissue around it.
 
@@ -49,7 +49,7 @@ Open `annotate.html` in Chrome, Edge or Firefox (from this folder) and enter you
 | place a dot | left click |
 | remove a dot | right click on it |
 | AF488 only / AF488 + nuclei / nuclei only | keys **1** / **2** / **3** |
-| brightness, contrast | sliders above the image |
+| contrast limits (raw intensities, as in napari) | min and max slider per channel above the image; **auto** resets to the section's default; "keep limits between squares" keeps your setting when you move on |
 | square finished (also when it has no cells) | **Done** (or key **D**) |
 | next / previous square | → / ← |
 

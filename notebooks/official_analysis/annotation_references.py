@@ -1,4 +1,5 @@
-"""Reference cells for the counting page: each section's brightest AF488⁺ cells, shown beside its squares.
+"""Reference cells and raw intensities for the counting page: each section's brightest AF488⁺ cells, shown beside its
+squares, and every square's and reference's raw channel values, so the page can set contrast limits as napari does.
 
 An annotator judging a faint cell compares it with what a clearly positive cell looks like *in the same section*
 (the same staining, scan and display range). For every section of the blinded square set (``annotation_squares.py``)
@@ -12,7 +13,10 @@ this picks the :data:`N_REF` brightest objects of the counting mask (``af488_mas
 - the AF488 crop takes the section's display range, as its squares do; the nuclear crop its own 1st–99.8th percentile.
 
 Written into ``annotation_v2``: ``images/ref_<token>_<i>_488.png`` / ``_405.png`` (``token`` a random name per section,
-so file names say nothing about the section) and, in ``squares.js``, a ``refs`` list on every square of that section.
+so file names say nothing about the section) and, in ``squares.js``, a ``refs`` list on every square of that section;
+``raw/<code>.js``: ``window.RAW_LOADED(code, {...})`` with the square's AF488 and nuclear crops and those of its
+references as raw 16-bit values (maximum-intensity projection over z; little-endian, base64), and the default contrast
+limits: the section's display range for AF488 (as the PNGs), the square's 1st–99.8th percentile for the nuclei.
 The squares themselves (codes, order, images, frames) are left exactly as they were, so earlier counts stay valid.
 
     python notebooks/official_analysis/annotation_references.py
@@ -21,6 +25,7 @@ No Qt.
 """
 from __future__ import annotations
 
+import base64
 import json
 import random
 import sys
@@ -48,6 +53,21 @@ def brightness(plane: np.ndarray, y_px: float, x_px: float, r_px: float) -> floa
     yy, xx = np.mgrid[max(y0 - r, 0):max(y0 - r, 0) + win.shape[0], max(x0 - r, 0):max(x0 - r, 0) + win.shape[1]]
     inside = (yy - y_px) ** 2 + (xx - x_px) ** 2 <= r_px ** 2
     return float(win[inside].mean()) if inside.any() else np.nan
+
+
+def b64(img: np.ndarray) -> str:
+    """Raw values as little-endian 16-bit, base64."""
+    return base64.b64encode(np.clip(np.round(img), 0, 65535).astype("<u2").tobytes()).decode("ascii")
+
+
+def write_raw(code: str, a: np.ndarray, nu: np.ndarray, lim488, refs: list[dict]) -> None:
+    nz = nu[nu > 0]
+    lim405 = [float(v) for v in np.percentile(nz, (1, 99.8))] if nz.size else [0.0, 1.0]
+    payload = {"w": int(a.shape[1]), "a": b64(a), "n": b64(nu), "lim488": [float(v) for v in lim488], "lim405": lim405,
+               "refs": refs}
+    (aq.OUT / "raw").mkdir(exist_ok=True)
+    (aq.OUT / "raw" / f"{code}.js").write_text(f"window.RAW_LOADED({json.dumps(code)},{json.dumps(payload, separators=(',', ':'))});\n",
+                                                encoding="utf-8")
 
 
 def main() -> int:
@@ -79,7 +99,7 @@ def main() -> int:
         token = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(6))
         size = int(round(REF_UM / voxel))
         lo, hi = display[name]
-        out = []
+        out, raw_refs = [], []
         for i, j in enumerate(order):
             top, left = int(round(y[j] / voxel - size / 2)), int(round(x[j] / voxel - size / 2))
             a = aq.crop(af488, top, left, size)
@@ -89,7 +109,14 @@ def main() -> int:
             nlo, nhi = np.percentile(nu[nu > 0], (1, 99.8)) if (nu > 0).any() else (0, 1)
             aq.to_png(nu, nlo, nhi, aq.OUT / f"{stem}_405.png")
             out.append({"img488": f"{stem}_488.png", "img405": f"{stem}_405.png", "px": size, "um_per_px": voxel})
+            raw_refs.append({"w": size, "a": b64(a), "n": b64(nu), "um_per_px": voxel})
         refs[name] = out
+        by_code = {q["code"]: q for q in squares}
+        for _, k in g.iterrows():                           # the square's own raw crops, where its PNGs were cut
+            q = by_code[k["code"]]
+            top, left = int(round(k["top_um"] / voxel)), int(round(k["left_um"] / voxel))
+            write_raw(k["code"], aq.crop(af488, top, left, q["px"]), aq.crop(nuclear.astype(np.float32), top, left, q["px"]),
+                      (lo, hi), raw_refs)
         del af488, nuclear
         print(f"[{n_s}/{key['name'].nunique()}] {name}: {len(out)} references of {len(b)} candidates", flush=True)
     by_code = key.set_index("code")["name"]
