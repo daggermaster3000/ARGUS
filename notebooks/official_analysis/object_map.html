@@ -123,7 +123,8 @@ td:first-child, th:first-child { text-align: left; color: var(--mute); }
       <button class="tool" id="tReset" title="show every object again">reset</button>
       <span class="tsep"></span>
       <label title="Auto: points while many objects are in view, outlines once few are">draw <select id="drawMode"><option value="auto">auto</option><option value="points">points</option><option value="outlines">outlines</option></select></label>
-      <label title="Outline size, screen pixels per µm of the object">size <input type="range" id="glyph" min="0.3" max="4" step="0.1" value="1.2"></label>
+      <label title="Point size, screen pixels">point <input type="range" id="pt" min="1" max="8" step="0.5" value="1"></label>
+      <label title="Outline size, screen pixels per µm of the object">outline <input type="range" id="glyph" min="0.3" max="4" step="0.1" value="1.2"></label>
       <label title="Draw the objects the filter excludes (faint)"><input type="checkbox" id="showExcl" checked> excluded</label>
       <button class="tool" id="tFit" title="fit (0)">⤢</button>
     </div>
@@ -306,6 +307,9 @@ function setColour(k) {
   draw();
 }
 const OUTLINE_MAX = 6000;
+// draw order: a fixed shuffle, so no group (the objects are stored section by section) always lies on top
+const ORDER = (() => { const o = new Uint32Array(N); for (let i = 0; i < N; i++) o[i] = i; let s = 20261125;
+  for (let i = N - 1; i > 0; i--) { s = (s * 1664525 + 1013904223) >>> 0; const j = s % (i + 1); const t = o[i]; o[i] = o[j]; o[j] = t; } return o; })();
 // points: written into one image (fast, additive glow); outlines: stroked paths. Unselected objects grey, beneath.
 function draw() {
   if (!W) return;
@@ -319,17 +323,23 @@ function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, cv.width, cv.height);
   if (!outlines) {
-    const Wp = cv.width, Hp = cv.height, img = ctx.createImageData(Wp, Hp), d = img.data, r = Math.max(1, Math.round(DPR));
-    for (let pass = 0; pass < 2; pass++) for (let i = 0; i < N; i++) {
+    const Wp = cv.width, Hp = cv.height, img = ctx.createImageData(Wp, Hp), d = img.data, r = Math.max(1, Math.round(DPR * +$("pt").value));
+    const half = Math.floor(r / 2), rr = (r / 2) * (r / 2), round = r >= 3;          // points of 3 px and more drawn round
+    // 1 px: light adds up (density glow); larger points: painted over, so the colours stay true where they overlap
+    for (let pass = 0; pass < 2; pass++) for (let t = 0; t < N; t++) {
+      const i = ORDER[t];
       if (!DISP[i] || (!KEEP[i] && !showEx)) continue;
       const on = allSel || SEL[i] === 1;
       if ((pass === 1) !== on) continue;
-      const x = Math.round(sx(i) * DPR), y = Math.round(sy(i) * DPR);
+      const x = Math.round(sx(i) * DPR) - half, y = Math.round(sy(i) * DPR) - half;
       if (x < 0 || y < 0 || x >= Wp - r || y >= Hp - r) continue;
       const c = on ? rgbOf(i) : [70, 78, 96], a = on ? (KEEP[i] ? 0.55 : 0.22) : 0.25;
       for (let dy = 0; dy < r; dy++) for (let dx = 0; dx < r; dx++) {
+        if (round && (dx + 0.5 - r / 2) ** 2 + (dy + 0.5 - r / 2) ** 2 > rr) continue;
         const j = ((y + dy) * Wp + x + dx) * 4;
-        d[j] = Math.min(255, d[j] + c[0] * a); d[j + 1] = Math.min(255, d[j + 1] + c[1] * a); d[j + 2] = Math.min(255, d[j + 2] + c[2] * a); d[j + 3] = 255;
+        if (r === 1) { d[j] = Math.min(255, d[j] + c[0] * a); d[j + 1] = Math.min(255, d[j + 1] + c[1] * a); d[j + 2] = Math.min(255, d[j + 2] + c[2] * a); }
+        else { const o = on ? (KEEP[i] ? 0.85 : 0.45) : 0.5; d[j] = d[j] * (1 - o) + c[0] * o; d[j + 1] = d[j + 1] * (1 - o) + c[1] * o; d[j + 2] = d[j + 2] * (1 - o) + c[2] * o; }
+        d[j + 3] = 255;
       }
     }
     ctx.putImageData(img, 0, 0);
@@ -337,7 +347,8 @@ function draw() {
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     const s = M.outline_step_um * g;
     ctx.lineJoin = "round";
-    for (let pass = 0; pass < 2; pass++) for (let i = 0; i < N; i++) {
+    for (let pass = 0; pass < 2; pass++) for (let t = 0; t < N; t++) {
+      const i = ORDER[t];
       if (!DISP[i] || (!KEEP[i] && !showEx)) continue;
       const on = allSel || SEL[i] === 1;
       if ((pass === 1) !== on) continue;
@@ -634,6 +645,8 @@ function update() { computeKeep(); save(); effect(); refresh(); }
 $("drawMode").onchange = () => { try { localStorage.setItem("object-map.draw", $("drawMode").value); } catch (e) { /* storage blocked */ } draw(); };
 try { const d = localStorage.getItem("object-map.draw"); if (d) $("drawMode").value = d; } catch (e) { /* none */ }
 $("glyph").oninput = redraw; $("showExcl").onchange = draw;
+$("pt").oninput = () => { try { localStorage.setItem("object-map.point", $("pt").value); } catch (e) { /* storage blocked */ } redraw(); };
+try { const v = localStorage.getItem("object-map.point"); if (v) $("pt").value = v; } catch (e) { /* none */ }
 document.addEventListener("keydown", (ev) => {
   if (ev.target.tagName === "INPUT" || ev.target.tagName === "SELECT") return;
   if (ev.key === "0") fit(); else if (ev.key === "l") setMode("lasso"); else if (ev.key === "p") setMode("pan"); else if (ev.key === "Escape") { clearSelection(); refresh(); }
