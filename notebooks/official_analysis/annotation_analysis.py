@@ -39,6 +39,9 @@ AUTO_MATCH_UM = 6.0               #: a dot and an object centroid within this ar
 BOOT = 2000
 SEED = 1
 MASKS_AUTO = ("kmad8", "kmad5")
+#: annotators who counted on the later page (the section's brightest cells shown as reference, raw contrast limits):
+#: compared with everyone, but kept out of the consensus of the first protocol
+WITH_REFERENCES = {"ref annotator"}
 
 
 def seen_squares(counts: pd.DataFrame, shown: pd.Series) -> pd.DataFrame:
@@ -126,7 +129,8 @@ def main() -> int:
     who = sorted(squares["annotator"].unique())
     wide = squares.pivot_table(index="code", columns="annotator", values="n_dots").dropna()[who]
     t = key.merge(wide.reset_index(), on="code").merge(automated(key), on="code")
-    t["consensus"] = t[who].mean(axis=1)
+    first = [w for w in who if w not in WITH_REFERENCES] or who
+    t["consensus"] = t[first].mean(axis=1)                    # the annotators of the first protocol
     res = OUT / "results"
     res.mkdir(exist_ok=True)
     t.to_csv(res / "squares.csv", index=False)
