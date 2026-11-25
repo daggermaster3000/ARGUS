@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Object map</title>
+<style>
+:root { --ink: #1d1d1f; --mute: #6b6b70; --line: #d0d0d5; --paper: #ffffff; --soft: #f4f4f6; --accent: #c04a22; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ink: #ececf0; --mute: #a0a0a8; --line: #3a3a40; --paper: #17171a; --soft: #222226; } }
+:root[data-theme="dark"] { --ink: #ececf0; --mute: #a0a0a8; --line: #3a3a40; --paper: #17171a; --soft: #222226; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Arial, sans-serif; color: var(--ink); background: var(--paper); }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+header h1 { font-size: 16px; margin: 0; }
+header a { color: var(--ink); }
+main { display: flex; gap: 0; height: calc(100vh - 45px); }
+#mapWrap { position: relative; flex: 1 1 auto; min-width: 0; background: #0d0d10; }
+#map { display: block; width: 100%; height: 100%; cursor: grab; }
+#map.lasso { cursor: crosshair; }
+#tip { position: absolute; pointer-events: none; background: rgba(20,20,24,0.94); color: #eee; border: 1px solid #555; padding: 6px 8px; border-radius: 4px; font-size: 12px; display: none; max-width: 280px; }
+#tools { position: absolute; left: 10px; top: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; background: rgba(20,20,24,0.85); padding: 6px 8px; border-radius: 6px; color: #ddd; }
+#tools label { color: #ccc; }
+#legend { position: absolute; left: 10px; bottom: 10px; background: rgba(20,20,24,0.85); color: #ddd; padding: 6px 8px; border-radius: 6px; font-size: 12px; }
+#legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 8px; vertical-align: -1px; }
+aside { flex: 0 0 380px; overflow-y: auto; border-left: 1px solid var(--line); padding: 10px 14px; }
+aside h2 { font-size: 14px; margin: 14px 0 6px; }
+button { font: inherit; color: var(--ink); background: var(--soft); border: 1px solid var(--line); border-radius: 4px; padding: 4px 9px; cursor: pointer; }
+#tools button { color: #eee; background: #2a2a30; border-color: #444; }
+#tools button.on { background: var(--accent); border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+select, input[type=number] { font: inherit; padding: 2px 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink); }
+#tools select { background: #1e1e22; color: #eee; border-color: #444; }
+input[type=number] { width: 6em; }
+.rule { display: grid; grid-template-columns: 1fr auto auto auto; gap: 4px; align-items: center; margin-bottom: 4px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+td, th { text-align: right; padding: 2px 4px; border-bottom: 1px solid var(--line); }
+td:first-child, th:first-child { text-align: left; }
+.mute { color: var(--mute); }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Object map</h1>
+  <span class="mute" id="sub">loading object_map.js …</span>
+  <a href="section_browser.html">Section browser</a> <a href="figure_builder.html">Figure builder</a>
+</header>
+<main>
+  <div id="mapWrap">
+    <canvas id="map" aria-label="UMAP of AF488 mask objects; drag to pan, wheel to zoom, lasso to select"></canvas>
+    <div id="tools">
+      <button id="tPan" class="on" title="drag to pan (or hold space)">pan</button>
+      <button id="tLasso" title="draw round objects to select them (or drag with Shift)">lasso</button>
+      <label>colour <select id="colour"></select></label>
+      <label title="Outline size in screen pixels per µm of the object. Outlines are drawn once few enough objects are in view (zoom in); the size does not change with zoom, so zooming in spreads them apart.">outline px/µm <input type="range" id="glyph" min="0.3" max="4" step="0.1" value="1.2"></label>
+      <label><input type="checkbox" id="showExcl" checked> show excluded</label>
+      <button id="tFit" title="fit (0)">fit</button>
+    </div>
+    <div id="legend"></div>
+    <div id="tip"></div>
+  </div>
+  <aside>
+    <p class="mute">Every object of the counting mask (8 SD, objects &gt; 3 µm²), placed by a UMAP of its shape, intensity and
+      nucleus features; similar objects lie together. Zoom in to see each object's outline. Select a group (lasso), look
+      at it, and exclude it; or exclude by feature ranges below. Nothing is changed in the data until you export.</p>
+    <h2>Selection</h2>
+    <div id="selInfo" class="mute">Nothing selected. Lasso: draw round a group.</div>
+    <div class="row"><button id="bExclude" class="primary">exclude selected</button><button id="bRestore">restore selected</button><button id="bClear">clear selection</button></div>
+    <h2>Keep only objects with</h2>
+    <div id="rules"></div>
+    <div class="row"><select id="newFeat"></select><button id="bAddRule">add range</button></div>
+    <h2>Effect</h2>
+    <div id="effect"></div>
+    <h2>Exclusions</h2>
+    <div class="row"><button id="bExport">export JSON</button><button id="bImport">import JSON</button><input type="file" id="fImport" accept=".json" hidden><button id="bReset">reset all</button></div>
+    <p class="mute">Lasso exclusions are saved in this browser as you go. Export to keep them, or to hand them to the section browser and figure builder.</p>
+  </aside>
+</main>
+<script src="object_map.js"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const M = window.OBJECT_MAP;
+if (!M) { $("sub").textContent = "object_map.js was not found beside this page (run object_map.py)."; throw new Error("no data"); }
+const N = M.n;
+const LABELS = { area: "area (µm²)", perimeter: "perimeter (µm)", circularity: "circularity (1 = disc)", solidity: "solidity",
+  extent: "extent", eccentricity: "eccentricity", aspect: "aspect ratio", thickness: "thickness (µm)", skeleton: "skeleton length (µm)",
+  width: "mean width (µm)", ends: "skeleton end points", branches: "skeleton branch points", mean: "mean AF488 (raw)", max: "max AF488 (raw)",
+  signal: "mean signal (bg-subtracted)", snr: "signal / noise SD", contrast: "contrast to 3–6 µm ring", on_nucleus: "share on a nucleus",
+  nuclei: "nuclei touched", nucleus_cover: "main nucleus covered", major: "major axis (µm)", minor: "minor axis (µm)",
+  integrated: "integrated AF488", signal_max: "max signal", away: "distance past the interface (µm)" };
+const LOGF = new Set(["area", "perimeter", "aspect", "thickness", "skeleton", "width", "ends", "branches", "mean", "max", "signal", "snr",
+  "contrast", "nuclei", "integrated", "signal_max", "major", "minor"]);
+
+// ---------------------------------------------------------------- data
+function dec(b64, T) { const s = atob(b64), b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return new T(b.buffer); }
+const C = {};
+for (const [k, v] of Object.entries(M.cols)) C[k] = dec(v, ["sec", "index", "side", "reg", "dotted"].includes(k) ? Int32Array : Float32Array);
+const OUT = (() => { const s = atob(M.outlines), b = new Int8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = (s.charCodeAt(i) << 24) >> 24; return b; })();
+const OFF = dec(M.outline_offsets, Int32Array);
+const SEC = M.sections;
+
+// ---------------------------------------------------------------- state
+const STORE = "object-map.state";
+let EXCL = new Uint8Array(N);                  // lasso-excluded
+let RULES = [{ f: "area", lo: 20, hi: null }];   // keep only objects with feature in [lo, hi]; default: the counting method's size filter
+let SEL = new Uint8Array(N), nSel = 0;
+let KEEP = new Uint8Array(N);                   // after rules and exclusions
+function save() {
+  const ex = []; for (let i = 0; i < N; i++) if (EXCL[i]) ex.push(i);
+  try { localStorage.setItem(STORE, JSON.stringify({ rules: RULES, excluded: ex, n: N, generated: M.generated })); } catch (e) { /* storage blocked */ }
+}
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORE) || "null");
+    if (s && s.n === N && s.generated === M.generated) { RULES = s.rules; for (const i of s.excluded) EXCL[i] = 1; }
+  } catch (e) { /* none */ }
+}
+function computeKeep() {
+  for (let i = 0; i < N; i++) {
+    let k = !EXCL[i];
+    for (const r of RULES) { if (!k) break; const v = C[r.f][i]; if ((r.lo !== null && !(v >= r.lo)) || (r.hi !== null && !(v <= r.hi))) k = false; }
+    KEEP[i] = k ? 1 : 0;
+  }
+}
+
+// ---------------------------------------------------------------- view
+const cv = $("map"), ctx = cv.getContext("2d");
+let view = { x: 0, y: 0, k: 1 };              // screen = (u - x) * k, (v - y) * k (v up)
+let W = 0, H = 0, DPR = 1;
+function resize() { DPR = window.devicePixelRatio || 1; W = cv.clientWidth; H = cv.clientHeight; cv.width = W * DPR; cv.height = H * DPR; draw(); }
+function fit() {
+  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+  for (let i = 0; i < N; i++) { const u = C.u[i], v = C.v[i]; if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; }
+  view.k = 0.92 * Math.min(W / (u1 - u0), H / (v1 - v0));
+  view.x = (u0 + u1) / 2 - W / 2 / view.k; view.y = (v0 + v1) / 2 + H / 2 / view.k;
+  draw();
+}
+const sx = (i) => (C.u[i] - view.x) * view.k, sy = (i) => (view.y - C.v[i]) * view.k;
+
+// colours
+const RAMP = ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"];
+function ramp(t) {
+  t = Math.max(0, Math.min(1, t)) * (RAMP.length - 1); const i = Math.min(Math.floor(t), RAMP.length - 2), f = t - i;
+  const a = RAMP[i], b = RAMP[i + 1], h = (s, j) => parseInt(s.slice(j, j + 2), 16);
+  return "rgb(" + [1, 3, 5].map((j) => Math.round(h(a, j) + (h(b, j) - h(a, j)) * f)).join(",") + ")";
+}
+const CAT = {
+  kept: { name: "kept / excluded", f: (i) => (KEEP[i] ? "#e8e8e8" : "#c04a22"), legend: [["#e8e8e8", "kept"], ["#c04a22", "excluded"]] },
+  genotype: { name: "genotype", f: (i) => (SEC[C.sec[i]].genotype === "WT3" ? "#4dabf7" : "#ffa94d"), legend: [["#4dabf7", "WT3"], ["#ffa94d", "GD1"]] },
+  side: { name: "home / crossed", f: (i) => (C.side[i] === 1 ? "#ff00ff" : C.side[i] === 0 ? "#e8e8e8" : "#666"), legend: [["#e8e8e8", "home"], ["#ff00ff", "crossed"]] },
+  dotted: { name: "annotators who dotted it (squares)", f: (i) => ["#3a3a40", "#e03131", "#fab005", "#94d82d", "#2f9e44"][Math.min(C.dotted[i] + 1, 4)],
+    legend: [["#e03131", "in a square, dotted by none"], ["#fab005", "1"], ["#94d82d", "2"], ["#2f9e44", "3+"], ["#3a3a40", "not in a square"]] },
+};
+let colourKey = "kept", colourRange = null;
+function colourOf(i) {
+  if (CAT[colourKey]) return CAT[colourKey].f(i);
+  let v = C[colourKey][i]; if (LOGF.has(colourKey)) v = Math.log1p(Math.max(v, 0));
+  return ramp((v - colourRange[0]) / (colourRange[1] - colourRange[0] || 1));
+}
+function setColour(k) {
+  colourKey = k;
+  if (!CAT[k]) {
+    const vals = Float32Array.from(C[k], (v) => (LOGF.has(k) ? Math.log1p(Math.max(v, 0)) : v)).filter(Number.isFinite).sort();
+    colourRange = [vals[Math.floor(vals.length * 0.02)], vals[Math.floor(vals.length * 0.98)]];
+    const back = (v) => (LOGF.has(k) ? Math.expm1(v) : v);
+    $("legend").innerHTML = LABELS[k] + ": <i style='background:" + RAMP[0] + "'></i>" + back(colourRange[0]).toPrecision(3) +
+      "<i style='background:" + RAMP[4] + "'></i>" + back(colourRange[1]).toPrecision(3) + " (2nd–98th percentile" + (LOGF.has(k) ? ", log scale" : "") + ")";
+  } else $("legend").innerHTML = CAT[k].legend.map(([c, t]) => "<i style='background:" + c + "'></i>" + t).join("");
+  draw();
+}
+
+// draw: points when many objects are in view, each object's outline (fixed size on screen) when few
+const OUTLINE_MAX = 6000;
+function draw() {
+  if (!W) return;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#0d0d10"; ctx.fillRect(0, 0, W, H);
+  const showEx = $("showExcl").checked, g = +$("glyph").value;      // g: screen px per µm of object
+  let visible = 0;
+  for (let i = 0; i < N && visible <= OUTLINE_MAX; i++) {
+    if (!KEEP[i] && !showEx) continue;
+    const x = sx(i), y = sy(i);
+    if (x >= 0 && y >= 0 && x <= W && y <= H) visible++;
+  }
+  const outlines = visible <= OUTLINE_MAX;                      // outlines once few enough objects are in view
+  const umPerPx = 1 / g;
+  let drawn = 0;
+  for (let i = 0; i < N; i++) {
+    if (!KEEP[i] && !showEx) continue;
+    const x = sx(i), y = sy(i);
+    if (x < -40 || y < -40 || x > W + 40 || y > H + 40) continue;
+    const col = colourOf(i);
+    if (outlines) {
+      const a = OFF[i], b = OFF[i + 1], s = M.outline_step_um / umPerPx;
+      if (b - a >= 4) {
+        ctx.beginPath();
+        for (let j = a; j < b; j += 2) { const px = x + OUT[j] * s, py = y + OUT[j + 1] * s; if (j === a) ctx.moveTo(px, py); else ctx.lineTo(px, py); }
+        ctx.closePath(); ctx.strokeStyle = col; ctx.lineWidth = SEL[i] ? 2.2 : 1; ctx.globalAlpha = KEEP[i] ? 1 : 0.45; ctx.stroke();
+        drawn++;
+        continue;
+      }
+    }
+    ctx.globalAlpha = KEEP[i] ? 0.85 : 0.35; ctx.fillStyle = col;
+    ctx.fillRect(x - 0.75, y - 0.75, 1.5, 1.5);
+  }
+  ctx.globalAlpha = 1;
+  if (nSel) {                                                      // the selection, ringed
+    ctx.fillStyle = "#ffffff";
+    for (let i = 0; i < N; i++) if (SEL[i] && !outlines) { const x = sx(i), y = sy(i); if (x >= 0 && y >= 0 && x <= W && y <= H) ctx.fillRect(x - 1.5, y - 1.5, 3, 3); }
+  }
+  if (lassoPts.length > 1) {
+    ctx.beginPath(); lassoPts.forEach(([x, y], j) => (j ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.strokeStyle = "#ffffff"; ctx.setLineDash([4, 3]); ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+  }
+}
+
+// ---------------------------------------------------------------- interaction
+let mode = "pan", drag = null, lassoPts = [];
+function setMode(m) { mode = m; $("tPan").classList.toggle("on", m === "pan"); $("tLasso").classList.toggle("on", m === "lasso"); cv.classList.toggle("lasso", m === "lasso"); }
+$("tPan").onclick = () => setMode("pan"); $("tLasso").onclick = () => setMode("lasso"); $("tFit").onclick = fit;
+cv.addEventListener("mousedown", (ev) => {
+  const r = cv.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
+  if (mode === "lasso" || ev.shiftKey) { lassoPts = [[x, y]]; drag = { lasso: true }; }
+  else drag = { x, y, vx: view.x, vy: view.y };
+});
+window.addEventListener("mousemove", (ev) => {
+  const r = cv.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
+  if (drag && drag.lasso) { lassoPts.push([x, y]); draw(); return; }
+  if (drag) { view.x = drag.vx - (x - drag.x) / view.k; view.y = drag.vy + (y - drag.y) / view.k; draw(); return; }
+  hover(x, y, ev);
+});
+window.addEventListener("mouseup", () => {
+  if (drag && drag.lasso && lassoPts.length > 2) select(lassoPts);
+  drag = null; lassoPts = []; draw();
+});
+cv.addEventListener("wheel", (ev) => {
+  ev.preventDefault();
+  const r = cv.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top, f = Math.exp(-ev.deltaY * 0.0015);
+  const u = view.x + x / view.k, v = view.y - y / view.k;
+  view.k *= f; view.x = u - x / view.k; view.y = v + y / view.k; draw();
+}, { passive: false });
+function inPoly(x, y, P) {
+  let c = false;
+  for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
+    const [xi, yi] = P[i], [xj, yj] = P[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c;
+  }
+  return c;
+}
+function select(P) {
+  const add = !!(window.event && window.event.ctrlKey);
+  if (!add) SEL.fill(0);
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const [x, y] of P) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  for (let i = 0; i < N; i++) { const x = sx(i), y = sy(i); if (x >= x0 && x <= x1 && y >= y0 && y <= y1 && inPoly(x, y, P)) SEL[i] = 1; }
+  nSel = SEL.reduce((a, b) => a + b, 0);
+  showSelection(); draw();
+}
+const fmt = (v, d = 2) => (Number.isFinite(v) ? (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString("en-US") : v.toFixed(d)) : "–");
+function median(a) { if (!a.length) return NaN; const s = Float64Array.from(a).sort(); return s[Math.floor(s.length / 2)]; }
+function showSelection() {
+  if (!nSel) { $("selInfo").textContent = "Nothing selected. Lasso: draw round a group (Ctrl to add to the selection)."; return; }
+  const idx = []; for (let i = 0; i < N; i++) if (SEL[i]) idx.push(i);
+  const inSq = idx.filter((i) => C.dotted[i] >= 0), dot2 = inSq.filter((i) => C.dotted[i] >= 2).length, dot0 = inSq.filter((i) => C.dotted[i] === 0).length;
+  const geno = idx.filter((i) => SEC[C.sec[i]].genotype === "WT3").length;
+  $("selInfo").innerHTML = "<b>" + nSel.toLocaleString("en-US") + "</b> selected (" + idx.filter((i) => KEEP[i]).length.toLocaleString("en-US") + " now kept); WT3 " +
+    Math.round(100 * geno / nSel) + " %, crossed " + idx.filter((i) => C.side[i] === 1).length + ".<br>In the count squares: " + inSq.length +
+    (inSq.length ? " — dotted by ≥ 2 annotators " + Math.round(100 * dot2 / inSq.length) + " %, by none " + Math.round(100 * dot0 / inSq.length) + " %" : "") +
+    "<table><tr><th>median</th><th></th></tr>" + ["area", "circularity", "aspect", "thickness", "skeleton", "on_nucleus", "snr", "contrast"].map((f) =>
+      "<tr><td>" + LABELS[f] + "</td><td>" + fmt(median(idx.map((i) => C[f][i]))) + "</td></tr>").join("") + "</table>";
+}
+$("bExclude").onclick = () => { for (let i = 0; i < N; i++) if (SEL[i]) EXCL[i] = 1; update(); };
+$("bRestore").onclick = () => { for (let i = 0; i < N; i++) if (SEL[i]) EXCL[i] = 0; update(); };
+$("bClear").onclick = () => { SEL.fill(0); nSel = 0; showSelection(); draw(); };
+
+// hover: the nearest object within 8 px
+const tip = $("tip");
+function hover(x, y, ev) {
+  let best = -1, bd = 64;
+  for (let i = 0; i < N; i++) { const dx = sx(i) - x, dy = sy(i) - y, d = dx * dx + dy * dy; if (d < bd && (KEEP[i] || $("showExcl").checked)) { bd = d; best = i; } }
+  if (best < 0) { tip.style.display = "none"; return; }
+  const s = SEC[C.sec[best]], i = best;
+  tip.innerHTML = "<b>" + s.id + "</b> " + s.genotype + " e" + s.experiment + " · object " + C.index[i] + "<br>" +
+    (C.side[i] === 1 ? "crossed" : C.side[i] === 0 ? "home" : "no line") + (C.reg[i] ? ", in the region" : "") +
+    (C.dotted[i] >= 0 ? "<br>in a count square: dotted by " + C.dotted[i] + " of " + M.squares.annotators : "") +
+    "<br>area " + fmt(C.area[i], 1) + " µm², circularity " + fmt(C.circularity[i]) + ", aspect " + fmt(C.aspect[i]) +
+    "<br>thickness " + fmt(C.thickness[i], 1) + " µm, skeleton " + fmt(C.skeleton[i], 1) + " µm, on a nucleus " + fmt(C.on_nucleus[i]) +
+    "<br>signal/noise " + fmt(C.snr[i], 1) + ", contrast " + fmt(C.contrast[i]) + "<br>" + (KEEP[i] ? "kept" : "<b>excluded</b>") +
+    " · <span class='mute'>click to open the section</span>";
+  tip.style.display = "block";
+  tip.style.left = Math.min(x + 14, W - 290) + "px"; tip.style.top = Math.min(y + 14, H - 160) + "px";
+  hoverIdx = best;
+}
+let hoverIdx = -1;
+cv.addEventListener("click", (ev) => { if (mode === "pan" && !ev.shiftKey && hoverIdx >= 0 && tip.style.display === "block") window.open("section_browser.html#" + encodeURIComponent(SEC[C.sec[hoverIdx]].id), "_blank"); });
+cv.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+
+// ---------------------------------------------------------------- rules
+function featOptions(sel) { return M.features.map((f) => "<option value='" + f + "'" + (f === sel ? " selected" : "") + ">" + (LABELS[f] || f) + "</option>").join(""); }
+function drawRules() {
+  $("rules").innerHTML = RULES.map((r, j) => "<div class='rule'><span>" + (LABELS[r.f] || r.f) + "</span><input type='number' step='any' data-j='" + j + "' data-k='lo' placeholder='min' value='" +
+    (r.lo ?? "") + "'><input type='number' step='any' data-j='" + j + "' data-k='hi' placeholder='max' value='" + (r.hi ?? "") + "'><button data-del='" + j + "' aria-label='remove'>×</button></div>").join("") ||
+    "<p class='mute'>No range: every object not excluded by lasso is kept.</p>";
+  for (const el of $("rules").querySelectorAll("input")) el.onchange = () => { const v = el.value === "" ? null : +el.value; RULES[+el.dataset.j][el.dataset.k] = v; update(); };
+  for (const el of $("rules").querySelectorAll("button[data-del]")) el.onclick = () => { RULES.splice(+el.dataset.del, 1); drawRules(); update(); };
+}
+$("newFeat").innerHTML = featOptions("circularity");
+$("bAddRule").onclick = () => { RULES.push({ f: $("newFeat").value, lo: null, hi: null }); drawRules(); };
+
+// ---------------------------------------------------------------- effect: counts, the genotype fold, the annotators' dots
+function effect() {
+  const crossedKeep = new Float64Array(SEC.length), crossedBase = new Float64Array(SEC.length);
+  let kept = 0, base = 0;
+  const dotsKeep = new Float64Array(5), dotsBase = new Float64Array(5);
+  let sumDotKeep = 0, sumDotBase = 0;
+  for (let i = 0; i < N; i++) {
+    const isBase = C.area[i] > 20, s = C.sec[i];
+    if (KEEP[i]) { kept++; if (C.side[i] === 1) crossedKeep[s]++; if (C.dotted[i] >= 0) { dotsKeep[Math.min(C.dotted[i], 3)]++; sumDotKeep += C.dotted[i]; } }
+    if (isBase && C.dotted[i] >= 0) { dotsBase[Math.min(C.dotted[i], 3)]++; sumDotBase += C.dotted[i]; }
+  }
+  // the counting method exactly: the browser's stored counts (area > 20 µm² here differs by a few objects, see the note)
+  SEC.forEach((sc, j) => { crossedBase[j] = sc.crossed_8 || 0; base += sc.n_8 || 0; });
+  // WT3 ÷ GD1 of the geometric mean of (1 + crossed per mm), sections with a line
+  const fold = (cr) => {
+    const g = { WT3: [], GD1: [] };
+    SEC.forEach((s, j) => { if (s.length_um > 0 && s.crossed_8 !== null && g[s.genotype]) g[s.genotype].push(Math.log1p(cr[j] / (s.length_um / 1000))); });
+    const m = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+    return { WT3: Math.expm1(m(g.WT3)), GD1: Math.expm1(m(g.GD1)), ratio: Math.exp(m(g.WT3) - m(g.GD1)) };
+  };
+  const fk = fold(crossedKeep), fb = fold(crossedBase);
+  const nd = Object.values(M.squares.dots).reduce((a, b) => a + b, 0);
+  const inSq = (d) => d.reduce((a, b) => a + b, 0);
+  $("effect").innerHTML = "<table><tr><th></th><th>counting method (&gt; 20 µm²)</th><th>kept now</th></tr>" +
+    "<tr><td>objects</td><td>" + base.toLocaleString("en-US") + "</td><td>" + kept.toLocaleString("en-US") + "</td></tr>" +
+    "<tr><td>crossed</td><td>" + crossedBase.reduce((a, b) => a + b, 0).toLocaleString("en-US") + "</td><td>" + crossedKeep.reduce((a, b) => a + b, 0).toLocaleString("en-US") + "</td></tr>" +
+    "<tr><td>crossed / mm, WT3 (geo. mean)</td><td>" + fmt(fb.WT3) + "</td><td>" + fmt(fk.WT3) + "</td></tr>" +
+    "<tr><td>crossed / mm, GD1</td><td>" + fmt(fb.GD1) + "</td><td>" + fmt(fk.GD1) + "</td></tr>" +
+    "<tr><td><b>WT3 ÷ GD1</b></td><td>" + fmt(fb.ratio) + "</td><td><b>" + fmt(fk.ratio) + "</b></td></tr>" +
+    "<tr><td>objects in the squares (≈)</td><td>" + inSq(dotsBase) + "</td><td>" + inSq(dotsKeep) + "</td></tr>" +
+    "<tr><td>… dotted by none</td><td>" + Math.round(100 * dotsBase[0] / inSq(dotsBase)) + " %</td><td>" + Math.round(100 * dotsKeep[0] / Math.max(inSq(dotsKeep), 1)) + " %</td></tr>" +
+    "<tr><td>… dotted by ≥ 2</td><td>" + Math.round(100 * (dotsBase[2] + dotsBase[3]) / inSq(dotsBase)) + " %</td><td>" + Math.round(100 * (dotsKeep[2] + dotsKeep[3]) / Math.max(inSq(dotsKeep), 1)) + " %</td></tr>" +
+    "<tr><td>annotators' dots found</td><td>" + Math.round(100 * sumDotBase / nd) + " %</td><td>" + Math.round(100 * sumDotKeep / nd) + " %</td></tr></table>" +
+    "<p class='mute'>Counting method: the stored counts. Its size filter removes 4-connected pieces of ≤ 20 µm² before objects " +
+    "are formed, so here, where the smallest objects are kept, \"area &gt; 20 µm²\" gives a few more objects (about 0.05 %): small pieces touching " +
+    "only at a corner join into objects just over 20 µm². The square rows of that column use area &gt; 20 µm² (≈). WT3 ÷ GD1: the geometric mean of 1 + crossed objects per mm of junction interface, sections pooled (a quick guide, not the paper's mixed model). " +
+    "Squares: objects whose centroid lies in a blinded count square; dotted = an annotator's dot within 6 µm (one-to-one). Dots found: of all " + nd +
+    " dots of the " + M.squares.annotators + " annotators, the share matched to a kept object.</p>";
+}
+
+function update() { computeKeep(); save(); effect(); showSelection(); draw(); }
+
+// ---------------------------------------------------------------- export / import
+$("bExport").onclick = () => {
+  const ex = []; for (let i = 0; i < N; i++) if (EXCL[i]) ex.push([SEC[C.sec[i]].id, C.index[i]]);
+  const kept = []; let n = 0; for (let i = 0; i < N; i++) if (!KEEP[i]) n++;
+  const blob = new Blob([JSON.stringify({ key: M.key, generated: M.generated, rules: RULES, excluded: ex, n_excluded_total: n }, null, 1)], { type: "application/json" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "object_exclusions.json"; a.click();
+};
+$("bImport").onclick = () => $("fImport").click();
+$("fImport").onchange = async () => {
+  const f = $("fImport").files[0]; if (!f) return;
+  const d = JSON.parse(await f.text());
+  const at = {}; for (let i = 0; i < N; i++) at[SEC[C.sec[i]].id + "/" + C.index[i]] = i;
+  EXCL.fill(0); for (const [sid, k] of d.excluded || []) { const i = at[sid + "/" + k]; if (i !== undefined) EXCL[i] = 1; }
+  RULES = d.rules || []; drawRules(); update();
+};
+$("bReset").onclick = () => { if (!confirm("Clear every exclusion and range (back to the counting method)?")) return; EXCL.fill(0); RULES = [{ f: "area", lo: 20, hi: null }]; drawRules(); update(); };
+
+// ---------------------------------------------------------------- start
+$("colour").innerHTML = Object.entries(CAT).map(([k, c]) => "<option value='" + k + "'>" + c.name + "</option>").join("") + featOptions("");
+$("colour").onchange = () => setColour($("colour").value);
+$("glyph").oninput = draw; $("showExcl").onchange = draw;
+document.addEventListener("keydown", (ev) => { if (ev.target.tagName === "INPUT") return; if (ev.key === "0") fit(); if (ev.key === "l") setMode("lasso"); if (ev.key === "p") setMode("pan"); });
+window.addEventListener("resize", resize);
+$("sub").textContent = N.toLocaleString("en-US") + " objects (" + M.key + "), " + SEC.length + " sections · UMAP of " + M.umap_features.length + " features · " + M.generated;
+load(); drawRules(); computeKeep(); effect(); resize(); fit(); setColour("kept");
+</script>
+</body>
+</html>
