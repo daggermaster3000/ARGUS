@@ -1,84 +1,166 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Object map</title>
 <style>
-:root { --ink: #1d1d1f; --mute: #6b6b70; --line: #d0d0d5; --paper: #ffffff; --soft: #f4f4f6; --accent: #c04a22; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ink: #ececf0; --mute: #a0a0a8; --line: #3a3a40; --paper: #17171a; --soft: #222226; } }
-:root[data-theme="dark"] { --ink: #ececf0; --mute: #a0a0a8; --line: #3a3a40; --paper: #17171a; --soft: #222226; }
+:root {
+  --bg: #0b0d12; --panel: #12151c; --panel2: #171b24; --line: #252b38; --ink: #e6e9f0; --mute: #8b93a7; --faint: #5b6377;
+  --accent: #7c8cff; --accent2: #2ee6c5; --warn: #ff6b6b; --sel: #ffd166; --radius: 10px;
+}
 * { box-sizing: border-box; }
-body { margin: 0; font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Arial, sans-serif; color: var(--ink); background: var(--paper); }
-header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); }
-header h1 { font-size: 16px; margin: 0; }
-header a { color: var(--ink); }
-main { display: flex; gap: 0; height: calc(100vh - 45px); }
-#mapWrap { position: relative; flex: 1 1 auto; min-width: 0; background: #0d0d10; }
+html, body { height: 100%; }
+body { margin: 0; font: 13px/1.45 Inter, system-ui, -apple-system, "Segoe UI", Arial, sans-serif; color: var(--ink); background: var(--bg); overflow: hidden; }
+header { height: 52px; display: flex; align-items: center; gap: 14px; padding: 0 16px; border-bottom: 1px solid var(--line);
+  background: linear-gradient(90deg, #11142080, #0b0d12); }
+header h1 { font-size: 15px; font-weight: 650; margin: 0; letter-spacing: .2px; }
+header h1 span { background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.chip { padding: 3px 10px; border-radius: 999px; background: var(--panel2); border: 1px solid var(--line); color: var(--mute); font-variant-numeric: tabular-nums; }
+.chip b { color: var(--ink); }
+header .grow { flex: 1; }
+header a { color: var(--mute); text-decoration: none; } header a:hover { color: var(--ink); }
+main { display: grid; grid-template-columns: 300px 1fr 330px; height: calc(100vh - 52px); }
+aside { background: var(--panel); overflow-y: auto; scrollbar-width: thin; scrollbar-color: #2a3040 transparent; }
+#left { border-right: 1px solid var(--line); } #right { border-left: 1px solid var(--line); padding: 12px 14px; }
+.sec-title { position: sticky; top: 0; z-index: 2; background: var(--panel); padding: 12px 14px 6px; font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--faint); }
+.field { border-bottom: 1px solid var(--line); }
+.fhead { display: flex; align-items: center; gap: 6px; padding: 8px 12px; cursor: pointer; user-select: none; }
+.fhead:hover { background: var(--panel2); }
+.fhead .name { flex: 1; font-weight: 600; }
+.fhead .caret { color: var(--faint); width: 12px; transition: transform .15s; }
+.field.open .caret { transform: rotate(90deg); }
+.fbody { display: none; padding: 2px 12px 10px; }
+.field.open .fbody { display: block; }
+.paint { width: 24px; height: 24px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel2); color: var(--mute); cursor: pointer; display: grid; place-items: center; }
+.paint:hover { color: var(--ink); border-color: #3a4256; }
+.paint.on { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #0b0d12; border-color: transparent; }
+.cat { display: grid; grid-template-columns: 16px 10px 1fr 64px 46px; gap: 7px; align-items: center; padding: 3px 0; cursor: pointer; }
+.cat:hover .cname { color: #fff; }
+.cat input { margin: 0; accent-color: var(--accent); }
+.sw { width: 10px; height: 10px; border-radius: 3px; }
+.cname { color: #c9cfdb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar { height: 6px; background: #222836; border-radius: 3px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 3px; }
+.cnum { text-align: right; color: var(--mute); font-variant-numeric: tabular-nums; font-size: 12px; }
+.search { width: 100%; margin: 4px 0 6px; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit; }
+.more { color: var(--faint); font-size: 12px; padding: 4px 0; }
+.hist { padding: 2px 12px 10px; }
+.hist canvas { width: 100%; height: 56px; display: block; cursor: crosshair; border-radius: 6px; background: #0e1117; }
+.hrange { display: flex; justify-content: space-between; color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; margin-top: 3px; }
+.hrange b { color: var(--sel); font-weight: 600; }
+#mapWrap { position: relative; overflow: hidden; background: radial-gradient(ellipse at 50% 40%, #121726 0%, #0b0d12 70%); }
 #map { display: block; width: 100%; height: 100%; cursor: grab; }
 #map.lasso { cursor: crosshair; }
-#tip { position: absolute; pointer-events: none; background: rgba(20,20,24,0.94); color: #eee; border: 1px solid #555; padding: 6px 8px; border-radius: 4px; font-size: 12px; display: none; max-width: 280px; }
-#tools { position: absolute; left: 10px; top: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; background: rgba(20,20,24,0.85); padding: 6px 8px; border-radius: 6px; color: #ddd; }
-#tools label { color: #ccc; }
-#legend { position: absolute; left: 10px; bottom: 10px; background: rgba(20,20,24,0.85); color: #ddd; padding: 6px 8px; border-radius: 6px; font-size: 12px; }
-#legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 8px; vertical-align: -1px; }
-aside { flex: 0 0 380px; overflow-y: auto; border-left: 1px solid var(--line); padding: 10px 14px; }
-aside h2 { font-size: 14px; margin: 14px 0 6px; }
-button { font: inherit; color: var(--ink); background: var(--soft); border: 1px solid var(--line); border-radius: 4px; padding: 4px 9px; cursor: pointer; }
-#tools button { color: #eee; background: #2a2a30; border-color: #444; }
-#tools button.on { background: var(--accent); border-color: var(--accent); }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-select, input[type=number] { font: inherit; padding: 2px 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink); }
-#tools select { background: #1e1e22; color: #eee; border-color: #444; }
-input[type=number] { width: 6em; }
-.rule { display: grid; grid-template-columns: 1fr auto auto auto; gap: 4px; align-items: center; margin-bottom: 4px; }
-table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
-td, th { text-align: right; padding: 2px 4px; border-bottom: 1px solid var(--line); }
-td:first-child, th:first-child { text-align: left; }
-.mute { color: var(--mute); }
-.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; }
+.float { position: absolute; background: rgba(18, 21, 28, .88); backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .45); }
+#tools { left: 14px; top: 14px; display: flex; gap: 4px; padding: 5px; align-items: center; }
+.tool { height: 32px; min-width: 32px; padding: 0 10px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: var(--mute); font: inherit; cursor: pointer; }
+.tool:hover { color: var(--ink); background: var(--panel2); }
+.tool.on { color: #0b0d12; background: linear-gradient(135deg, var(--accent), var(--accent2)); }
+.tsep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
+#tools select { height: 30px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink); font: inherit; padding: 0 6px; }
+#tools label { color: var(--mute); display: flex; align-items: center; gap: 6px; padding: 0 6px; }
+#tools input[type=range] { width: 80px; accent-color: var(--accent); }
+#legend { right: 14px; top: 14px; padding: 10px 12px; min-width: 170px; max-width: 270px; max-height: 50%; overflow-y: auto; }
+#legend .lt { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--faint); margin-bottom: 6px; }
+#legend .li { display: flex; align-items: center; gap: 8px; padding: 2px 0; color: #c9cfdb; }
+#legend .cb { height: 10px; border-radius: 5px; margin: 6px 0 3px; }
+#legend .cbl { display: flex; justify-content: space-between; color: var(--mute); font-size: 11px; font-variant-numeric: tabular-nums; }
+#tip { position: absolute; pointer-events: none; padding: 9px 11px; font-size: 12px; display: none; max-width: 300px; line-height: 1.5; }
+#tip b { color: #fff; }
+#hint { left: 50%; bottom: 14px; transform: translateX(-50%); padding: 6px 12px; color: var(--mute); font-size: 12px; white-space: nowrap; }
+.card { background: var(--panel2); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; margin-bottom: 12px; }
+.card h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--faint); font-weight: 600; }
+.big { font-size: 26px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.big small { font-size: 13px; color: var(--mute); font-weight: 500; letter-spacing: 0; }
+.btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.btn { height: 30px; padding: 0 12px; border-radius: 7px; border: 1px solid var(--line); background: #1d2230; color: var(--ink); font: inherit; cursor: pointer; }
+.btn:hover { border-color: #3a4256; background: #232a3a; }
+.btn.primary { border: 0; color: #0b0d12; font-weight: 600; background: linear-gradient(135deg, var(--accent), var(--accent2)); }
+.btn.danger { border-color: #4a2530; color: #ff9aa5; background: #261419; }
+.btn:disabled { opacity: .4; cursor: default; }
+.kv { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; font-variant-numeric: tabular-nums; }
+.kv span:nth-child(even) { text-align: right; white-space: nowrap; }
+.kv span:nth-child(odd) { color: var(--mute); }
+.split { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin: 8px 0 4px; background: #222836; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
+td, th { padding: 4px 4px; border-bottom: 1px solid var(--line); text-align: right; }
+th { color: var(--faint); font-weight: 600; font-size: 11px; }
+td:first-child, th:first-child { text-align: left; color: var(--mute); }
+.hl td { color: #fff; font-weight: 650; }
+.hl td:last-child { color: var(--accent2); }
+.rule { display: grid; grid-template-columns: 1fr 64px 64px 24px; gap: 4px; align-items: center; margin-bottom: 5px; }
+.rule input { width: 100%; height: 26px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit; padding: 0 6px; }
+.rule button { height: 24px; border: 0; background: transparent; color: var(--faint); cursor: pointer; font-size: 16px; }
+.note { color: var(--faint); font-size: 11.5px; line-height: 1.45; margin: 8px 0 0; }
+.note code { color: var(--mute); }
 </style>
 </head>
 <body>
 <header>
-  <h1>Object map</h1>
-  <span class="mute" id="sub">loading object_map.js …</span>
-  <a href="section_browser.html">Section browser</a> <a href="figure_builder.html">Figure builder</a>
+  <h1><span>Object map</span></h1>
+  <span class="chip"><b id="nShown">–</b> shown</span>
+  <span class="chip"><b id="nSel">–</b> selected</span>
+  <span class="chip"><b id="nKept">–</b> kept</span>
+  <span class="grow mute" id="sub" style="color: var(--faint)">loading object_map.js …</span>
+  <a href="section_browser.html">Section browser</a><a href="figure_builder.html">Figure builder</a>
 </header>
 <main>
+  <aside id="left" aria-label="categories and measurements">
+    <div class="sec-title">Categories</div>
+    <div id="cats"></div>
+    <div class="sec-title">Measurements <span style="text-transform:none;letter-spacing:0">· drag on a histogram to select a range</span></div>
+    <div id="feats"></div>
+  </aside>
   <div id="mapWrap">
-    <canvas id="map" aria-label="UMAP of AF488 mask objects; drag to pan, wheel to zoom, lasso to select"></canvas>
-    <div id="tools">
-      <button id="tPan" class="on" title="drag to pan (or hold space)">pan</button>
-      <button id="tLasso" title="draw round objects to select them (or drag with Shift)">lasso</button>
-      <label>colour <select id="colour"></select></label>
-      <label id="hlWrap" style="display:none">highlight <select id="hl"></select></label>
-      <label title="Auto: points while many objects are in view, each object's outline once few are (zoom in). Outlines always: slow when the whole map is in view.">draw <select id="drawMode"><option value="auto">auto</option><option value="points">points</option><option value="outlines">outlines</option></select></label>
-      <label title="Outline size in screen pixels per µm of the object. Outlines are drawn once few enough objects are in view (zoom in); the size does not change with zoom, so zooming in spreads them apart.">outline px/µm <input type="range" id="glyph" min="0.3" max="4" step="0.1" value="1.2"></label>
-      <label><input type="checkbox" id="showExcl" checked> show excluded</label>
-      <button id="tFit" title="fit (0)">fit</button>
+    <canvas id="map" aria-label="UMAP of AF488 mask objects"></canvas>
+    <div id="tools" class="float">
+      <button class="tool on" id="tPan" title="pan (P) — drag to move, wheel to zoom">✥</button>
+      <button class="tool" id="tLasso" title="lasso (L) — draw round objects to select them; Shift-drag works in pan mode too">◌ lasso</button>
+      <span class="tsep"></span>
+      <button class="tool" id="tSubset" title="show only the selection">subset</button>
+      <button class="tool" id="tReset" title="show every object again">reset</button>
+      <span class="tsep"></span>
+      <label title="Auto: points while many objects are in view, outlines once few are">draw <select id="drawMode"><option value="auto">auto</option><option value="points">points</option><option value="outlines">outlines</option></select></label>
+      <label title="Outline size, screen pixels per µm of the object">size <input type="range" id="glyph" min="0.3" max="4" step="0.1" value="1.2"></label>
+      <label title="Draw the objects the filter excludes (faint)"><input type="checkbox" id="showExcl" checked> excluded</label>
+      <button class="tool" id="tFit" title="fit (0)">⤢</button>
     </div>
-    <div id="legend"></div>
-    <div id="tip"></div>
+    <div id="legend" class="float"></div>
+    <div id="hint" class="float">wheel: zoom · drag: pan · Shift-drag or lasso: select · click an object: open its section</div>
+    <div id="tip" class="float"></div>
   </div>
-  <aside>
-    <p class="mute">Every object of the counting mask (8 SD, objects &gt; 3 µm²), placed by a UMAP of its shape, intensity and
-      nucleus features; similar objects lie together. Zoom in to see each object's outline. Select a group (lasso), look
-      at it, and exclude it; or exclude by feature ranges below. Nothing is changed in the data until you export.</p>
-    <h2>Selection</h2>
-    <div id="selInfo" class="mute">Nothing selected. Lasso: draw round a group.</div>
-    <div class="row"><button id="bExclude" class="primary">exclude selected</button><button id="bRestore">restore selected</button><button id="bClear">clear selection</button></div>
-    <h2>Keep only objects with</h2>
-    <div id="rules"></div>
-    <div class="row"><select id="newFeat"></select><button id="bAddRule">add range</button></div>
-    <h2>Effect</h2>
-    <div id="effect"></div>
-    <h2>Exclusions</h2>
-    <div class="row"><button id="bExport">export JSON</button><button id="bImport">import JSON</button><input type="file" id="fImport" accept=".json" hidden><button id="bReset">reset all</button></div>
-    <p class="mute">Lasso exclusions are saved in this browser as you go. To count with them: export, save the file as
-      <code>run_analysis_20261028/object_exclusions.json</code>, then run <code>python notebooks/official_analysis/object_filter.py</code> and
-      <code>python notebooks/official_analysis/section_browser.py</code>: the section browser and figure builder then offer
-      "AF488 mask … filtered on the object map" (8 SD), with its counts, statistics and Methods text.</p>
+  <aside id="right" aria-label="selection and effect">
+    <div class="card">
+      <h2>Selection</h2>
+      <div class="big" id="selBig">–</div>
+      <div class="split" id="selSplit"></div>
+      <div id="selInfo" class="kv"></div>
+      <div class="btns">
+        <button class="btn danger" id="bExclude">exclude selected</button>
+        <button class="btn" id="bRestore">restore selected</button>
+        <button class="btn" id="bClear">clear selection</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Keep only objects with</h2>
+      <div id="rules"></div>
+      <div class="btns"><button class="btn" id="bBrushRules" title="Turn the ranges brushed on the histograms into keep rules">keep brushed ranges</button></div>
+    </div>
+    <div class="card">
+      <h2>Effect</h2>
+      <div id="effect"></div>
+    </div>
+    <div class="card">
+      <h2>Exclusions</h2>
+      <div class="btns" style="margin-top:0">
+        <button class="btn primary" id="bExport">export JSON</button><button class="btn" id="bImport">import</button>
+        <input type="file" id="fImport" accept=".json" hidden><button class="btn" id="bReset">reset all</button>
+      </div>
+      <p class="note">Saved in this browser as you go. To count with them: export, save as <code>run_analysis_20261028/object_exclusions.json</code>,
+        run <code>object_filter.py</code> then <code>section_browser.py</code>; the browser and figure builder then offer "AF488 mask … filtered on the object map".</p>
+    </div>
   </aside>
 </main>
 <script src="object_map.js"></script>
@@ -88,12 +170,11 @@ const $ = (id) => document.getElementById(id);
 const M = window.OBJECT_MAP;
 if (!M) { $("sub").textContent = "object_map.js was not found beside this page (run object_map.py)."; throw new Error("no data"); }
 const N = M.n;
-const LABELS = { area: "area (µm²)", perimeter: "perimeter (µm)", circularity: "circularity (1 = disc)", solidity: "solidity",
-  extent: "extent", eccentricity: "eccentricity", aspect: "aspect ratio", thickness: "thickness (µm)", skeleton: "skeleton length (µm)",
-  width: "mean width (µm)", ends: "skeleton end points", branches: "skeleton branch points", mean: "mean AF488 (raw)", max: "max AF488 (raw)",
-  signal: "mean signal (bg-subtracted)", snr: "signal / noise SD", contrast: "contrast to 3–6 µm ring", on_nucleus: "share on a nucleus",
-  nuclei: "nuclei touched", nucleus_cover: "main nucleus covered", major: "major axis (µm)", minor: "minor axis (µm)",
-  integrated: "integrated AF488", signal_max: "max signal", away: "distance past the interface (µm)" };
+const LABELS = { area: "Area (µm²)", perimeter: "Perimeter (µm)", circularity: "Circularity", solidity: "Solidity", extent: "Extent",
+  eccentricity: "Eccentricity", aspect: "Aspect ratio", thickness: "Thickness (µm)", skeleton: "Skeleton length (µm)", width: "Mean width (µm)",
+  ends: "Skeleton end points", branches: "Skeleton branch points", mean: "Mean AF488", max: "Max AF488", signal: "Mean signal (bg-subtracted)",
+  snr: "Signal / noise SD", contrast: "Contrast to ring", on_nucleus: "Share on a nucleus", nuclei: "Nuclei touched", nucleus_cover: "Main nucleus covered",
+  major: "Major axis (µm)", minor: "Minor axis (µm)", integrated: "Integrated AF488", signal_max: "Max signal", away: "Past the interface (µm)" };
 const LOGF = new Set(["area", "perimeter", "aspect", "thickness", "skeleton", "width", "ends", "branches", "mean", "max", "signal", "snr",
   "contrast", "nuclei", "integrated", "signal_max", "major", "minor"]);
 
@@ -105,12 +186,39 @@ const OUT = (() => { const s = atob(M.outlines), b = new Int8Array(s.length); fo
 const OFF = dec(M.outline_offsets, Int32Array);
 const SEC = M.sections;
 
+// ---------------------------------------------------------------- categorical fields (cellxgene-style): per object a category index
+const PAL = ["#7c8cff", "#2ee6c5", "#ff7aa8", "#ffd166", "#5ec8ff", "#c77dff", "#9be564", "#ff9f5a", "#a0aec0", "#f472b6", "#34d399", "#fbbf24"];
+const hue = (k) => "hsl(" + ((k * 137.508) % 360).toFixed(1) + ",72%," + (58 + (k % 3) * 7) + "%)";
+const SLIDES = [...new Set(SEC.map((s) => s.slide))].sort();
+const EXPS = [...new Set(SEC.map((s) => s.experiment))].sort((a, b) => +a - +b);
+function field(key, name, labels, idxOf, colours, open) {
+  const idx = new Uint16Array(N);
+  for (let i = 0; i < N; i++) idx[i] = idxOf(i);
+  return { key, name, labels, idx, colours: colours || labels.map((_, j) => (labels.length <= PAL.length ? PAL[j] : hue(j))), on: new Uint8Array(labels.length).fill(1), open, q: "" };
+}
+const KEEP = new Uint8Array(N);
+const F = [
+  field("status", "Filter", ["kept", "excluded"], () => 0, ["#dfe4ee", "#ff6b6b"], true),
+  field("genotype", "Genotype", ["WT3", "GD1"], (i) => (SEC[C.sec[i]].genotype === "WT3" ? 0 : 1), ["#5ec8ff", "#ff9f5a"], true),
+  field("experiment", "Experiment", EXPS.map((e) => "experiment " + e), (i) => EXPS.indexOf(SEC[C.sec[i]].experiment), null, true),
+  field("side", "Side of the interface", ["home", "crossed", "no line"], (i) => (C.side[i] === 1 ? 1 : C.side[i] === 0 ? 0 : 2), ["#dfe4ee", "#ff4fd8", "#5b6377"], true),
+  field("region", "Junction region", ["outside", "in the region"], (i) => (C.reg[i] ? 1 : 0), ["#5b6377", "#ffd166"], false),
+  field("dotted", "Annotators' dots (squares)", ["not in a square", "dotted by none", "by 1", "by 2", "by 3+"],
+    (i) => (C.dotted[i] < 0 ? 0 : Math.min(C.dotted[i], 3) + 1), ["#3a4152", "#ff6b6b", "#ffd166", "#9be564", "#2ee6c5"], true),
+  field("slide", "Slide", SLIDES, (i) => SLIDES.indexOf(SEC[C.sec[i]].slide), null, false),
+  field("sample", "Sample (section)", SEC.map((s) => s.id), (i) => C.sec[i], null, false),
+];
+const FBY = Object.fromEntries(F.map((f) => [f.key, f]));
+const FEATS = M.features;
+
 // ---------------------------------------------------------------- state
 const STORE = "object-map.state";
-let EXCL = new Uint8Array(N);                  // lasso-excluded
-let RULES = [{ f: "area", lo: 20, hi: null }];   // keep only objects with feature in [lo, hi]; default: the counting method's size filter
-let SEL = new Uint8Array(N), nSel = 0;
-let KEEP = new Uint8Array(N);                   // after rules and exclusions
+let EXCL = new Uint8Array(N), RULES = [{ f: "area", lo: 20, hi: null }];
+const BRUSH = {};                                   // feature -> [lo, hi] (raw units)
+let LASSO = null;                                   // Uint8Array or null
+const SEL = new Uint8Array(N), DISP = new Uint8Array(N).fill(1);
+let nSel = 0, nDisp = N, allSel = true;
+let colourKey = "status", colourRange = null;
 function save() {
   const ex = []; for (let i = 0; i < N; i++) if (EXCL[i]) ex.push(i);
   try { localStorage.setItem(STORE, JSON.stringify({ rules: RULES, excluded: ex, n: N, generated: M.generated })); } catch (e) { /* storage blocked */ }
@@ -126,154 +234,163 @@ function computeKeep() {
     let k = !EXCL[i];
     for (const r of RULES) { if (!k) break; const v = C[r.f][i]; if ((r.lo !== null && !(v >= r.lo)) || (r.hi !== null && !(v <= r.hi))) k = false; }
     KEEP[i] = k ? 1 : 0;
+    FBY.status.idx[i] = k ? 0 : 1;
+  }
+}
+// the selection: every category ticked, every brushed range, the lasso — among the objects shown
+function computeSel() {
+  const offs = F.filter((f) => f.on.some((v) => !v)), br = Object.entries(BRUSH);
+  allSel = !offs.length && !br.length && !LASSO;
+  nSel = 0; nDisp = 0;
+  for (let i = 0; i < N; i++) {
+    let s = DISP[i];
+    if (s) nDisp++;
+    if (s && !allSel) {
+      for (const f of offs) if (!f.on[f.idx[i]]) { s = 0; break; }
+      if (s) for (const [k, [lo, hi]] of br) { const v = C[k][i]; if (!(v >= lo && v <= hi)) { s = 0; break; } }
+      if (s && LASSO && !LASSO[i]) s = 0;
+    }
+    SEL[i] = s; nSel += s;
   }
 }
 
-// ---------------------------------------------------------------- view
+// ---------------------------------------------------------------- the map
 const cv = $("map"), ctx = cv.getContext("2d");
-let view = { x: 0, y: 0, k: 1 };              // screen = (u - x) * k, (v - y) * k (v up)
-let W = 0, H = 0, DPR = 1;
+let view = { x: 0, y: 0, k: 1 }, W = 0, H = 0, DPR = 1;
 function resize() { DPR = window.devicePixelRatio || 1; W = cv.clientWidth; H = cv.clientHeight; cv.width = W * DPR; cv.height = H * DPR; draw(); }
 function fit() {
   let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
-  for (let i = 0; i < N; i++) { const u = C.u[i], v = C.v[i]; if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; }
-  view.k = 0.92 * Math.min(W / (u1 - u0), H / (v1 - v0));
+  for (let i = 0; i < N; i++) if (DISP[i]) { const u = C.u[i], v = C.v[i]; if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; }
+  if (!Number.isFinite(u0)) return;
+  view.k = 0.86 * Math.min(W / Math.max(u1 - u0, 1e-6), H / Math.max(v1 - v0, 1e-6));
   view.x = (u0 + u1) / 2 - W / 2 / view.k; view.y = (v0 + v1) / 2 + H / 2 / view.k;
   draw();
 }
 const sx = (i) => (C.u[i] - view.x) * view.k, sy = (i) => (view.y - C.v[i]) * view.k;
-
-// colours
-const RAMP = ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"];
-function ramp(t) {
+const RAMP = ["#6a5cff", "#3d8bff", "#21c3d6", "#2ee69b", "#b8f05a", "#ffd166", "#ff7a59"];          // bright on the dark map
+function rampRGB(t) {
   t = Math.max(0, Math.min(1, t)) * (RAMP.length - 1); const i = Math.min(Math.floor(t), RAMP.length - 2), f = t - i;
   const a = RAMP[i], b = RAMP[i + 1], h = (s, j) => parseInt(s.slice(j, j + 2), 16);
-  return "rgb(" + [1, 3, 5].map((j) => Math.round(h(a, j) + (h(b, j) - h(a, j)) * f)).join(",") + ")";
+  return [1, 3, 5].map((j) => Math.round(h(a, j) + (h(b, j) - h(a, j)) * f));
 }
-const CAT = {
-  kept: { name: "kept / excluded", f: (i) => (KEEP[i] ? "#e8e8e8" : "#c04a22"), legend: [["#e8e8e8", "kept"], ["#c04a22", "excluded"]] },
-  genotype: { name: "genotype", f: (i) => (SEC[C.sec[i]].genotype === "WT3" ? "#4dabf7" : "#ffa94d"), legend: [["#4dabf7", "WT3"], ["#ffa94d", "GD1"]] },
-  side: { name: "home / crossed", f: (i) => (C.side[i] === 1 ? "#ff00ff" : C.side[i] === 0 ? "#e8e8e8" : "#666"), legend: [["#e8e8e8", "home"], ["#ff00ff", "crossed"]] },
-  dotted: { name: "annotators who dotted it (squares)", f: (i) => ["#3a3a40", "#e03131", "#fab005", "#94d82d", "#2f9e44"][Math.min(C.dotted[i] + 1, 4)],
-    legend: [["#e03131", "in a square, dotted by none"], ["#fab005", "1"], ["#94d82d", "2"], ["#2f9e44", "3+"], ["#3a3a40", "not in a square"]] },
-};
-// sections and slides: many groups, each a distinct hue (golden angle), the highlighted one alone when one is picked
-const SLIDES = [...new Set(SEC.map((s) => s.slide))].sort();
-const SLIDE_OF = SEC.map((s) => SLIDES.indexOf(s.slide));
-const EXPS = [...new Set(SEC.map((s) => s.experiment))].sort((a, b) => +a - +b);
-const hue = (k) => "hsl(" + ((k * 137.508) % 360).toFixed(1) + ",75%," + (52 + (k % 3) * 9) + "%)";
-let HL = -1;                                         // the highlighted section or slide (index), -1 none
-function groupOf(i) { return colourKey === "section" ? C.sec[i] : SLIDE_OF[C.sec[i]]; }
-CAT.section = { name: "sample (section)", f: (i) => (HL < 0 ? hue(C.sec[i]) : C.sec[i] === HL ? "#ffd43b" : "#2b2b30"), legend: [] };
-CAT.slide = { name: "slide", f: (i) => (HL < 0 ? hue(SLIDE_OF[C.sec[i]]) : SLIDE_OF[C.sec[i]] === HL ? "#ffd43b" : "#2b2b30"), legend: [] };
-CAT.experiment = { name: "experiment", f: (i) => ["#4dabf7", "#ffa94d", "#b197fc", "#63e6be"][EXPS.indexOf(SEC[C.sec[i]].experiment) % 4],
-  legend: EXPS.map((e, j) => [["#4dabf7", "#ffa94d", "#b197fc", "#63e6be"][j % 4], "experiment " + e]) };
-function fillHighlight() {
-  const items = colourKey === "section" ? SEC.map((s, j) => [j, s.id + " (" + s.genotype + ", " + s.slide + ")"]) : SLIDES.map((sl, j) => [j, sl]);
-  $("hl").innerHTML = "<option value='-1'>none (all coloured)</option>" + items.map(([j, t]) => "<option value='" + j + "'>" + t + "</option>").join("");
-  $("hl").value = String(HL);
+const fv = (k, i) => { const v = C[k][i]; return LOGF.has(k) ? Math.log1p(Math.max(v, 0)) : v; };
+function parseColour(c) {
+  if (c[0] === "#") return [1, 3, 5].map((j) => parseInt(c.slice(j, j + 2), 16));
+  const m = c.match(/hsl\(([\d.]+),(\d+)%,(\d+)%\)/); const h = +m[1] / 360, s = +m[2] / 100, l = +m[3] / 100;
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  const f = (t) => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 0.5 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+  return [f(h + 1 / 3), f(h), f(h - 1 / 3)].map((v) => Math.round(v * 255));
 }
-let colourKey = "kept", colourRange = null;
-function colourOf(i) {
-  if (CAT[colourKey]) return CAT[colourKey].f(i);
-  let v = C[colourKey][i]; if (LOGF.has(colourKey)) v = Math.log1p(Math.max(v, 0));
-  return ramp((v - colourRange[0]) / (colourRange[1] - colourRange[0] || 1));
+let CATRGB = null;
+function rgbOf(i) {
+  if (FBY[colourKey]) return CATRGB[FBY[colourKey].idx[i]];
+  return rampRGB((fv(colourKey, i) - colourRange[0]) / (colourRange[1] - colourRange[0] || 1));
 }
 function setColour(k) {
-  if (k !== colourKey) HL = -1;
   colourKey = k;
-  const grouped = k === "section" || k === "slide";
-  $("hlWrap").style.display = grouped ? "" : "none";
-  if (grouped) fillHighlight();
-  if (!CAT[k]) {
-    const vals = Float32Array.from(C[k], (v) => (LOGF.has(k) ? Math.log1p(Math.max(v, 0)) : v)).filter(Number.isFinite).sort();
+  document.querySelectorAll(".paint").forEach((b) => b.classList.toggle("on", b.dataset.k === k));
+  const f = FBY[k];
+  if (f) {
+    CATRGB = f.colours.map(parseColour);
+    const shown = f.labels.map((t, j) => [t, j]).filter(([, j]) => f.labels.length <= 14 || j < 14);
+    $("legend").innerHTML = "<div class='lt'>" + f.name + "</div>" + shown.map(([t, j]) => "<div class='li'><span class='sw' style='background:" + f.colours[j] + "'></span>" + t + "</div>").join("") +
+      (f.labels.length > 14 ? "<div class='li' style='color:var(--faint)'>+ " + (f.labels.length - 14) + " more, one hue each</div>" : "");
+  } else {
+    const vals = []; for (let i = 0; i < N; i += 7) { const v = fv(k, i); if (Number.isFinite(v)) vals.push(v); }
+    vals.sort((a, b) => a - b);
     colourRange = [vals[Math.floor(vals.length * 0.02)], vals[Math.floor(vals.length * 0.98)]];
     const back = (v) => (LOGF.has(k) ? Math.expm1(v) : v);
-    $("legend").innerHTML = LABELS[k] + ": <i style='background:" + RAMP[0] + "'></i>" + back(colourRange[0]).toPrecision(3) +
-      "<i style='background:" + RAMP[4] + "'></i>" + back(colourRange[1]).toPrecision(3) + " (2nd–98th percentile" + (LOGF.has(k) ? ", log scale" : "") + ")";
-  } else if (grouped) {
-    const n = k === "section" ? SEC.length : SLIDES.length;
-    $("legend").innerHTML = HL < 0 ? n + " " + (k === "section" ? "sections" : "slides") + ", one hue each (hover to name; pick one under highlight)"
-      : "<i style='background:#ffd43b'></i>" + (k === "section" ? SEC[HL].id + " (" + SEC[HL].genotype + ", " + SEC[HL].slide + ")" : SLIDES[HL]) +
-        " · " + (() => { let c = 0; for (let i = 0; i < N; i++) if (groupOf(i) === HL) c++; return c.toLocaleString("en-US"); })() + " objects";
-  } else $("legend").innerHTML = CAT[k].legend.map(([c, t]) => "<i style='background:" + c + "'></i>" + t).join("");
+    $("legend").innerHTML = "<div class='lt'>" + LABELS[k] + "</div><div class='cb' style='background:linear-gradient(90deg," + RAMP.join(",") + ")'></div>" +
+      "<div class='cbl'><span>" + fmt(back(colourRange[0])) + "</span><span>" + (LOGF.has(k) ? "log scale" : "") + "</span><span>" + fmt(back(colourRange[1])) + "</span></div>";
+  }
   draw();
 }
-
-// draw: points when many objects are in view, each object's outline (fixed size on screen) when few
 const OUTLINE_MAX = 6000;
+// points: written into one image (fast, additive glow); outlines: stroked paths. Unselected objects grey, beneath.
 function draw() {
   if (!W) return;
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.fillStyle = "#0d0d10"; ctx.fillRect(0, 0, W, H);
-  const showEx = $("showExcl").checked, g = +$("glyph").value;      // g: screen px per µm of object
-  const drawMode = $("drawMode").value;
+  const showEx = $("showExcl").checked, g = +$("glyph").value, mode = $("drawMode").value;
   let visible = 0;
-  for (let i = 0; drawMode === "auto" && i < N && visible <= OUTLINE_MAX; i++) {
-    if (!KEEP[i] && !showEx) continue;
-    const x = sx(i), y = sy(i);
-    if (x >= 0 && y >= 0 && x <= W && y <= H) visible++;
+  for (let i = 0; mode === "auto" && i < N && visible <= OUTLINE_MAX; i++) {
+    if (!DISP[i] || (!KEEP[i] && !showEx)) continue;
+    const x = sx(i), y = sy(i); if (x >= 0 && y >= 0 && x <= W && y <= H) visible++;
   }
-  const outlines = drawMode === "outlines" || (drawMode === "auto" && visible <= OUTLINE_MAX);   // auto: once few enough are in view
-  const umPerPx = 1 / g;
-  let drawn = 0;
-  const hlOn = HL >= 0 && (colourKey === "section" || colourKey === "slide");     // the highlighted group drawn last, on top
-  for (let pass = 0; pass < (hlOn ? 2 : 1); pass++)
-  for (let i = 0; i < N; i++) {
-    if (!KEEP[i] && !showEx) continue;
-    if (hlOn && (groupOf(i) === HL) !== (pass === 1)) continue;
-    const x = sx(i), y = sy(i);
-    if (x < -40 || y < -40 || x > W + 40 || y > H + 40) continue;
-    const col = colourOf(i);
-    if (outlines) {
-      const a = OFF[i], b = OFF[i + 1], s = M.outline_step_um / umPerPx;
-      if (b - a >= 4) {
-        ctx.beginPath();
-        for (let j = a; j < b; j += 2) { const px = x + OUT[j] * s, py = y + OUT[j + 1] * s; if (j === a) ctx.moveTo(px, py); else ctx.lineTo(px, py); }
-        ctx.closePath(); ctx.strokeStyle = col; ctx.lineWidth = SEL[i] ? 2.2 : 1; ctx.globalAlpha = KEEP[i] ? 1 : 0.45; ctx.stroke();
-        drawn++;
-        continue;
+  const outlines = mode === "outlines" || (mode === "auto" && visible <= OUTLINE_MAX);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!outlines) {
+    const Wp = cv.width, Hp = cv.height, img = ctx.createImageData(Wp, Hp), d = img.data, r = Math.max(1, Math.round(DPR));
+    for (let pass = 0; pass < 2; pass++) for (let i = 0; i < N; i++) {
+      if (!DISP[i] || (!KEEP[i] && !showEx)) continue;
+      const on = allSel || SEL[i] === 1;
+      if ((pass === 1) !== on) continue;
+      const x = Math.round(sx(i) * DPR), y = Math.round(sy(i) * DPR);
+      if (x < 0 || y < 0 || x >= Wp - r || y >= Hp - r) continue;
+      const c = on ? rgbOf(i) : [70, 78, 96], a = on ? (KEEP[i] ? 0.55 : 0.22) : 0.25;
+      for (let dy = 0; dy < r; dy++) for (let dx = 0; dx < r; dx++) {
+        const j = ((y + dy) * Wp + x + dx) * 4;
+        d[j] = Math.min(255, d[j] + c[0] * a); d[j + 1] = Math.min(255, d[j + 1] + c[1] * a); d[j + 2] = Math.min(255, d[j + 2] + c[2] * a); d[j + 3] = 255;
       }
     }
-    ctx.globalAlpha = KEEP[i] ? 0.85 : 0.35; ctx.fillStyle = col;
-    ctx.fillRect(x - 0.75, y - 0.75, 1.5, 1.5);
+    ctx.putImageData(img, 0, 0);
+  } else {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const s = M.outline_step_um * g;
+    ctx.lineJoin = "round";
+    for (let pass = 0; pass < 2; pass++) for (let i = 0; i < N; i++) {
+      if (!DISP[i] || (!KEEP[i] && !showEx)) continue;
+      const on = allSel || SEL[i] === 1;
+      if ((pass === 1) !== on) continue;
+      const x = sx(i), y = sy(i);
+      if (x < -60 || y < -60 || x > W + 60 || y > H + 60) continue;
+      const a = OFF[i], b = OFF[i + 1];
+      if (b - a < 4) continue;
+      const c = on ? rgbOf(i) : [70, 78, 96];
+      ctx.beginPath();
+      for (let j = a; j < b; j += 2) { const px = x + OUT[j] * s, py = y + OUT[j + 1] * s; if (j === a) ctx.moveTo(px, py); else ctx.lineTo(px, py); }
+      ctx.closePath();
+      ctx.strokeStyle = "rgb(" + c.join(",") + ")"; ctx.globalAlpha = on ? (KEEP[i] ? 1 : 0.55) : 0.35; ctx.lineWidth = on && !allSel ? 1.4 : 1;
+      if (on && !allSel && outlines) { ctx.shadowColor = ctx.strokeStyle; ctx.shadowBlur = 6; } else ctx.shadowBlur = 0;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1; ctx.shadowBlur = 0;
   }
-  ctx.globalAlpha = 1;
-  if (nSel) {                                                      // the selection, ringed
-    ctx.fillStyle = "#ffffff";
-    for (let i = 0; i < N; i++) if (SEL[i] && !outlines) { const x = sx(i), y = sy(i); if (x >= 0 && y >= 0 && x <= W && y <= H) ctx.fillRect(x - 1.5, y - 1.5, 3, 3); }
-  }
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   if (lassoPts.length > 1) {
     ctx.beginPath(); lassoPts.forEach(([x, y], j) => (j ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-    ctx.strokeStyle = "#ffffff"; ctx.setLineDash([4, 3]); ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = "rgba(124,140,255,0.10)"; ctx.fill();
+    ctx.strokeStyle = "#a5b0ff"; ctx.setLineDash([5, 4]); ctx.lineWidth = 1.2; ctx.stroke(); ctx.setLineDash([]);
   }
 }
 
-// ---------------------------------------------------------------- interaction
-let mode = "pan", drag = null, lassoPts = [];
+// ---------------------------------------------------------------- interaction on the map
+let mode = "pan", drag = null, lassoPts = [], hoverIdx = -1;
 function setMode(m) { mode = m; $("tPan").classList.toggle("on", m === "pan"); $("tLasso").classList.toggle("on", m === "lasso"); cv.classList.toggle("lasso", m === "lasso"); }
 $("tPan").onclick = () => setMode("pan"); $("tLasso").onclick = () => setMode("lasso"); $("tFit").onclick = fit;
+let raf = 0; const redraw = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; draw(); }); };
 cv.addEventListener("mousedown", (ev) => {
   const r = cv.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
-  if (mode === "lasso" || ev.shiftKey) { lassoPts = [[x, y]]; drag = { lasso: true }; }
-  else drag = { x, y, vx: view.x, vy: view.y };
+  if (mode === "lasso" || ev.shiftKey) { lassoPts = [[x, y]]; drag = { lasso: true, add: ev.ctrlKey || ev.metaKey }; }
+  else drag = { x, y, vx: view.x, vy: view.y, moved: false };
 });
 window.addEventListener("mousemove", (ev) => {
   const r = cv.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
-  if (drag && drag.lasso) { lassoPts.push([x, y]); draw(); return; }
-  if (drag) { view.x = drag.vx - (x - drag.x) / view.k; view.y = drag.vy + (y - drag.y) / view.k; draw(); return; }
-  hover(x, y, ev);
+  if (drag && drag.lasso) { lassoPts.push([x, y]); redraw(); return; }
+  if (drag) { if (Math.abs(x - drag.x) + Math.abs(y - drag.y) > 3) drag.moved = true; view.x = drag.vx - (x - drag.x) / view.k; view.y = drag.vy + (y - drag.y) / view.k; redraw(); return; }
+  if (ev.target === cv) hover(x, y); else $("tip").style.display = "none";
 });
 window.addEventListener("mouseup", () => {
-  if (drag && drag.lasso && lassoPts.length > 2) select(lassoPts);
-  drag = null; lassoPts = []; draw();
+  if (drag && drag.lasso && lassoPts.length > 2) lassoSelect(lassoPts, drag.add);
+  else if (drag && !drag.lasso && !drag.moved && hoverIdx >= 0 && $("tip").style.display === "block") window.open("section_browser.html#" + encodeURIComponent(SEC[C.sec[hoverIdx]].id), "_blank");
+  drag = null; lassoPts = []; redraw();
 });
 cv.addEventListener("wheel", (ev) => {
   ev.preventDefault();
   const r = cv.getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top, f = Math.exp(-ev.deltaY * 0.0015);
   const u = view.x + x / view.k, v = view.y - y / view.k;
-  view.k *= f; view.x = u - x / view.k; view.y = v + y / view.k; draw();
+  view.k *= f; view.x = u - x / view.k; view.y = v + y / view.k; redraw();
 }, { passive: false });
+cv.addEventListener("mouseleave", () => { $("tip").style.display = "none"; });
 function inPoly(x, y, P) {
   let c = false;
   for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
@@ -282,80 +399,194 @@ function inPoly(x, y, P) {
   }
   return c;
 }
-function select(P) {
-  const add = !!(window.event && window.event.ctrlKey);
-  if (!add) SEL.fill(0);
+function lassoSelect(P, add) {
+  if (!add || !LASSO) LASSO = new Uint8Array(N);
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   for (const [x, y] of P) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
-  for (let i = 0; i < N; i++) { const x = sx(i), y = sy(i); if (x >= x0 && x <= x1 && y >= y0 && y <= y1 && inPoly(x, y, P)) SEL[i] = 1; }
-  nSel = SEL.reduce((a, b) => a + b, 0);
-  showSelection(); draw();
+  for (let i = 0; i < N; i++) { if (!DISP[i]) continue; const x = sx(i), y = sy(i); if (x >= x0 && x <= x1 && y >= y0 && y <= y1 && inPoly(x, y, P)) LASSO[i] = 1; }
+  refresh();
 }
-const fmt = (v, d = 2) => (Number.isFinite(v) ? (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString("en-US") : v.toFixed(d)) : "–");
-function median(a) { if (!a.length) return NaN; const s = Float64Array.from(a).sort(); return s[Math.floor(s.length / 2)]; }
-function showSelection() {
-  if (!nSel) { $("selInfo").textContent = "Nothing selected. Lasso: draw round a group (Ctrl to add to the selection)."; return; }
-  const idx = []; for (let i = 0; i < N; i++) if (SEL[i]) idx.push(i);
-  const inSq = idx.filter((i) => C.dotted[i] >= 0), dot2 = inSq.filter((i) => C.dotted[i] >= 2).length, dot0 = inSq.filter((i) => C.dotted[i] === 0).length;
-  const geno = idx.filter((i) => SEC[C.sec[i]].genotype === "WT3").length;
-  $("selInfo").innerHTML = "<b>" + nSel.toLocaleString("en-US") + "</b> selected (" + idx.filter((i) => KEEP[i]).length.toLocaleString("en-US") + " now kept); WT3 " +
-    Math.round(100 * geno / nSel) + " %, crossed " + idx.filter((i) => C.side[i] === 1).length + ".<br>In the count squares: " + inSq.length +
-    (inSq.length ? " — dotted by ≥ 2 annotators " + Math.round(100 * dot2 / inSq.length) + " %, by none " + Math.round(100 * dot0 / inSq.length) + " %" : "") +
-    "<table><tr><th>median</th><th></th></tr>" + ["area", "circularity", "aspect", "thickness", "skeleton", "on_nucleus", "snr", "contrast"].map((f) =>
-      "<tr><td>" + LABELS[f] + "</td><td>" + fmt(median(idx.map((i) => C[f][i]))) + "</td></tr>").join("") + "</table>";
-}
-$("bExclude").onclick = () => { for (let i = 0; i < N; i++) if (SEL[i]) EXCL[i] = 1; update(); };
-$("bRestore").onclick = () => { for (let i = 0; i < N; i++) if (SEL[i]) EXCL[i] = 0; update(); };
-$("bClear").onclick = () => { SEL.fill(0); nSel = 0; showSelection(); draw(); };
-
-// hover: the nearest object within 8 px
-const tip = $("tip");
-function hover(x, y, ev) {
+function hover(x, y) {
   let best = -1, bd = 64;
-  for (let i = 0; i < N; i++) { const dx = sx(i) - x, dy = sy(i) - y, d = dx * dx + dy * dy; if (d < bd && (KEEP[i] || $("showExcl").checked)) { bd = d; best = i; } }
-  if (best < 0) { tip.style.display = "none"; return; }
+  const showEx = $("showExcl").checked;
+  for (let i = 0; i < N; i++) {
+    if (!DISP[i] || (!KEEP[i] && !showEx)) continue;
+    const dx = sx(i) - x, dy = sy(i) - y, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = i; }
+  }
+  const tip = $("tip");
+  if (best < 0) { tip.style.display = "none"; hoverIdx = -1; return; }
   const s = SEC[C.sec[best]], i = best;
-  tip.innerHTML = "<b>" + s.id + "</b> " + s.genotype + " e" + s.experiment + " · " + s.slide + " · object " + C.index[i] + "<br>" +
-    (C.side[i] === 1 ? "crossed" : C.side[i] === 0 ? "home" : "no line") + (C.reg[i] ? ", in the region" : "") +
-    (C.dotted[i] >= 0 ? "<br>in a count square: dotted by " + C.dotted[i] + " of " + M.squares.annotators : "") +
-    "<br>area " + fmt(C.area[i], 1) + " µm², circularity " + fmt(C.circularity[i]) + ", aspect " + fmt(C.aspect[i]) +
-    "<br>thickness " + fmt(C.thickness[i], 1) + " µm, skeleton " + fmt(C.skeleton[i], 1) + " µm, on a nucleus " + fmt(C.on_nucleus[i]) +
-    "<br>signal/noise " + fmt(C.snr[i], 1) + ", contrast " + fmt(C.contrast[i]) + "<br>" + (KEEP[i] ? "kept" : "<b>excluded</b>") +
-    " · <span class='mute'>click to open the section</span>";
+  tip.innerHTML = "<b>" + s.id + "</b> · object " + C.index[i] + "<br>" + s.genotype + " · experiment " + s.experiment + " · " + s.slide + "<br>" +
+    (C.side[i] === 1 ? "crossed" : C.side[i] === 0 ? "home" : "no line") + (C.reg[i] ? ", in the junction region" : "") +
+    (C.dotted[i] >= 0 ? "<br>in a count square · dotted by " + C.dotted[i] + " of " + M.squares.annotators : "") +
+    "<br><span style='color:var(--mute)'>area</span> " + fmt(C.area[i], 1) + " µm² · <span style='color:var(--mute)'>circ.</span> " + fmt(C.circularity[i]) +
+    " · <span style='color:var(--mute)'>aspect</span> " + fmt(C.aspect[i]) + "<br><span style='color:var(--mute)'>thickness</span> " + fmt(C.thickness[i], 1) +
+    " µm · <span style='color:var(--mute)'>on nucleus</span> " + fmt(C.on_nucleus[i]) + " · <span style='color:var(--mute)'>S/N</span> " + fmt(C.snr[i], 1) +
+    "<br>" + (KEEP[i] ? "<span style='color:var(--accent2)'>kept</span>" : "<span style='color:var(--warn)'>excluded</span>") + " <span style='color:var(--faint)'>· click to open the section</span>";
   tip.style.display = "block";
-  tip.style.left = Math.min(x + 14, W - 290) + "px"; tip.style.top = Math.min(y + 14, H - 160) + "px";
+  tip.style.left = Math.min(x + 16, W - 310) + "px"; tip.style.top = Math.min(y + 16, H - 170) + "px";
   hoverIdx = best;
 }
-let hoverIdx = -1;
-cv.addEventListener("click", (ev) => { if (mode === "pan" && !ev.shiftKey && hoverIdx >= 0 && tip.style.display === "block") window.open("section_browser.html#" + encodeURIComponent(SEC[C.sec[hoverIdx]].id), "_blank"); });
-cv.addEventListener("mouseleave", () => { tip.style.display = "none"; });
 
-// ---------------------------------------------------------------- rules
-function featOptions(sel) { return M.features.map((f) => "<option value='" + f + "'" + (f === sel ? " selected" : "") + ">" + (LABELS[f] || f) + "</option>").join(""); }
+// ---------------------------------------------------------------- left panel: categories
+const fmt = (v, d = 2) => (Number.isFinite(v) ? (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString("en-US") : v.toFixed(d)) : "–");
+const ICON = "<svg width='14' height='14' viewBox='0 0 16 16' fill='currentColor' aria-hidden='true'><path d='M8 1.5C8 1.5 3 7 3 10a5 5 0 0 0 10 0C13 7 8 1.5 8 1.5Z'/></svg>";
+function buildCats() {
+  $("cats").innerHTML = F.map((f) => "<div class='field" + (f.open ? " open" : "") + "' data-f='" + f.key + "'><div class='fhead'><span class='caret'>▸</span><span class='name'>" + f.name +
+    "</span><span class='cnum' data-n></span><button class='paint' data-k='" + f.key + "' title='colour by " + f.name.toLowerCase() + "'>" + ICON + "</button></div>" +
+    "<div class='fbody'>" + (f.labels.length > 14 ? "<input class='search' placeholder='search " + f.labels.length + " …' data-q>" : "") + "<div data-rows></div></div></div>").join("");
+  for (const el of $("cats").querySelectorAll(".field")) {
+    const f = FBY[el.dataset.f];
+    el.querySelector(".fhead").onclick = (ev) => { if (ev.target.closest(".paint")) return; f.open = !f.open; el.classList.toggle("open", f.open); drawCats(); };
+    el.querySelector(".paint").onclick = () => setColour(f.key);
+    const q = el.querySelector("[data-q]"); if (q) q.oninput = () => { f.q = q.value.toLowerCase(); drawCats(); };
+  }
+}
+function drawCats() {
+  for (const el of $("cats").querySelectorAll(".field")) {
+    const f = FBY[el.dataset.f], n = new Int32Array(f.labels.length), ns = new Int32Array(f.labels.length);
+    for (let i = 0; i < N; i++) if (DISP[i]) { n[f.idx[i]]++; if (SEL[i]) ns[f.idx[i]]++; }
+    el.querySelector("[data-n]").textContent = f.on.every((v) => v) ? "" : f.on.reduce((a, b) => a + b, 0) + " / " + f.labels.length;
+    if (!f.open) continue;
+    const max = Math.max(1, ...n);
+    let rows = f.labels.map((t, j) => j).filter((j) => n[j] > 0 || f.labels.length <= 14);
+    if (f.q) rows = rows.filter((j) => f.labels[j].toLowerCase().includes(f.q));
+    const shownRows = rows.slice(0, 60);
+    el.querySelector("[data-rows]").innerHTML = shownRows.map((j) => "<label class='cat' data-j='" + j + "'><input type='checkbox' " + (f.on[j] ? "checked" : "") + ">" +
+      "<span class='sw' style='background:" + f.colours[j] + "'></span><span class='cname' title='" + f.labels[j] + "'>" + f.labels[j] + "</span>" +
+      "<span class='bar'><i style='width:" + (100 * n[j] / max).toFixed(1) + "%;" + (allSel ? "" : "opacity:" + (0.25 + 0.75 * ns[j] / Math.max(n[j], 1)).toFixed(2)) + "'></i></span>" +
+      "<span class='cnum'>" + (allSel ? n[j] : ns[j]).toLocaleString("en-US") + "</span></label>").join("") +
+      (rows.length > 60 ? "<div class='more'>" + (rows.length - 60) + " more — search to narrow</div>" : "");
+    for (const row of el.querySelectorAll(".cat")) {
+      const j = +row.dataset.j, box = row.querySelector("input");
+      box.onclick = (ev) => { ev.stopPropagation(); f.on[j] = box.checked ? 1 : 0; refresh(); };
+      row.querySelector(".cname").onclick = (ev) => {                    // click a name: that category alone (again: all)
+        ev.preventDefault();
+        const only = f.on[j] && f.on.reduce((a, b) => a + b, 0) === 1;
+        f.on.fill(only ? 1 : 0); if (!only) f.on[j] = 1; refresh();
+      };
+    }
+  }
+}
+
+// ---------------------------------------------------------------- left panel: measurement histograms with brushing
+const BINS = 48, HIST = {};
+function buildFeats() {
+  $("feats").innerHTML = FEATS.map((k) => "<div class='field' data-k='" + k + "'><div class='fhead'><span class='caret'>▸</span><span class='name'>" + (LABELS[k] || k) +
+    "</span><span class='cnum' data-b></span><button class='paint' data-k='" + k + "' title='colour by this'>" + ICON + "</button></div>" +
+    "<div class='fbody hist'><canvas width='560' height='112'></canvas><div class='hrange'><span data-lo></span><b data-sel></b><span data-hi></span></div></div></div>").join("");
+  for (const el of $("feats").querySelectorAll(".field")) {
+    const k = el.dataset.k, c = el.querySelector("canvas");
+    HIST[k] = { el, c, open: ["area", "circularity", "aspect", "on_nucleus"].includes(k) };
+    el.classList.toggle("open", HIST[k].open);
+    el.querySelector(".fhead").onclick = (ev) => { if (ev.target.closest(".paint")) return; HIST[k].open = !HIST[k].open; el.classList.toggle("open", HIST[k].open); drawHist(k); };
+    el.querySelector(".paint").onclick = () => setColour(k);
+    let start = null;
+    const toV = (ev) => { const r = c.getBoundingClientRect(), t = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)); return HIST[k].lo + t * (HIST[k].hi - HIST[k].lo); };
+    c.onmousedown = (ev) => { start = toV(ev); };
+    c.onmousemove = (ev) => { if (start === null) return; const v = toV(ev); HIST[k].live = [Math.min(start, v), Math.max(start, v)]; drawHist(k); };
+    c.onmouseup = (ev) => {
+      if (start === null) return;
+      const v = toV(ev), lo = Math.min(start, v), hi = Math.max(start, v); start = null; HIST[k].live = null;
+      if (Math.abs(hi - lo) < (HIST[k].hi - HIST[k].lo) / 200) delete BRUSH[k];          // a click clears the range
+      else BRUSH[k] = [unT(k, lo), unT(k, hi)];
+      refresh();
+    };
+    c.onmouseleave = () => { if (start !== null) { start = null; HIST[k].live = null; drawHist(k); } };
+  }
+}
+const T = (k, v) => (LOGF.has(k) ? Math.log1p(Math.max(v, 0)) : v), unT = (k, v) => (LOGF.has(k) ? Math.expm1(v) : v);
+function drawHist(k) {
+  const h = HIST[k]; if (!h) return;
+  h.el.querySelector("[data-b]").textContent = BRUSH[k] ? "range" : "";
+  if (!h.open) return;
+  if (h.lo === undefined) {                                   // the axis: 0.5th–99.5th percentile of every object
+    const vals = []; for (let i = 0; i < N; i += 5) { const v = T(k, C[k][i]); if (Number.isFinite(v)) vals.push(v); }
+    vals.sort((a, b) => a - b); h.lo = vals[Math.floor(vals.length * 0.005)]; h.hi = vals[Math.floor(vals.length * 0.995)];
+    if (h.hi <= h.lo) h.hi = h.lo + 1;
+  }
+  const all = new Float64Array(BINS), sel = new Float64Array(BINS), w = (h.hi - h.lo) / BINS;
+  for (let i = 0; i < N; i++) {
+    if (!DISP[i]) continue;
+    const b = Math.max(0, Math.min(BINS - 1, Math.floor((T(k, C[k][i]) - h.lo) / w)));
+    all[b]++; if (SEL[i]) sel[b]++;
+  }
+  const g = h.c.getContext("2d"), Wc = h.c.width, Hc = h.c.height, max = Math.max(1, ...all), bw = Wc / BINS;
+  g.clearRect(0, 0, Wc, Hc);
+  const grad = g.createLinearGradient(0, 0, Wc, 0); grad.addColorStop(0, "#7c8cff"); grad.addColorStop(1, "#2ee6c5");
+  for (let b = 0; b < BINS; b++) {
+    const ha = Math.sqrt(all[b] / max) * (Hc - 8), hs = Math.sqrt(sel[b] / max) * (Hc - 8);
+    g.fillStyle = "#2a3040"; g.fillRect(b * bw + 1, Hc - ha, bw - 2, ha);
+    g.fillStyle = grad; g.fillRect(b * bw + 1, Hc - hs, bw - 2, hs);
+  }
+  const range = h.live ? [h.live[0], h.live[1]] : BRUSH[k] ? [T(k, BRUSH[k][0]), T(k, BRUSH[k][1])] : null;
+  if (range) {
+    const x0 = (range[0] - h.lo) / (h.hi - h.lo) * Wc, x1 = (range[1] - h.lo) / (h.hi - h.lo) * Wc;
+    g.fillStyle = "rgba(255,209,102,0.14)"; g.fillRect(x0, 0, x1 - x0, Hc);
+    g.strokeStyle = "#ffd166"; g.lineWidth = 2; g.beginPath(); g.moveTo(x0, 0); g.lineTo(x0, Hc); g.moveTo(x1, 0); g.lineTo(x1, Hc); g.stroke();
+  }
+  h.el.querySelector("[data-lo]").textContent = fmt(unT(k, h.lo));
+  h.el.querySelector("[data-hi]").textContent = fmt(unT(k, h.hi));
+  h.el.querySelector("[data-sel]").textContent = range ? fmt(unT(k, range[0])) + " – " + fmt(unT(k, range[1])) : "";
+}
+
+// ---------------------------------------------------------------- right panel
+function median(a) { if (!a.length) return NaN; const s = Float64Array.from(a).sort(); return s[Math.floor(s.length / 2)]; }
+function showSelection() {
+  $("nShown").textContent = nDisp.toLocaleString("en-US");
+  $("nSel").textContent = allSel ? "all" : nSel.toLocaleString("en-US");
+  let k = 0; for (let i = 0; i < N; i++) k += KEEP[i];
+  $("nKept").textContent = k.toLocaleString("en-US");
+  const idx = []; for (let i = 0; i < N; i++) if (SEL[i] && (!allSel || DISP[i])) idx.push(i);
+  $("selBig").innerHTML = (allSel ? "all " : "") + idx.length.toLocaleString("en-US") + " <small>of " + nDisp.toLocaleString("en-US") + " shown</small>";
+  const wt = idx.filter((i) => SEC[C.sec[i]].genotype === "WT3").length;
+  $("selSplit").innerHTML = idx.length ? "<i style='width:" + (100 * wt / idx.length) + "%;background:#5ec8ff'></i><i style='flex:1;background:#ff9f5a'></i>" : "";
+  $("selSplit").style.display = "flex";
+  const inSq = idx.filter((i) => C.dotted[i] >= 0), d2 = inSq.filter((i) => C.dotted[i] >= 2).length, d0 = inSq.filter((i) => C.dotted[i] === 0).length;
+  const step = Math.max(1, Math.floor(idx.length / 20000)), sample = idx.filter((_, j) => j % step === 0);
+  $("selInfo").innerHTML = "<span>WT3 / GD1</span><span>" + (idx.length ? Math.round(100 * wt / idx.length) + " % / " + Math.round(100 - 100 * wt / idx.length) + " %" : "–") + "</span>" +
+    "<span>crossed</span><span>" + idx.filter((i) => C.side[i] === 1).length.toLocaleString("en-US") + "</span>" +
+    "<span>kept</span><span>" + idx.filter((i) => KEEP[i]).length.toLocaleString("en-US") + "</span>" +
+    "<span>in count squares</span><span>" + inSq.length + "</span>" +
+    (inSq.length ? "<span>… dotted by ≥ 2 / none</span><span>" + Math.round(100 * d2 / inSq.length) + " % / " + Math.round(100 * d0 / inSq.length) + " %</span>" : "") +
+    [["area", "area (µm²)"], ["circularity", "circularity"], ["aspect", "aspect ratio"], ["thickness", "thickness (µm)"], ["on_nucleus", "on a nucleus"], ["snr", "signal / noise"]]
+      .map(([f, t]) => "<span>median " + t + "</span><span>" + fmt(median(sample.map((i) => C[f][i]))) + "</span>").join("");
+  $("bExclude").disabled = allSel; $("bRestore").disabled = allSel;
+}
+$("bExclude").onclick = () => { if (allSel) return; for (let i = 0; i < N; i++) if (SEL[i]) EXCL[i] = 1; update(); };
+$("bRestore").onclick = () => { if (allSel) return; for (let i = 0; i < N; i++) if (SEL[i]) EXCL[i] = 0; update(); };
+$("bClear").onclick = () => { clearSelection(); refresh(); };
+function clearSelection() { LASSO = null; for (const k of Object.keys(BRUSH)) delete BRUSH[k]; for (const f of F) f.on.fill(1); }
+$("tSubset").onclick = () => { if (allSel) return; for (let i = 0; i < N; i++) DISP[i] = SEL[i]; clearSelection(); refresh(); fit(); };
+$("tReset").onclick = () => { DISP.fill(1); clearSelection(); refresh(); fit(); };
+
 function drawRules() {
   $("rules").innerHTML = RULES.map((r, j) => "<div class='rule'><span>" + (LABELS[r.f] || r.f) + "</span><input type='number' step='any' data-j='" + j + "' data-k='lo' placeholder='min' value='" +
     (r.lo ?? "") + "'><input type='number' step='any' data-j='" + j + "' data-k='hi' placeholder='max' value='" + (r.hi ?? "") + "'><button data-del='" + j + "' aria-label='remove'>×</button></div>").join("") ||
-    "<p class='mute'>No range: every object not excluded by lasso is kept.</p>";
-  for (const el of $("rules").querySelectorAll("input")) el.onchange = () => { const v = el.value === "" ? null : +el.value; RULES[+el.dataset.j][el.dataset.k] = v; update(); };
+    "<p class='note' style='margin:0'>No range: every object not excluded by hand is kept.</p>";
+  for (const el of $("rules").querySelectorAll("input")) el.onchange = () => { RULES[+el.dataset.j][el.dataset.k] = el.value === "" ? null : +el.value; update(); };
   for (const el of $("rules").querySelectorAll("button[data-del]")) el.onclick = () => { RULES.splice(+el.dataset.del, 1); drawRules(); update(); };
 }
-$("newFeat").innerHTML = featOptions("circularity");
-$("bAddRule").onclick = () => { RULES.push({ f: $("newFeat").value, lo: null, hi: null }); drawRules(); };
+$("bBrushRules").onclick = () => {
+  for (const [k, [lo, hi]] of Object.entries(BRUSH)) {
+    const r = RULES.find((x) => x.f === k); const v = { f: k, lo: +lo.toPrecision(4), hi: +hi.toPrecision(4) };
+    if (r) Object.assign(r, v); else RULES.push(v);
+    delete BRUSH[k];
+  }
+  drawRules(); update();
+};
 
-// ---------------------------------------------------------------- effect: counts, the genotype fold, the annotators' dots
 function effect() {
   const crossedKeep = new Float64Array(SEC.length), crossedBase = new Float64Array(SEC.length);
   let kept = 0, base = 0;
   const dotsKeep = new Float64Array(5), dotsBase = new Float64Array(5);
   let sumDotKeep = 0, sumDotBase = 0;
   for (let i = 0; i < N; i++) {
-    const isBase = C.area[i] > 20, s = C.sec[i];
+    const s = C.sec[i];
     if (KEEP[i]) { kept++; if (C.side[i] === 1) crossedKeep[s]++; if (C.dotted[i] >= 0) { dotsKeep[Math.min(C.dotted[i], 3)]++; sumDotKeep += C.dotted[i]; } }
-    if (isBase && C.dotted[i] >= 0) { dotsBase[Math.min(C.dotted[i], 3)]++; sumDotBase += C.dotted[i]; }
+    if (C.area[i] > 20 && C.dotted[i] >= 0) { dotsBase[Math.min(C.dotted[i], 3)]++; sumDotBase += C.dotted[i]; }
   }
-  // the counting method exactly: the browser's stored counts (area > 20 µm² here differs by a few objects, see the note)
   SEC.forEach((sc, j) => { crossedBase[j] = sc.crossed_8 || 0; base += sc.n_8 || 0; });
-  // WT3 ÷ GD1 of the geometric mean of (1 + crossed per mm), sections with a line
   const fold = (cr) => {
     const g = { WT3: [], GD1: [] };
     SEC.forEach((s, j) => { if (s.length_um > 0 && s.crossed_8 !== null && g[s.genotype]) g[s.genotype].push(Math.log1p(cr[j] / (s.length_um / 1000))); });
@@ -363,31 +594,27 @@ function effect() {
     return { WT3: Math.expm1(m(g.WT3)), GD1: Math.expm1(m(g.GD1)), ratio: Math.exp(m(g.WT3) - m(g.GD1)) };
   };
   const fk = fold(crossedKeep), fb = fold(crossedBase);
-  const nd = Object.values(M.squares.dots).reduce((a, b) => a + b, 0);
-  const inSq = (d) => d.reduce((a, b) => a + b, 0);
-  $("effect").innerHTML = "<table><tr><th></th><th>counting method (&gt; 20 µm²)</th><th>kept now</th></tr>" +
+  const nd = Object.values(M.squares.dots).reduce((a, b) => a + b, 0), sum = (d) => d.reduce((a, b) => a + b, 0);
+  const pct = (a, b) => (b ? Math.round(100 * a / b) + " %" : "–");
+  $("effect").innerHTML = "<table><tr><th></th><th>counting method</th><th>kept now</th></tr>" +
     "<tr><td>objects</td><td>" + base.toLocaleString("en-US") + "</td><td>" + kept.toLocaleString("en-US") + "</td></tr>" +
-    "<tr><td>crossed</td><td>" + crossedBase.reduce((a, b) => a + b, 0).toLocaleString("en-US") + "</td><td>" + crossedKeep.reduce((a, b) => a + b, 0).toLocaleString("en-US") + "</td></tr>" +
-    "<tr><td>crossed / mm, WT3 (geo. mean)</td><td>" + fmt(fb.WT3) + "</td><td>" + fmt(fk.WT3) + "</td></tr>" +
-    "<tr><td>crossed / mm, GD1</td><td>" + fmt(fb.GD1) + "</td><td>" + fmt(fk.GD1) + "</td></tr>" +
-    "<tr><td><b>WT3 ÷ GD1</b></td><td>" + fmt(fb.ratio) + "</td><td><b>" + fmt(fk.ratio) + "</b></td></tr>" +
-    "<tr><td>objects in the squares (≈)</td><td>" + inSq(dotsBase) + "</td><td>" + inSq(dotsKeep) + "</td></tr>" +
-    "<tr><td>… dotted by none</td><td>" + Math.round(100 * dotsBase[0] / inSq(dotsBase)) + " %</td><td>" + Math.round(100 * dotsKeep[0] / Math.max(inSq(dotsKeep), 1)) + " %</td></tr>" +
-    "<tr><td>… dotted by ≥ 2</td><td>" + Math.round(100 * (dotsBase[2] + dotsBase[3]) / inSq(dotsBase)) + " %</td><td>" + Math.round(100 * (dotsKeep[2] + dotsKeep[3]) / Math.max(inSq(dotsKeep), 1)) + " %</td></tr>" +
-    "<tr><td>annotators' dots found</td><td>" + Math.round(100 * sumDotBase / nd) + " %</td><td>" + Math.round(100 * sumDotKeep / nd) + " %</td></tr></table>" +
-    "<p class='mute'>Counting method: the stored counts. Its size filter removes 4-connected pieces of ≤ 20 µm² before objects " +
-    "are formed, so here, where the smallest objects are kept, \"area &gt; 20 µm²\" gives a few more objects (about 0.05 %): small pieces touching " +
-    "only at a corner join into objects just over 20 µm². The square rows of that column use area &gt; 20 µm² (≈). WT3 ÷ GD1: the geometric mean of 1 + crossed objects per mm of junction interface, sections pooled (a quick guide, not the paper's mixed model). " +
-    "Squares: objects whose centroid lies in a blinded count square; dotted = an annotator's dot within 6 µm (one-to-one). Dots found: of all " + nd +
-    " dots of the " + M.squares.annotators + " annotators, the share matched to a kept object.</p>";
+    "<tr><td>crossed</td><td>" + sum(crossedBase).toLocaleString("en-US") + "</td><td>" + sum(crossedKeep).toLocaleString("en-US") + "</td></tr>" +
+    "<tr><td>crossed / mm · WT3</td><td>" + fmt(fb.WT3) + "</td><td>" + fmt(fk.WT3) + "</td></tr>" +
+    "<tr><td>crossed / mm · GD1</td><td>" + fmt(fb.GD1) + "</td><td>" + fmt(fk.GD1) + "</td></tr>" +
+    "<tr class='hl'><td>WT3 ÷ GD1</td><td>" + fmt(fb.ratio) + "</td><td>" + fmt(fk.ratio) + "</td></tr>" +
+    "<tr><td>in squares (≈)</td><td>" + sum(dotsBase) + "</td><td>" + sum(dotsKeep) + "</td></tr>" +
+    "<tr><td>… dotted by none</td><td>" + pct(dotsBase[0], sum(dotsBase)) + "</td><td>" + pct(dotsKeep[0], sum(dotsKeep)) + "</td></tr>" +
+    "<tr><td>… dotted by ≥ 2</td><td>" + pct(dotsBase[2] + dotsBase[3], sum(dotsBase)) + "</td><td>" + pct(dotsKeep[2] + dotsKeep[3], sum(dotsKeep)) + "</td></tr>" +
+    "<tr><td>dots found</td><td>" + pct(sumDotBase, nd) + "</td><td>" + pct(sumDotKeep, nd) + "</td></tr></table>" +
+    "<p class='note'>Crossed / mm: geometric mean of 1 + crossed per mm of junction interface (a quick guide, not the paper's mixed model). Counting method: the " +
+    "stored counts; \"area &gt; 20 µm²\" here keeps ~0.05 % more (pieces touching at a corner join). Squares: dotted = an annotator's dot within 6 µm; dots found: " +
+    "of all " + nd + " dots of " + M.squares.annotators + " annotators, the share matched to a kept object.</p>";
 }
-
-function update() { computeKeep(); save(); effect(); showSelection(); draw(); }
 
 // ---------------------------------------------------------------- export / import
 $("bExport").onclick = () => {
   const ex = []; for (let i = 0; i < N; i++) if (EXCL[i]) ex.push([SEC[C.sec[i]].id, C.index[i]]);
-  const kept = []; let n = 0; for (let i = 0; i < N; i++) if (!KEEP[i]) n++;
+  let n = 0; for (let i = 0; i < N; i++) if (!KEEP[i]) n++;
   const blob = new Blob([JSON.stringify({ key: M.key, generated: M.generated, rules: RULES, excluded: ex, n_excluded_total: n }, null, 1)], { type: "application/json" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "object_exclusions.json"; a.click();
 };
@@ -401,17 +628,19 @@ $("fImport").onchange = async () => {
 };
 $("bReset").onclick = () => { if (!confirm("Clear every exclusion and range (back to the counting method)?")) return; EXCL.fill(0); RULES = [{ f: "area", lo: 20, hi: null }]; drawRules(); update(); };
 
-// ---------------------------------------------------------------- start
-$("colour").innerHTML = Object.entries(CAT).map(([k, c]) => "<option value='" + k + "'>" + c.name + "</option>").join("") + featOptions("");
-$("colour").onchange = () => setColour($("colour").value);
-$("hl").onchange = () => { HL = +$("hl").value; setColour(colourKey); };
-$("glyph").oninput = draw; $("showExcl").onchange = draw;
+// ---------------------------------------------------------------- refresh cycle
+function refresh() { computeSel(); drawCats(); for (const k of FEATS) drawHist(k); showSelection(); draw(); }
+function update() { computeKeep(); save(); effect(); refresh(); }
 $("drawMode").onchange = () => { try { localStorage.setItem("object-map.draw", $("drawMode").value); } catch (e) { /* storage blocked */ } draw(); };
 try { const d = localStorage.getItem("object-map.draw"); if (d) $("drawMode").value = d; } catch (e) { /* none */ }
-document.addEventListener("keydown", (ev) => { if (ev.target.tagName === "INPUT") return; if (ev.key === "0") fit(); if (ev.key === "l") setMode("lasso"); if (ev.key === "p") setMode("pan"); });
+$("glyph").oninput = redraw; $("showExcl").onchange = draw;
+document.addEventListener("keydown", (ev) => {
+  if (ev.target.tagName === "INPUT" || ev.target.tagName === "SELECT") return;
+  if (ev.key === "0") fit(); else if (ev.key === "l") setMode("lasso"); else if (ev.key === "p") setMode("pan"); else if (ev.key === "Escape") { clearSelection(); refresh(); }
+});
 window.addEventListener("resize", resize);
-$("sub").textContent = N.toLocaleString("en-US") + " objects (" + M.key + "), " + SEC.length + " sections · UMAP of " + M.umap_features.length + " features · " + M.generated;
-load(); drawRules(); computeKeep(); effect(); resize(); fit(); setColour("kept");
+$("sub").textContent = M.key + " · " + SEC.length + " sections · UMAP of " + M.umap_features.length + " features · " + M.generated;
+load(); buildCats(); buildFeats(); drawRules(); computeKeep(); effect(); computeSel(); setColour("status"); resize(); fit(); refresh();
 </script>
 </body>
 </html>
