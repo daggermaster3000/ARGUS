@@ -4427,6 +4427,13 @@ function positivityMethods(key) {
     "less its local median (45 µm window, computed at 1/8 resolution), smoothed with a Gaussian (σ = 0.5 µm) and thresholded inside " +
     "the section's outline widened by 10 µm, at the median + " + sd + " of the section's tissue pixels (tissue and outline found in every channel). " +
     cleanup + outside("Objects");
+  if (m === "cpself") return "AF488⁺ cells were segmented with Cellpose (cpdino, a DINO-backbone model) fine-tuned without hand labels on " +
+    "the AF488 counting mask's surest cells: in each of 120 sections without count squares, the brightest 20 % (by mean background-subtracted " +
+    "signal) of the mask's soma-shaped objects (median + 8 robust SD; circularity ≥ 0.5), every other object of the mask at 3 SD painted over " +
+    "with the local background so that no dimmer cell was taught as background (480 crops of 256 pixels; AF488 and the nuclear stain, each " +
+    "scaled to its 1st–99.9th percentile in the section's tissue; 20 epochs). The model was applied to whole sections with the same scaling; a " +
+    "mask was counted as an AF488⁺ cell when its mean background-subtracted AF488 (Gaussian σ = 0.5 µm less a Gaussian σ = 20 µm background) " +
+    "reached " + k + " times the section's noise SD (1.4826 × median absolute deviation of its tissue pixels), at its centroid." + outside("Cells");
   const value = m === "cellmf" ? "mean AF488 intensity over the grown nucleus, measured on the AF488 image less its local median " +
     "(45 µm window)" : "mean AF488 intensity over the grown nucleus (raw image)";
   return nuclei + " A cell was called AF488⁺ when its " + value + ", exceeded the median + " + sd + " of all cells in the junction " +

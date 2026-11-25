@@ -131,6 +131,12 @@ OBJECT_FILTER_META = OUT / "object_filter.json"
 if OBJECT_FILTER.exists() and OBJECT_FILTER_META.exists():
     METHODS["gfilt"] = {"label": "AF488 mask, Gaussian 20 µm background, filtered on the object map", "kind": "mask",
                         "ks": (8,), "default": 8, "min_um2": 3.0, "of": "gauss", "filtered": "gauss3-8"}
+#: Cellpose cpdino fine-tuned on the counting mask's surest cells (cellpose_selftrain.py, run by cellpose_af488.py):
+#: its masks in the section at mean signal ≥ k noise SD; a method once the run's tables exist
+CELLPOSE_SELF = OUT / "cellpose_af488_cpdino_af488_self_e20"
+if CELLPOSE_SELF.is_dir() and any(CELLPOSE_SELF.glob("*.parquet")):
+    METHODS["cpself"] = {"label": "Cellpose cpdino self-trained on the counting mask's surest cells", "kind": "mask",
+                         "ks": (3, 5, 8), "default": 5, "min_um2": 20.0, "cellpose": str(CELLPOSE_SELF.name)}
 SIZE_VARIANTS = tuple(m for m, spec in METHODS.items() if spec.get("of") == "gauss" and not spec.get("filtered"))
 MEDIAN_BACKGROUND_UM = 45.0       #: junction_analysis.less_local_median's window (for the label only)
 SIMPLIFY_PX = 0.5                 #: outlines simplified to within this many picture pixels
@@ -211,7 +217,7 @@ def done(out: Path, name: str) -> bool:
 
 def masks_done(out: Path, name: str) -> bool:
     """Every method but the size variants is there (those come from :func:`run_sizes` when missing)."""
-    base = [m for m in METHODS if m not in SIZE_VARIANTS and not METHODS[m].get("filtered")]
+    base = [m for m in METHODS if m not in SIZE_VARIANTS and not METHODS[m].get("filtered") and not METHODS[m].get("cellpose")]
     try:
         part = json.loads(methods_file(out, name).read_text(encoding="utf-8"))
         return part.get("version", 0) >= MASK_VERSION and all(mask_file(out, name, k).exists() for k in method_keys(base))
@@ -740,6 +746,62 @@ def square_numbers(out: Path, parts: dict[str, dict]) -> tuple[dict[str, dict], 
     return humans, frames
 
 
+def cpself_done(out: Path, name: str) -> bool:
+    try:
+        counts = json.loads(methods_file(out, name).read_text(encoding="utf-8"))["counts"]
+        return all(f"cpself-{k}" in counts and mask_file(out, name, f"cpself-{k}").exists() for k in METHODS["cpself"]["ks"])
+    except Exception:
+        return False
+
+
+def run_cpself(name: str, out: str) -> str:
+    """The self-trained Cellpose method for one section: its masks (in the section) as outlines, side and region, at each
+    signal threshold, into parts/masks/ and the section's counts."""
+    from scipy import ndimage
+    from microscopy_viewer import junction_analysis as ja
+
+    out = Path(out)
+    sid = short(name)
+    t = pd.read_parquet(CELLPOSE_SELF / f"{sid}.parquet")
+    t = t[t["in_section"]].reset_index(drop=True)
+    labels = np.load(CELLPOSE_SELF / f"{sid}.npz")["labels"]
+    part = json.loads(part_file(out, name).read_text(encoding="utf-8"))
+    voxel, f = float(part["voxel"]), int(part["f"])
+    target = methods_file(out, name)
+    summary = json.loads(target.read_text(encoding="utf-8"))
+    info = json.loads((RUN / "cells" / f"{name}.json").read_text(encoding="utf-8"))
+    line = np.asarray(info["line"], float) if info.get("line") else None
+    sign = summary.get("sign")
+    boxes = ndimage.find_objects(labels)
+    rings = []
+    for lab in t["label"].astype(int):
+        box = boxes[lab - 1] if 0 < lab <= len(boxes) else None
+        rings.append(outline(labels[box] == lab, box[0].start, box[1].start, voxel, f) if box is not None else [])
+    shapes = pd.DataFrame({"area": t["area"], "y": t["y"], "x": t["x"], "rings": rings})
+    yx = shapes[["y", "x"]].to_numpy(float)
+    shapes["away"] = sides.away(yx, line, sign) if sign is not None and len(yx) else np.full(len(yx), np.nan)
+    shapes["side"] = np.where(np.isnan(shapes["away"]), -1, (shapes["away"] > 0).astype(int))
+    if info.get("region_file") and len(yx):
+        band = ja.read_labels(RUN / info["region_file"]) > 0
+        rows = np.clip(np.round(yx[:, 0] / voxel).astype(int), 0, band.shape[0] - 1)
+        cols = np.clip(np.round(yx[:, 1] / voxel).astype(int), 0, band.shape[1] - 1)
+        shapes["reg"] = band[rows, cols]
+    else:
+        shapes["reg"] = False
+    for k in METHODS["cpself"]["ks"]:
+        key = f"cpself-{k}"
+        sel = shapes[(t["snr"] >= k).to_numpy()]
+        a = sel["away"].to_numpy(float)
+        has_line = sign is not None
+        summary["counts"][key] = {"n": int(len(sel)), "reg": int(sel["reg"].astype(bool).sum()),
+                                  "crossed": int((a > 0).sum()) if has_line else None,
+                                  "home": int((a <= 0).sum()) if has_line else None,
+                                  "area2": int((a >= AREA_2_UM).sum()) if has_line else None, "thr": float(k)}
+        write_mask_js(mask_file(out, name, key), sid, key, sel)
+    target.write_text(json.dumps(_clean(summary), separators=(",", ":")), encoding="utf-8")
+    return f"{sid}: cpself-5 {summary['counts']['cpself-5']['n']}"
+
+
 def apply_object_filter(out: Path, names) -> int:
     """The ``gfilt`` method: of each section's ``gauss3-8`` objects those the object map's filter kept (the same order),
     written as their outline file and counts; nothing when no filter has been saved."""
@@ -888,6 +950,9 @@ def main(argv: list[str]) -> int:
     todo = [n for n in table["name"] if masks_done(out, n) and not sizes_done(out, n)][:limit]
     pool_run("variants (objects > 10, > 5, > 3 µm²; SD pooled over all sections, over the slide)", run_sizes, todo, out)
     apply_object_filter(out, table["name"])      # the object map's filter, when one has been saved (object_filter.py)
+    if "cpself" in METHODS:                      # the self-trained Cellpose, for the sections it has run on
+        todo = [n for n in table["name"] if (CELLPOSE_SELF / f"{short(n)}.parquet").exists() and not cpself_done(out, n)][:limit]
+        pool_run("Cellpose self-trained", run_cpself, todo, out, every=25)
     n = assemble(out, table)
     print(f"written {out / 'data.json'}: {n} sections", flush=True)
     import objects_data                         # every counted object, for the figure builder (objects.js)
