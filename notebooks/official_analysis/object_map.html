@@ -52,6 +52,7 @@ td:first-child, th:first-child { text-align: left; }
       <button id="tPan" class="on" title="drag to pan (or hold space)">pan</button>
       <button id="tLasso" title="draw round objects to select them (or drag with Shift)">lasso</button>
       <label>colour <select id="colour"></select></label>
+      <label id="hlWrap" style="display:none">highlight <select id="hl"></select></label>
       <label title="Outline size in screen pixels per µm of the object. Outlines are drawn once few enough objects are in view (zoom in); the size does not change with zoom, so zooming in spreads them apart.">outline px/µm <input type="range" id="glyph" min="0.3" max="4" step="0.1" value="1.2"></label>
       <label><input type="checkbox" id="showExcl" checked> show excluded</label>
       <button id="tFit" title="fit (0)">fit</button>
@@ -155,6 +156,22 @@ const CAT = {
   dotted: { name: "annotators who dotted it (squares)", f: (i) => ["#3a3a40", "#e03131", "#fab005", "#94d82d", "#2f9e44"][Math.min(C.dotted[i] + 1, 4)],
     legend: [["#e03131", "in a square, dotted by none"], ["#fab005", "1"], ["#94d82d", "2"], ["#2f9e44", "3+"], ["#3a3a40", "not in a square"]] },
 };
+// sections and slides: many groups, each a distinct hue (golden angle), the highlighted one alone when one is picked
+const SLIDES = [...new Set(SEC.map((s) => s.slide))].sort();
+const SLIDE_OF = SEC.map((s) => SLIDES.indexOf(s.slide));
+const EXPS = [...new Set(SEC.map((s) => s.experiment))].sort((a, b) => +a - +b);
+const hue = (k) => "hsl(" + ((k * 137.508) % 360).toFixed(1) + ",75%," + (52 + (k % 3) * 9) + "%)";
+let HL = -1;                                         // the highlighted section or slide (index), -1 none
+function groupOf(i) { return colourKey === "section" ? C.sec[i] : SLIDE_OF[C.sec[i]]; }
+CAT.section = { name: "sample (section)", f: (i) => (HL < 0 ? hue(C.sec[i]) : C.sec[i] === HL ? "#ffd43b" : "#2b2b30"), legend: [] };
+CAT.slide = { name: "slide", f: (i) => (HL < 0 ? hue(SLIDE_OF[C.sec[i]]) : SLIDE_OF[C.sec[i]] === HL ? "#ffd43b" : "#2b2b30"), legend: [] };
+CAT.experiment = { name: "experiment", f: (i) => ["#4dabf7", "#ffa94d", "#b197fc", "#63e6be"][EXPS.indexOf(SEC[C.sec[i]].experiment) % 4],
+  legend: EXPS.map((e, j) => [["#4dabf7", "#ffa94d", "#b197fc", "#63e6be"][j % 4], "experiment " + e]) };
+function fillHighlight() {
+  const items = colourKey === "section" ? SEC.map((s, j) => [j, s.id + " (" + s.genotype + ", " + s.slide + ")"]) : SLIDES.map((sl, j) => [j, sl]);
+  $("hl").innerHTML = "<option value='-1'>none (all coloured)</option>" + items.map(([j, t]) => "<option value='" + j + "'>" + t + "</option>").join("");
+  $("hl").value = String(HL);
+}
 let colourKey = "kept", colourRange = null;
 function colourOf(i) {
   if (CAT[colourKey]) return CAT[colourKey].f(i);
@@ -162,13 +179,22 @@ function colourOf(i) {
   return ramp((v - colourRange[0]) / (colourRange[1] - colourRange[0] || 1));
 }
 function setColour(k) {
+  if (k !== colourKey) HL = -1;
   colourKey = k;
+  const grouped = k === "section" || k === "slide";
+  $("hlWrap").style.display = grouped ? "" : "none";
+  if (grouped) fillHighlight();
   if (!CAT[k]) {
     const vals = Float32Array.from(C[k], (v) => (LOGF.has(k) ? Math.log1p(Math.max(v, 0)) : v)).filter(Number.isFinite).sort();
     colourRange = [vals[Math.floor(vals.length * 0.02)], vals[Math.floor(vals.length * 0.98)]];
     const back = (v) => (LOGF.has(k) ? Math.expm1(v) : v);
     $("legend").innerHTML = LABELS[k] + ": <i style='background:" + RAMP[0] + "'></i>" + back(colourRange[0]).toPrecision(3) +
       "<i style='background:" + RAMP[4] + "'></i>" + back(colourRange[1]).toPrecision(3) + " (2nd–98th percentile" + (LOGF.has(k) ? ", log scale" : "") + ")";
+  } else if (grouped) {
+    const n = k === "section" ? SEC.length : SLIDES.length;
+    $("legend").innerHTML = HL < 0 ? n + " " + (k === "section" ? "sections" : "slides") + ", one hue each (hover to name; pick one under highlight)"
+      : "<i style='background:#ffd43b'></i>" + (k === "section" ? SEC[HL].id + " (" + SEC[HL].genotype + ", " + SEC[HL].slide + ")" : SLIDES[HL]) +
+        " · " + (() => { let c = 0; for (let i = 0; i < N; i++) if (groupOf(i) === HL) c++; return c.toLocaleString("en-US"); })() + " objects";
   } else $("legend").innerHTML = CAT[k].legend.map(([c, t]) => "<i style='background:" + c + "'></i>" + t).join("");
   draw();
 }
@@ -189,8 +215,11 @@ function draw() {
   const outlines = visible <= OUTLINE_MAX;                      // outlines once few enough objects are in view
   const umPerPx = 1 / g;
   let drawn = 0;
+  const hlOn = HL >= 0 && (colourKey === "section" || colourKey === "slide");     // the highlighted group drawn last, on top
+  for (let pass = 0; pass < (hlOn ? 2 : 1); pass++)
   for (let i = 0; i < N; i++) {
     if (!KEEP[i] && !showEx) continue;
+    if (hlOn && (groupOf(i) === HL) !== (pass === 1)) continue;
     const x = sx(i), y = sy(i);
     if (x < -40 || y < -40 || x > W + 40 || y > H + 40) continue;
     const col = colourOf(i);
@@ -284,7 +313,7 @@ function hover(x, y, ev) {
   for (let i = 0; i < N; i++) { const dx = sx(i) - x, dy = sy(i) - y, d = dx * dx + dy * dy; if (d < bd && (KEEP[i] || $("showExcl").checked)) { bd = d; best = i; } }
   if (best < 0) { tip.style.display = "none"; return; }
   const s = SEC[C.sec[best]], i = best;
-  tip.innerHTML = "<b>" + s.id + "</b> " + s.genotype + " e" + s.experiment + " · object " + C.index[i] + "<br>" +
+  tip.innerHTML = "<b>" + s.id + "</b> " + s.genotype + " e" + s.experiment + " · " + s.slide + " · object " + C.index[i] + "<br>" +
     (C.side[i] === 1 ? "crossed" : C.side[i] === 0 ? "home" : "no line") + (C.reg[i] ? ", in the region" : "") +
     (C.dotted[i] >= 0 ? "<br>in a count square: dotted by " + C.dotted[i] + " of " + M.squares.annotators : "") +
     "<br>area " + fmt(C.area[i], 1) + " µm², circularity " + fmt(C.circularity[i]) + ", aspect " + fmt(C.aspect[i]) +
@@ -373,6 +402,7 @@ $("bReset").onclick = () => { if (!confirm("Clear every exclusion and range (bac
 // ---------------------------------------------------------------- start
 $("colour").innerHTML = Object.entries(CAT).map(([k, c]) => "<option value='" + k + "'>" + c.name + "</option>").join("") + featOptions("");
 $("colour").onchange = () => setColour($("colour").value);
+$("hl").onchange = () => { HL = +$("hl").value; setColour(colourKey); };
 $("glyph").oninput = draw; $("showExcl").onchange = draw;
 document.addEventListener("keydown", (ev) => { if (ev.target.tagName === "INPUT") return; if (ev.key === "0") fit(); if (ev.key === "l") setMode("lasso"); if (ev.key === "p") setMode("pan"); });
 window.addEventListener("resize", resize);
