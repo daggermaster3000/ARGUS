@@ -258,7 +258,11 @@ const F = [
   field("sample", "Sample (section)", SEC.map((s) => s.id), (i) => C.sec[i], null, false),
 ];
 const FBY = Object.fromEntries(F.map((f) => [f.key, f]));
-const FEATS = M.features;
+// the measurements, then the principal components (histograms, distributions, colour; not keep rules: the counting
+// filter works from the stored measurements)
+const PCS = [1, 2, 3, 4, 5].filter((j) => C["pc" + j]).map((j) => "pc" + j);
+for (const [j, k] of PCS.entries()) LABELS[k] = "PC" + (j + 1) + (M.pca ? " (" + (100 * M.pca.explained[j]).toFixed(0) + " % of variance)" : "");
+const FEATS = [...M.features, ...PCS];
 
 // ---------------------------------------------------------------- state
 const STORE = "object-map.state";
@@ -640,7 +644,11 @@ function drawRules() {
   for (const el of $("rules").querySelectorAll("button[data-del]")) el.onclick = () => { RULES.splice(+el.dataset.del, 1); drawRules(); update(); };
 }
 $("bBrushRules").onclick = () => {
+  const pcs = Object.keys(BRUSH).filter((k) => k.startsWith("pc"));
+  if (pcs.length) alert("A range on " + pcs.map((k) => k.toUpperCase()).join(", ") + " cannot become a keep rule (the counting filter works from the " +
+    "measured features). Use \"exclude selected\" for it instead; the other ranges are turned into rules.");
   for (const [k, [lo, hi]] of Object.entries(BRUSH)) {
+    if (k.startsWith("pc")) continue;
     const r = RULES.find((x) => x.f === k); const v = { f: k, lo: +lo.toPrecision(4), hi: +hi.toPrecision(4) };
     if (r) Object.assign(r, v); else RULES.push(v);
     delete BRUSH[k];
@@ -801,7 +809,8 @@ $("emb").onchange = setEmbedding; $("pcx").onchange = setEmbedding; $("pcy").onc
 $("dFeat").innerHTML = FEATS.map((k) => "<option value='" + k + "'>" + (LABELS[k] || k) + "</option>").join("");
 $("dGroup").innerHTML = "<option value=''>(none)</option>" + F.map((f) => "<option value='" + f.key + "'>" + f.name + "</option>").join("");
 $("dFeat").value = "area"; $("dGroup").value = "genotype"; $("dLog").checked = true;
-$("dFeat").onchange = drawDist; $("dGroup").onchange = drawDist; $("dLog").onchange = drawDist; wireSeg("dWhich"); wireSeg("dKind");
+$("dFeat").onchange = () => { if ($("dFeat").value.startsWith("pc")) $("dLog").checked = false; drawDist(); };   // PCs can be negative
+$("dGroup").onchange = drawDist; $("dLog").onchange = drawDist; wireSeg("dWhich"); wireSeg("dKind");
 $("tDist").onclick = () => { distOpen = !distOpen; $("dist").classList.toggle("open", distOpen); $("tDist").classList.toggle("on", distOpen); setTimeout(() => { resize(); drawDist(); }, 230); };
 $("sub").textContent = M.key + " · " + SEC.length + " sections · UMAP of " + M.umap_features.length + " features · " + M.generated;
 load(); buildCats(); buildFeats(); drawRules(); computeKeep(); effect(); computeSel(); setColour("status"); resize();
