@@ -49,12 +49,32 @@ aside { background: var(--panel); overflow-y: auto; scrollbar-width: thin; scrol
 .hist canvas { width: 100%; height: 56px; display: block; cursor: crosshair; border-radius: 6px; background: #0e1117; }
 .hrange { display: flex; justify-content: space-between; color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; margin-top: 3px; }
 .hrange b { color: var(--sel); font-weight: 600; }
-#mapWrap { position: relative; overflow: hidden; background: radial-gradient(ellipse at 50% 40%, #121726 0%, #0b0d12 70%); }
+#mapWrap { display: flex; flex-direction: column; min-width: 0; overflow: hidden; background: radial-gradient(ellipse at 50% 40%, #121726 0%, #0b0d12 70%); }
+#stage { position: relative; flex: 1 1 auto; min-height: 0; }
+#dist { flex: 0 0 auto; height: 0; overflow: hidden; border-top: 1px solid var(--line); background: var(--panel); transition: height .2s; }
+#dist.open { height: 380px; display: flex; flex-direction: column; }
+#dist .dbar { flex: 0 0 auto; }
+#dist .dbar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 8px 14px; color: var(--mute); }
+#dist select { height: 28px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink); font: inherit; padding: 0 6px; }
+#dist .seg button { height: 28px; padding: 0 10px; border: 1px solid var(--line); background: var(--panel2); color: var(--mute); font: inherit; cursor: pointer; }
+#dist .seg button:first-child { border-radius: 7px 0 0 7px; } #dist .seg button:last-child { border-radius: 0 7px 7px 0; }
+#dist .seg button.on { color: #0b0d12; background: linear-gradient(135deg, var(--accent), var(--accent2)); border-color: transparent; }
+#distPlot { flex: 1 1 auto; min-height: 0; }
+.pcbar { display: grid; grid-template-columns: 34px 1fr 44px; gap: 6px; align-items: center; font-size: 12px; padding: 1px 0; color: var(--mute); cursor: pointer; }
+.pcbar .t { height: 7px; border-radius: 4px; background: #222836; overflow: hidden; }
+.pcbar .t i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+.pcbar.on { color: var(--ink); font-weight: 600; }
+.load { display: grid; grid-template-columns: 1fr 120px 44px; gap: 6px; align-items: center; font-size: 12px; padding: 1px 0; color: #c9cfdb; }
+.load .t { position: relative; height: 8px; }
+.load .t::before { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--line); }
+.load .t i { position: absolute; top: 0; height: 100%; border-radius: 3px; }
+.load span:last-child { text-align: right; color: var(--mute); font-variant-numeric: tabular-nums; }
+.subh { font-size: 11px; color: var(--faint); margin: 10px 0 4px; }
 #map { display: block; width: 100%; height: 100%; cursor: grab; }
 #map.lasso { cursor: crosshair; }
 .float { position: absolute; background: rgba(18, 21, 28, .88); backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: var(--radius);
   box-shadow: 0 8px 28px rgba(0, 0, 0, .45); }
-#tools { left: 14px; top: 14px; display: flex; gap: 4px; padding: 5px; align-items: center; }
+#tools { left: 14px; top: 14px; display: flex; flex-wrap: wrap; gap: 4px; padding: 5px; align-items: center; max-width: calc(100% - 320px); white-space: nowrap; }
 .tool { height: 32px; min-width: 32px; padding: 0 10px; border-radius: 7px; border: 1px solid transparent; background: transparent; color: var(--mute); font: inherit; cursor: pointer; }
 .tool:hover { color: var(--ink); background: var(--panel2); }
 .tool.on { color: #0b0d12; background: linear-gradient(135deg, var(--accent), var(--accent2)); }
@@ -114,7 +134,8 @@ td:first-child, th:first-child { text-align: left; color: var(--mute); }
     <div id="feats"></div>
   </aside>
   <div id="mapWrap">
-    <canvas id="map" aria-label="UMAP of AF488 mask objects"></canvas>
+   <div id="stage">
+    <canvas id="map" aria-label="map of AF488 mask objects (UMAP or PCA)"></canvas>
     <div id="tools" class="float">
       <button class="tool on" id="tPan" title="pan (P) — drag to move, wheel to zoom">✥</button>
       <button class="tool" id="tLasso" title="lasso (L) — draw round objects to select them; Shift-drag works in pan mode too">◌ lasso</button>
@@ -127,12 +148,38 @@ td:first-child, th:first-child { text-align: left; color: var(--mute); }
       <label title="Outline size, screen pixels per µm of the object">outline <input type="range" id="glyph" min="0.3" max="4" step="0.1" value="1.2"></label>
       <label title="Draw the objects the filter excludes (faint)"><input type="checkbox" id="showExcl" checked> excluded</label>
       <button class="tool" id="tFit" title="fit (0)">⤢</button>
+      <span class="tsep"></span>
+      <label title="Where each object is placed: the UMAP (neighbourhoods), or two principal components of the same measurements (straight axes of variation)">map <select id="emb"><option value="umap">UMAP</option><option value="pca">PCA</option></select></label>
+      <label class="pcsel" style="display:none">x <select id="pcx"></select></label>
+      <label class="pcsel" style="display:none">y <select id="pcy"></select></label>
+      <label class="pcsel" style="display:none" title="Draw each measurement's loading on the two components as an arrow from the origin (biplot)"><input type="checkbox" id="arrows" checked> loadings</label>
+      <button class="tool" id="tDist" title="distributions of a measurement by group">▤ distributions</button>
     </div>
     <div id="legend" class="float"></div>
     <div id="hint" class="float">wheel: zoom · drag: pan · Shift-drag or lasso: select · click an object: open its section</div>
     <div id="tip" class="float"></div>
+   </div>
+   <div id="dist" aria-label="distributions">
+    <div class="dbar">
+      <label>measurement <select id="dFeat"></select></label>
+      <label>by <select id="dGroup"></select></label>
+      <span class="seg" id="dWhich"><button data-v="sel" class="on" title="the selected objects (all shown when nothing is selected)">selection</button><button data-v="shown" title="every object shown">all shown</button></span>
+      <span class="seg" id="dKind"><button data-v="violin" class="on">violin</button><button data-v="box">box</button><button data-v="hist">histogram</button></span>
+      <label><input type="checkbox" id="dLog"> log axis</label>
+      <span id="dNote" style="color:var(--faint)"></span>
+    </div>
+    <div id="distPlot"></div>
+   </div>
   </div>
   <aside id="right" aria-label="selection and effect">
+    <div class="card" id="pcaCard" style="display:none">
+      <h2>Axes of variation (PCA)</h2>
+      <div class="subh">variance explained · click a component to put it on x (Shift: y)</div>
+      <div id="pcVar"></div>
+      <div class="subh" id="ldxTitle"></div><div id="ldx"></div>
+      <div class="subh" id="ldyTitle"></div><div id="ldy"></div>
+      <p class="note">PCA of the same 20 measurements the UMAP uses (skewed ones on a log scale; each centred on its median and scaled by its interquartile range; clipped at ±8). A loading is the measurement's weight on the component: objects far along the arrow have more of it.</p>
+    </div>
     <div class="card">
       <h2>Selection</h2>
       <div class="big" id="selBig">–</div>
@@ -164,6 +211,7 @@ td:first-child, th:first-child { text-align: left; color: var(--mute); }
     </div>
   </aside>
 </main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.34.0/plotly.min.js"></script>
 <script src="object_map.js"></script>
 <script>
 "use strict";
@@ -259,15 +307,27 @@ function computeSel() {
 const cv = $("map"), ctx = cv.getContext("2d");
 let view = { x: 0, y: 0, k: 1 }, W = 0, H = 0, DPR = 1;
 function resize() { DPR = window.devicePixelRatio || 1; W = cv.clientWidth; H = cv.clientHeight; cv.width = W * DPR; cv.height = H * DPR; draw(); }
+// the map's coordinates: the UMAP, or two principal components
+let EX = C.u, EY = C.v;
+const HAS_PCA = !!(M.pca && C.pc1);
+function setEmbedding() {
+  const pca = $("emb").value === "pca" && HAS_PCA;
+  EX = pca ? C["pc" + $("pcx").value] : C.u; EY = pca ? C["pc" + $("pcy").value] : C.v;
+  document.querySelectorAll(".pcsel").forEach((el) => (el.style.display = pca ? "" : "none"));
+  $("pcaCard").style.display = pca ? "" : "none";
+  if (pca) drawPca();
+  try { localStorage.setItem("object-map.emb", JSON.stringify([$("emb").value, $("pcx").value, $("pcy").value])); } catch (e) { /* storage blocked */ }
+  fit();
+}
 function fit() {
   let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
-  for (let i = 0; i < N; i++) if (DISP[i]) { const u = C.u[i], v = C.v[i]; if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; }
+  for (let i = 0; i < N; i++) if (DISP[i]) { const u = EX[i], v = EY[i]; if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; }
   if (!Number.isFinite(u0)) return;
   view.k = 0.86 * Math.min(W / Math.max(u1 - u0, 1e-6), H / Math.max(v1 - v0, 1e-6));
   view.x = (u0 + u1) / 2 - W / 2 / view.k; view.y = (v0 + v1) / 2 + H / 2 / view.k;
   draw();
 }
-const sx = (i) => (C.u[i] - view.x) * view.k, sy = (i) => (view.y - C.v[i]) * view.k;
+const sx = (i) => (EX[i] - view.x) * view.k, sy = (i) => (view.y - EY[i]) * view.k;
 const RAMP = ["#6a5cff", "#3d8bff", "#21c3d6", "#2ee69b", "#b8f05a", "#ffd166", "#ff7a59"];          // bright on the dark map
 function rampRGB(t) {
   t = Math.max(0, Math.min(1, t)) * (RAMP.length - 1); const i = Math.min(Math.floor(t), RAMP.length - 2), f = t - i;
@@ -367,6 +427,7 @@ function draw() {
     ctx.globalAlpha = 1; ctx.shadowBlur = 0;
   }
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if ($("emb").value === "pca" && HAS_PCA && $("arrows").checked) drawArrows();
   if (lassoPts.length > 1) {
     ctx.beginPath(); lassoPts.forEach(([x, y], j) => (j ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
     ctx.fillStyle = "rgba(124,140,255,0.10)"; ctx.fill();
@@ -639,8 +700,86 @@ $("fImport").onchange = async () => {
 };
 $("bReset").onclick = () => { if (!confirm("Clear every exclusion and range (back to the counting method)?")) return; EXCL.fill(0); RULES = [{ f: "area", lo: 20, hi: null }]; drawRules(); update(); };
 
+// ---------------------------------------------------------------- PCA: variance, loadings, biplot arrows
+const PCN = HAS_PCA ? M.pca.loadings[Object.keys(M.pca.loadings)[0]].length : 0;
+function drawPca() {
+  const ex = M.pca.explained, x = +$("pcx").value, y = +$("pcy").value, top = Math.max(...ex);
+  $("pcVar").innerHTML = ex.map((v, j) => "<div class='pcbar" + (j + 1 === x || j + 1 === y ? " on" : "") + "' data-pc='" + (j + 1) + "'><span>PC" + (j + 1) +
+    "</span><span class='t'><i style='width:" + (100 * v / top).toFixed(1) + "%'></i></span><span>" + (100 * v).toFixed(1) + " %</span></div>").join("");
+  for (const el of $("pcVar").querySelectorAll(".pcbar")) el.onclick = (ev) => {
+    const pc = +el.dataset.pc; if (pc > PCN) return;
+    $(ev.shiftKey ? "pcy" : "pcx").value = String(pc); setEmbedding();
+  };
+  const block = (pc) => {
+    const rows = Object.entries(M.pca.loadings).map(([f, v]) => [f, v[pc - 1]]).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 10);
+    const m = Math.max(...rows.map((r) => Math.abs(r[1])));
+    return rows.map(([f, v]) => "<div class='load'><span>" + (LABELS[f] || f) + "</span><span class='t'><i style='" + (v >= 0 ? "left:50%;" : "right:50%;") +
+      "width:" + (50 * Math.abs(v) / m).toFixed(1) + "%;background:" + (v >= 0 ? "#2ee6c5" : "#ff7aa8") + "'></i></span><span>" + v.toFixed(2) + "</span></div>").join("");
+  };
+  $("ldxTitle").textContent = "loadings on PC" + x + " (x) — " + (100 * ex[x - 1]).toFixed(1) + " % of the variance";
+  $("ldyTitle").textContent = "loadings on PC" + y + " (y) — " + (100 * ex[y - 1]).toFixed(1) + " % of the variance";
+  $("ldx").innerHTML = block(x); $("ldy").innerHTML = block(y);
+}
+function drawArrows() {
+  const x = +$("pcx").value - 1, y = +$("pcy").value - 1, L = M.pca.loadings;
+  const ox = (0 - view.x) * view.k, oy = (view.y - 0) * view.k;
+  const rows = Object.entries(L).map(([f, v]) => [f, v[x], v[y]]).sort((a, b) => Math.hypot(b[1], b[2]) - Math.hypot(a[1], a[2])).slice(0, 10);
+  const m = Math.max(...rows.map((r) => Math.hypot(r[1], r[2]))), len = 0.32 * Math.min(W, H) / (m || 1);
+  ctx.save(); ctx.lineWidth = 1.6; ctx.font = "12px Inter, system-ui, sans-serif";
+  for (const [f, a, b] of rows) {
+    const ex = ox + a * len, ey = oy - b * len, ang = Math.atan2(ey - oy, ex - ox);
+    ctx.strokeStyle = "rgba(255,209,102,0.9)"; ctx.fillStyle = "rgba(255,209,102,0.95)";
+    ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ex, ey); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(ex - 8 * Math.cos(ang - 0.4), ey - 8 * Math.sin(ang - 0.4)); ctx.lineTo(ex - 8 * Math.cos(ang + 0.4), ey - 8 * Math.sin(ang + 0.4)); ctx.closePath(); ctx.fill();
+    const t = LABELS[f] || f, tw = ctx.measureText(t).width, lx = ex + (Math.cos(ang) >= 0 ? 6 : -6 - tw), ly = ey + (Math.sin(ang) >= 0 ? 14 : -6);
+    ctx.fillStyle = "rgba(11,13,18,0.75)"; ctx.fillRect(lx - 3, ly - 12, tw + 6, 16);
+    ctx.fillStyle = "#ffe5a3"; ctx.fillText(t, lx, ly);
+  }
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- distributions (Plotly): a measurement by group
+let distOpen = false, distTimer = 0;
+function segValue(id) { return $(id).querySelector("button.on").dataset.v; }
+function wireSeg(id) { for (const b of $(id).querySelectorAll("button")) b.onclick = () => { $(id).querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); drawDist(); }; }
+function drawDist() {
+  if (!distOpen) return;
+  if (!window.Plotly) { $("dNote").textContent = "plots need plotly.js (internet, cdnjs) — not loaded"; return; }
+  const k = $("dFeat").value, gk = $("dGroup").value, f = FBY[gk], which = segValue("dWhich"), kind = segValue("dKind"), logy = $("dLog").checked;
+  const nG = f ? f.labels.length : 1, vals = Array.from({ length: nG }, () => []);
+  for (let t = 0; t < N; t++) {
+    const i = ORDER[t];
+    if (!DISP[i] || (which === "sel" && !(allSel || SEL[i] === 1))) continue;
+    const v = C[k][i]; if (!Number.isFinite(v) || (logy && v <= 0)) continue;
+    vals[f ? f.idx[i] : 0].push(v);
+  }
+  let groups = vals.map((v, j) => ({ j, v })).filter((g) => g.v.length);
+  const many = groups.length > 24;
+  if (many) groups = groups.sort((a, b) => b.v.length - a.v.length).slice(0, 24);
+  const CAP = 15000, traces = [];
+  for (const g of groups) {
+    let v = g.v.length > CAP ? g.v.filter((_, n) => n % Math.ceil(g.v.length / CAP) === 0) : g.v;     // the draw order is shuffled: an even sample
+    if (kind === "hist" && logy) v = v.map(Math.log10);                    // histograms bin log₁₀ values (Plotly bins a log axis linearly)
+    const name = (f ? f.labels[g.j] : "all") + " (" + g.v.length.toLocaleString("en-US") + ")", col = f ? f.colours[g.j] : "#7c8cff";
+    if (kind === "violin") traces.push({ type: "violin", y: v, name, line: { color: col, width: 1.2 }, fillcolor: col + "55", opacity: 1, points: false,
+      box: { visible: true, width: 0.12, fillcolor: "#0b0d12", line: { color: col } }, meanline: { visible: false }, spanmode: "hard", scalemode: "width" });
+    else if (kind === "box") traces.push({ type: "box", y: v, name, marker: { color: col }, line: { color: col, width: 1.2 }, fillcolor: col + "33", boxpoints: false });
+    else traces.push({ type: "histogram", x: v, name, opacity: 0.55, histnorm: "probability density", nbinsx: 70, marker: { color: col } });
+  }
+  const ax = { gridcolor: "#222836", zerolinecolor: "#2a3040", color: "#8b93a7", linecolor: "#2a3040" };
+  const layout = { paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: { family: "Inter, system-ui, sans-serif", color: "#c9cfdb", size: 12 },
+    margin: { l: 60, r: 16, t: 8, b: kind === "hist" ? 40 : 70 }, showlegend: kind === "hist", legend: { orientation: "h", y: 1.08 }, barmode: "overlay",
+    xaxis: { ...ax, ...(kind === "hist" ? { title: { text: (logy ? "log₁₀ " : "") + (LABELS[k] || k) } } : { tickangle: groups.length > 6 ? -35 : 0 }) },
+    yaxis: { ...ax, ...(kind === "hist" ? { title: { text: "density" } } : { title: { text: LABELS[k] || k }, type: logy ? "log" : "linear" }) } };
+  layout.height = Math.max(200, $("distPlot").clientHeight); layout.autosize = true;
+  Plotly.react("distPlot", traces, layout, { displaylogo: false, responsive: true, modeBarButtonsToRemove: ["select2d", "lasso2d"] });
+  const n = groups.reduce((a, g) => a + g.v.length, 0);
+  $("dNote").textContent = n.toLocaleString("en-US") + " objects" + (many ? " · the 24 largest groups" : "") + (groups.some((g) => g.v.length > CAP) ? " · violins from ≤ 15,000 per group" : "");
+}
+const distSoon = () => { if (!distOpen) return; clearTimeout(distTimer); distTimer = setTimeout(drawDist, 150); };
+
 // ---------------------------------------------------------------- refresh cycle
-function refresh() { computeSel(); drawCats(); for (const k of FEATS) drawHist(k); showSelection(); draw(); }
+function refresh() { computeSel(); drawCats(); for (const k of FEATS) drawHist(k); showSelection(); draw(); distSoon(); }
 function update() { computeKeep(); save(); effect(); refresh(); }
 $("drawMode").onchange = () => { try { localStorage.setItem("object-map.draw", $("drawMode").value); } catch (e) { /* storage blocked */ } draw(); };
 try { const d = localStorage.getItem("object-map.draw"); if (d) $("drawMode").value = d; } catch (e) { /* none */ }
@@ -652,8 +791,22 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "0") fit(); else if (ev.key === "l") setMode("lasso"); else if (ev.key === "p") setMode("pan"); else if (ev.key === "Escape") { clearSelection(); refresh(); }
 });
 window.addEventListener("resize", resize);
+new ResizeObserver(() => resize()).observe($("stage"));
+// map switch and distributions
+if (HAS_PCA) {
+  const opts = Array.from({ length: PCN }, (_, j) => "<option value='" + (j + 1) + "'>PC" + (j + 1) + " (" + (100 * M.pca.explained[j]).toFixed(0) + " %)</option>").join("");
+  $("pcx").innerHTML = opts; $("pcy").innerHTML = opts; $("pcx").value = "1"; $("pcy").value = "2";
+} else { $("emb").querySelector("option[value=pca]").disabled = true; }
+$("emb").onchange = setEmbedding; $("pcx").onchange = setEmbedding; $("pcy").onchange = setEmbedding; $("arrows").onchange = draw;
+$("dFeat").innerHTML = FEATS.map((k) => "<option value='" + k + "'>" + (LABELS[k] || k) + "</option>").join("");
+$("dGroup").innerHTML = "<option value=''>(none)</option>" + F.map((f) => "<option value='" + f.key + "'>" + f.name + "</option>").join("");
+$("dFeat").value = "area"; $("dGroup").value = "genotype"; $("dLog").checked = true;
+$("dFeat").onchange = drawDist; $("dGroup").onchange = drawDist; $("dLog").onchange = drawDist; wireSeg("dWhich"); wireSeg("dKind");
+$("tDist").onclick = () => { distOpen = !distOpen; $("dist").classList.toggle("open", distOpen); $("tDist").classList.toggle("on", distOpen); setTimeout(() => { resize(); drawDist(); }, 230); };
 $("sub").textContent = M.key + " · " + SEC.length + " sections · UMAP of " + M.umap_features.length + " features · " + M.generated;
-load(); buildCats(); buildFeats(); drawRules(); computeKeep(); effect(); computeSel(); setColour("status"); resize(); fit(); refresh();
+load(); buildCats(); buildFeats(); drawRules(); computeKeep(); effect(); computeSel(); setColour("status"); resize();
+try { const e = JSON.parse(localStorage.getItem("object-map.emb") || "null"); if (e && HAS_PCA) { $("emb").value = e[0]; $("pcx").value = e[1]; $("pcy").value = e[2]; } } catch (er) { /* none */ }
+setEmbedding(); refresh();
 </script>
 </body>
 </html>

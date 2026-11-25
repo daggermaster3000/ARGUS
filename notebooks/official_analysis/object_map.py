@@ -6,7 +6,9 @@ annotators dotted them (one-to-one, a dot and an object centroid within :data:`M
 can show whether a group the user excludes is one people did or did not count.
 
 The UMAP takes :data:`UMAP_FEATURES` (skewed ones log-transformed, :data:`LOG`), each scaled by its median and
-interquartile range; ``n_neighbors`` :data:`NEIGHBOURS`, ``min_dist`` :data:`MIN_DIST`, seed :data:`SEED`.
+interquartile range; ``n_neighbors`` :data:`NEIGHBOURS`, ``min_dist`` :data:`MIN_DIST`, seed :data:`SEED`. A PCA of the
+same scaled features (clipped to ±:data:`PCA_CLIP`) gives the first :data:`N_PCS` components as alternative map
+coordinates, with each component's share of the variance and its loadings (the axes of variation).
 
 Written into the section browser folder: ``object_map.js`` (``window.OBJECT_MAP``: columns as base64 little-endian
 float32 / int32, the outlines as one base64 byte string with offsets) and ``object_map.html``.
@@ -42,6 +44,8 @@ LOG = {"area", "perimeter", "aspect", "thickness", "skeleton", "width", "ends", 
 #: shown on the page (colour, filters, tooltip), in this order
 SHOWN = UMAP_FEATURES + ("major", "minor", "integrated", "signal_max", "away")
 NEIGHBOURS, MIN_DIST, SEED = 30, 0.1, 42
+N_PCS = 5                         #: principal components kept as map coordinates (variance and loadings: 10)
+PCA_CLIP = 8.0                    #: scaled values clipped to ±this before the PCA, so a few extreme objects do not set an axis
 MATCH_UM = 6.0                    #: an annotator's dot and an object centroid within this are the same cell
 # --------------------------------------------------------------------------
 
@@ -104,6 +108,10 @@ def main() -> int:
     emb = umap.UMAP(n_neighbors=NEIGHBOURS, min_dist=MIN_DIST, random_state=SEED, low_memory=True,
                     verbose=False).fit_transform(X).astype(np.float32)
     print(f"UMAP {time.perf_counter() - started:.0f} s", flush=True)
+    from sklearn.decomposition import PCA
+
+    pca = PCA(n_components=min(10, X.shape[1]), random_state=SEED).fit(np.clip(X, -PCA_CLIP, PCA_CLIP))
+    pcs = pca.transform(np.clip(X, -PCA_CLIP, PCA_CLIP))[:, :N_PCS].astype(np.float32)
     dots, tot = dotted(t)
     # the outlines as one byte string, with each object's start
     raw = [base64.b64decode(o) if o else b"" for o in t["outline"]]
@@ -115,9 +123,12 @@ def main() -> int:
                       "length_um": s["length_um"], "crossed_8": (s["counts"].get("gauss-8") or {}).get("crossed"),
                       "n_8": (s["counts"].get("gauss-8") or {}).get("n")} for s in sections],
         "squares": tot,
+        "pca": {"explained": [round(float(v), 4) for v in pca.explained_variance_ratio_],
+                "loadings": {f: [round(float(pca.components_[j, i]), 4) for j in range(N_PCS)] for i, f in enumerate(UMAP_FEATURES)}},
         "cols": {
             "sec": b64(t["section"].map(sec_index).to_numpy(), "<i4"), "index": b64(t["index"].to_numpy(), "<i4"),
             "u": b64(emb[:, 0], "<f4"), "v": b64(emb[:, 1], "<f4"),
+            **{f"pc{j + 1}": b64(pcs[:, j], "<f4") for j in range(N_PCS)},
             "side": b64(t["side"].to_numpy(), "<i4"), "reg": b64(t["reg"].to_numpy(), "<i4"), "dotted": b64(dots, "<i4"),
             "x": b64(t["x"].to_numpy(), "<f4"), "y": b64(t["y"].to_numpy(), "<f4"),
             **{f: b64(t[f].to_numpy(float), "<f4") for f in SHOWN},
