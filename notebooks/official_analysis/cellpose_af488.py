@@ -44,11 +44,12 @@ sys.path.insert(0, str(HERE))
 import section_browser as sb  # noqa: E402
 
 # ---------------------------------------------------------------- Settings
-MODEL = "cpdino"
+#: the model: cpdino, or another (a path or a name in Cellpose's model folder) with --model <name>
+MODEL = sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else "cpdino"
 #: the image Cellpose sees: "two" AF488 + nuclear stain (it then finds every cell; positivity is the SNR threshold),
 #: "af488" AF488 alone (it finds green cell bodies); chosen with --af488-only
 INPUT = "af488" if "--af488-only" in sys.argv else "two"
-OUT = sb.OUT / ("cellpose_af488" if INPUT == "two" else "cellpose_af488_only")
+OUT = sb.OUT / (("cellpose_af488" if INPUT == "two" else "cellpose_af488_only") + ("" if MODEL == "cpdino" else "_" + Path(MODEL).name))
 NORM_PCT = (1.0, 99.9)            #: each channel scaled to these percentiles of the section's tissue
 FLOW_THRESHOLD = 0.4
 CELLPROB_THRESHOLD = 0.0
