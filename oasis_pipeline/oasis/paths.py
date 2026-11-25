@@ -29,6 +29,8 @@ JUNCTIONS_HAND_DRAWN = ANNOTATIONS / "junctions_hand_drawn"
 COUNT_SQUARES = ANNOTATIONS / "count_squares"                  #: the blinded count squares (annotation_squares.py)
 SQUARES_KEY = COUNT_SQUARES / "key.csv"                       #: code → section, compartment, frame (µm)
 SQUARES_COUNTS = COUNT_SQUARES / "counts"                     #: square_counts_<annotator>.csv, as annotate.html exports
+OBJECT_FILTER = DATA / "counting" / "object_filter.parquet"    #: the object map's filter: per object (section, index) kept
+OBJECT_FILTER_META = DATA / "counting" / "object_filter.json"  #: its rules and hand exclusions
 
 # ---------------------------------------------------------------- outputs
 RERUN_SEGMENTATION = OUT / "segmentation"

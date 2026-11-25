@@ -4403,6 +4403,17 @@ function positivityMethods(key) {
     "to tissue), opened (10 µm) and closed (15 µm), pieces smaller than a tenth of the largest dropped, holes " +
     "filled.";
   const outside = (what) => inSection.replace("{what}", what);
+  const FEAT = { area: "area (µm²)", perimeter: "perimeter (µm)", circularity: "circularity", solidity: "solidity", extent: "extent",
+    eccentricity: "eccentricity", aspect: "aspect ratio", thickness: "thickness (µm)", skeleton: "skeleton length (µm)", width: "mean width (µm)",
+    ends: "skeleton end points", branches: "skeleton branch points", mean: "mean AF488", max: "maximum AF488", signal: "mean background-subtracted signal",
+    snr: "signal-to-noise ratio", contrast: "contrast to a 3–6 µm ring", on_nucleus: "share lying on a segmented nucleus", nuclei: "number of nuclei touched",
+    nucleus_cover: "cover of its main nucleus", major: "major axis (µm)", minor: "minor axis (µm)", integrated: "integrated AF488",
+    signal_max: "maximum signal", away: "distance past the junction interface (µm)" };
+  const filt = spec.filter ? " Objects were then filtered on measurements of their shape, intensity and overlap with segmented nuclei: " +
+    (spec.filter.rules.length ? "kept were objects with " + spec.filter.rules.map((r) => (FEAT[r.f] || r.f) + (r.lo !== null && r.hi !== null ? " between " + r.lo + " and " + r.hi
+      : r.lo !== null ? " ≥ " + r.lo : r.hi !== null ? " ≤ " + r.hi : " (any)")).join(", ") : "no feature range was applied") +
+    (spec.filter.n_hand ? "; " + spec.filter.n_hand.toLocaleString("en-US") + " objects were excluded by hand after selection of groups (such as neurites) on a UMAP " +
+      "of 20 of these measurements" : "") + " (" + spec.filter.n_kept.toLocaleString("en-US") + " of " + spec.filter.n_objects.toLocaleString("en-US") + " objects kept)." : "";
   if (m === "gauss") return "AF488⁺ cells were counted as objects of a mask of the AF488 channel: the maximum-intensity projection over z, " +
     "smoothed with a Gaussian (σ = 0.5 µm), less its local background (Gaussian, σ = 20 µm), and thresholded at the median + " +
     (spec.spread === "pooled" ? k + " robust standard deviations, the median being the section's tissue pixels' and the robust standard deviation " +
@@ -4410,7 +4421,7 @@ function positivityMethods(key) {
       : spec.spread === "slide" ? k + " robust standard deviations, the median being the section's tissue pixels' and the robust standard deviation " +
       "(1.4826 × median absolute deviation) the median of the own of every section on the same slide"
       : sd + " of the section's tissue pixels") + "; pixels above the threshold were kept inside the section's outline widened by 10 µm. The tissue " +
-    "and the outline were found in every channel (see below), so that tissue whose nuclear stain is dim was not left out. " + cleanup +
+    "and the outline were found in every channel (see below), so that tissue whose nuclear stain is dim was not left out. " + cleanup + filt +
     outside("Objects");
   if (m === "median") return "AF488⁺ cells were counted as objects of a mask of the AF488 channel: the maximum-intensity projection over z, " +
     "less its local median (45 µm window, computed at 1/8 resolution), smoothed with a Gaussian (σ = 0.5 µm) and thresholded inside " +

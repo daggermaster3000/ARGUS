@@ -195,6 +195,13 @@ def build_counting(table: pd.DataFrame) -> None:
     say(f"counting: {n} files copied")
 
 
+def build_object_filter() -> None:
+    """The object map's filter (object_filter.py), when one has been saved: per object kept, and its rules."""
+    for f in ("object_filter.parquet", "object_filter.json"):
+        if (OUT / f).exists():
+            copy(OUT / f, PAPER / "data" / "counting" / f)
+
+
 def build_annotations() -> None:
     d = PAPER / "data" / "annotations"
     n = 0
@@ -339,7 +346,10 @@ Package built {built}.
   annotators' dots and the blinded count squares, a table and plots; zoom in for the full-resolution image
   and outlines. `figure_builder.html` beside it re-draws the paper's figures with any normalisation and writes the
   Methods text for them. Both pages can also count with a smaller size filter (objects > 10, > 5 or > 3 µm² instead of
-  > 20 µm²), to show what the filter does to the counts and the statistics.
+  > 20 µm²), to show what the filter does to the counts and the statistics. `object_map.html` beside them places every
+  object of the mask (8 SD, > 3 µm²) by a UMAP of its shape, intensity and nucleus measurements, draws each object's
+  outline, and shows what excluding a group (such as neurites) does to the counts; a saved filter
+  (`data/counting/object_filter.*`) becomes a method of both pages.
 - **Paper figures**: `figures/` (PDF, PNG, SVG); their tables in `results/tables/`.
 - **Methods**: `methods/METHODS.md`; the executed analysis notebooks in `methods/notebooks/` (`.html` to read).
 - **Re-run everything**: `pipeline/README.md`. In short, with Python 3.10:
@@ -455,6 +465,7 @@ def main(argv: list[str]) -> int:
     build_junction(table)
     build_counting(table)
     build_annotations()
+    build_object_filter()
     build_derived()
     build_pipeline()
     build_methods()

@@ -73,7 +73,10 @@ td:first-child, th:first-child { text-align: left; }
     <div id="effect"></div>
     <h2>Exclusions</h2>
     <div class="row"><button id="bExport">export JSON</button><button id="bImport">import JSON</button><input type="file" id="fImport" accept=".json" hidden><button id="bReset">reset all</button></div>
-    <p class="mute">Lasso exclusions are saved in this browser as you go. Export to keep them, or to hand them to the section browser and figure builder.</p>
+    <p class="mute">Lasso exclusions are saved in this browser as you go. To count with them: export, save the file as
+      <code>run_analysis_20261028/object_exclusions.json</code>, then run <code>python notebooks/official_analysis/object_filter.py</code> and
+      <code>python notebooks/official_analysis/section_browser.py</code>: the section browser and figure builder then offer
+      "AF488 mask … filtered on the object map" (8 SD), with its counts, statistics and Methods text.</p>
   </aside>
 </main>
 <script src="object_map.js"></script>

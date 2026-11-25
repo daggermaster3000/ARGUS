@@ -124,7 +124,14 @@ METHODS = {
 }
 DEFAULT = "gauss-8"               #: the counting method of the official analysis (median + 8 robust SD)
 #: the Gaussian mask's variants with another size filter or threshold spread (computed with it, or later by run_sizes)
-SIZE_VARIANTS = tuple(m for m, spec in METHODS.items() if spec.get("of") == "gauss")
+#: the object map's filter (object_filter.py): the 8 SD objects (> 3 µm²) kept by its feature ranges and hand exclusions,
+#: a method only once a filter has been saved
+OBJECT_FILTER = OUT / "object_filter.parquet"
+OBJECT_FILTER_META = OUT / "object_filter.json"
+if OBJECT_FILTER.exists() and OBJECT_FILTER_META.exists():
+    METHODS["gfilt"] = {"label": "AF488 mask, Gaussian 20 µm background, filtered on the object map", "kind": "mask",
+                        "ks": (8,), "default": 8, "min_um2": 3.0, "of": "gauss", "filtered": "gauss3-8"}
+SIZE_VARIANTS = tuple(m for m, spec in METHODS.items() if spec.get("of") == "gauss" and not spec.get("filtered"))
 MEDIAN_BACKGROUND_UM = 45.0       #: junction_analysis.less_local_median's window (for the label only)
 SIMPLIFY_PX = 0.5                 #: outlines simplified to within this many picture pixels
 AREA_2_UM = -50.0                 #: annotator 2 counted from 50 µm before the line to the far edge
@@ -204,7 +211,7 @@ def done(out: Path, name: str) -> bool:
 
 def masks_done(out: Path, name: str) -> bool:
     """Every method but the size variants is there (those come from :func:`run_sizes` when missing)."""
-    base = [m for m in METHODS if m not in SIZE_VARIANTS]
+    base = [m for m in METHODS if m not in SIZE_VARIANTS and not METHODS[m].get("filtered")]
     try:
         part = json.loads(methods_file(out, name).read_text(encoding="utf-8"))
         return part.get("version", 0) >= MASK_VERSION and all(mask_file(out, name, k).exists() for k in method_keys(base))
@@ -733,6 +740,43 @@ def square_numbers(out: Path, parts: dict[str, dict]) -> tuple[dict[str, dict], 
     return humans, frames
 
 
+def apply_object_filter(out: Path, names) -> int:
+    """The ``gfilt`` method: of each section's ``gauss3-8`` objects those the object map's filter kept (the same order),
+    written as their outline file and counts; nothing when no filter has been saved."""
+    if "gfilt" not in METHODS:
+        return 0
+    base = METHODS["gfilt"]["filtered"]
+    flags = pd.read_parquet(OBJECT_FILTER)
+    by = {sid: g.sort_values("index")["kept"].to_numpy(bool) for sid, g in flags.groupby("section")}
+    n = 0
+    for name in names:
+        sid = short(name)
+        target = methods_file(out, name)
+        if sid not in by or not target.exists() or not mask_file(out, name, base).exists():
+            continue
+        text = mask_file(out, name, base).read_text(encoding="utf-8")
+        payload = json.loads(text[text.index(",{") + 1:text.rindex(");")])
+        keep = by[sid]
+        if len(keep) != len(payload["side"]):
+            print(f"{sid}: object filter has {len(keep)} objects, {base} {len(payload['side'])}: skipped", flush=True)
+            continue
+        kept = {k: [v for v, ok in zip(vals, keep) if ok] for k, vals in payload.items()}
+        body = json.dumps(kept, separators=(",", ":"), allow_nan=False)
+        mask_file(out, name, "gfilt-8").write_text(f"window.MASKS_LOADED({json.dumps(sid)},{json.dumps('gfilt-8')},{body});\n",
+                                                   encoding="utf-8")
+        summary = json.loads(target.read_text(encoding="utf-8"))
+        has_line = summary.get("sign") is not None
+        a = np.array([np.nan if v is None else v for v in kept["away"]], float)
+        summary["counts"]["gfilt-8"] = {
+            "n": int(keep.sum()), "reg": int(np.sum(kept["reg"])),
+            "crossed": int((a > 0).sum()) if has_line else None, "home": int((a <= 0).sum()) if has_line else None,
+            "area2": int((a >= AREA_2_UM).sum()) if has_line else None, "thr": summary["counts"][base]["thr"]}
+        target.write_text(json.dumps(summary, separators=(",", ":")), encoding="utf-8")
+        n += 1
+    print(f"object filter: {n} sections", flush=True)
+    return n
+
+
 def _clean(value):
     """NaN / inf → None, numpy scalars → Python, all the way down (JSON has no NaN)."""
     if isinstance(value, dict):
@@ -790,7 +834,8 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
                                              "in": inside.astype(int).tolist()}})
         sections.append(entry)
     catalogue = [{"key": m, "label": spec["label"], "kind": spec["kind"], "ks": list(spec["ks"]),
-                  "default": spec["default"], "min_um2": spec.get("min_um2"), "of": spec.get("of")}
+                  "default": spec["default"], "min_um2": spec.get("min_um2"), "of": spec.get("of"),
+                  **({"filter": json.loads(OBJECT_FILTER_META.read_text(encoding="utf-8"))} if spec.get("filtered") else {})}
                  for m, spec in METHODS.items()]
     payload = _clean({"generated": time.strftime("%Y-%m-%d %H:%M"), "methods": catalogue, "default": DEFAULT,
                       "area_2_um": AREA_2_UM, "sections": sections})
@@ -842,6 +887,7 @@ def main(argv: list[str]) -> int:
     write_spreads(out, table)                   # the shared robust SDs of the gpool / gslide thresholds
     todo = [n for n in table["name"] if masks_done(out, n) and not sizes_done(out, n)][:limit]
     pool_run("variants (objects > 10, > 5, > 3 µm²; SD pooled over all sections, over the slide)", run_sizes, todo, out)
+    apply_object_filter(out, table["name"])      # the object map's filter, when one has been saved (object_filter.py)
     n = assemble(out, table)
     print(f"written {out / 'data.json'}: {n} sections", flush=True)
     import objects_data                         # every counted object, for the figure builder (objects.js)
