@@ -223,6 +223,9 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
       <label id="agUnitWrap">Points <select id="agUnit"><option value="section">per section (its squares added up)</option><option value="square">per square</option></select></label>
       <label title="A human point and another point or object closer than this are the same cell">match within <select id="agRadius"><option value="4">4</option><option value="6">6</option><option value="8">8</option><option value="10">10</option></select> µm</label>
       <label><input type="checkbox" id="agFilters"> apply the page's filters</label>
+      <label title="Log axes spread small and large counts evenly; the statistics are then on log counts (0 as 0.5). Linear axes: the statistics on the counts.">axes <select id="agScale"><option value="log">log</option><option value="linear">linear</option></select></label>
+      <label title="Three plots side by side: home, junction region and crossed, each with its own statistics. Annotator 2 of the annotated sections counted from 50 µm before the junction interface, so has no home count."><input type="checkbox" id="agSplit"> split by compartment</label>
+      <label id="agSplitSize" title="The size of the split figure (all three plots)">size <input type="number" id="agSplitW" min="60" max="400" step="5" style="width: 4.5em"> × <input type="number" id="agSplitH" min="30" max="300" step="2" style="width: 4em"> mm</label>
       <label title="The colour of a full cell in the recall and confusion matrices (an empty one is white)">matrix colour <input type="color" id="agColor" value="#3a3a3a"></label>
       <span class="note" id="agWho">Human counts by: the annotators ticked above</span>
     </div>
@@ -1441,7 +1444,8 @@ const DEFAULTS = {
     medians: true, stats: true, statsText: null, statsPos: null, widthMm: 80, heightMm: 60, sizeAuto: true, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null },
   hv: { on: true, plot: "scatter", vs: "auto", unit: "section", labels: false, group: "genotype", show: "both", gstats: {}, filters: false, size: 4, widthMm: 95, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null,
     statsText: null, statsPos: null },
-  ag: { on: false, source: "squares", unit: "section", radius: 6, filters: false, conf: "pooled", color: "#3a3a3a", widthMm: 85, heightMm: 80 },
+  ag: { on: false, source: "squares", unit: "section", radius: 6, filters: false, conf: "pooled", color: "#3a3a3a", widthMm: 85, heightMm: 80,
+    scale: "log", split: false, splitWidthMm: 180, splitHeightMm: 66 },
 };
 // publication greys: WT3 filled dark grey, GD1 open white, black edges; black bars, lines and text
 const PUBLICATION_COLORS = { groups: { WT3: { fill: DARK, edge: INK }, GD1: { fill: "#ffffff", edge: INK } }, mean: INK, fit: INK, text: INK };
@@ -1664,6 +1668,8 @@ function writeControls() {
   syncMethodMenus();
   $("agOn").checked = !!ST.ag.on; $("agSource").value = ST.ag.source || "squares"; $("agUnit").value = ST.ag.unit;
   $("agUnitWrap").style.display = ST.ag.source === "sections" ? "none" : ""; $("agRadius").value = String(ST.ag.radius); $("agFilters").checked = !!ST.ag.filters; $("agColor").value = ST.ag.color || "#3a3a3a";
+  $("agScale").value = ST.ag.scale || "log"; $("agSplit").checked = !!ST.ag.split;
+  $("agSplitW").value = ST.ag.splitWidthMm || 180; $("agSplitH").value = ST.ag.splitHeightMm || 66;
   for (const id of INPUTS) {
     const el = $(id), v = ST[id];
     if (el === document.activeElement && el.type !== "checkbox" && el.tagName !== "SELECT") continue;   // not under the cursor of someone typing
@@ -3531,6 +3537,10 @@ function buildHumanControls() {
   $("agSource").onchange = () => { ST.ag.source = $("agSource").value; update(); };
   $("agConf").onchange = () => { ST.ag.conf = $("agConf").value; update(); };
   $("agColor").oninput = () => { ST.ag.color = $("agColor").value; update(); };
+  $("agScale").onchange = () => { ST.ag.scale = $("agScale").value; update(); };
+  $("agSplit").onchange = () => { ST.ag.split = $("agSplit").checked; update(); };
+  $("agSplitW").onchange = () => { ST.ag.splitWidthMm = Math.max(60, +$("agSplitW").value || 180); update(); };
+  $("agSplitH").onchange = () => { ST.ag.splitHeightMm = Math.max(30, +$("agSplitH").value || 66); update(); };
   $("agRadius").onchange = () => { ST.ag.radius = +$("agRadius").value; update(); };
   $("agFilters").onchange = () => { ST.ag.filters = $("agFilters").checked; update(); };
   $("bHvPdf").onclick = () => exportImage("pdf", "human");
@@ -4260,7 +4270,8 @@ function computeAgree() {
         const inArea = (o) => h.n === 1 || (o.away !== null && o.away >= area2);
         const pts = { [h.n]: h.dots.x.map((x, i) => [x, h.dots.y[i]]).filter((_, i) => h.dots.in[i]) };
         pts.auto = objs ? objs.filter(inArea).map((o) => o.xy) : null;
-        squares.push({ r, q: { code: d.id }, umpx: d.um_per_px || 1, counts: { [h.n]: h.human }, auto: h.automated ? h.automated[method] : undefined, pts, ann: h.n });
+        squares.push({ r, q: { code: d.id }, umpx: d.um_per_px || 1, counts: { [h.n]: h.human }, auto: h.automated ? h.automated[method] : undefined, pts, ann: h.n,
+          comp: h.compartments || null });
       }
     }
   }
@@ -4295,11 +4306,27 @@ function computeAgree() {
     }
     pts.push(...by.values());
   }
-  const L = (v) => Math.log10(Math.max(v, 0.5));
-  const st = pts.length >= 3 ? { n: pts.length, r: STATS.pearson(pts.map((p) => L(p.human)), pts.map((p) => L(p.auto))),
-    rho: (STATS.spearman(pts.map((p) => p.human), pts.map((p) => p.auto)) || {}).rho,
-    ccc: STATS.linCcc(pts.map((p) => L(p.human)), pts.map((p) => L(p.auto))),
-    ratio: pts.reduce((a, p) => a + p.auto, 0) / Math.max(pts.reduce((a, p) => a + p.human, 0), 1e-9) } : null;
+  const st = agStatsOf(pts);
+  // per compartment: annotated sections from their stored compartment counts, squares by the square's compartment
+  const comp = {};
+  for (const [key] of AG_COMPS) {
+    const cp = [];
+    if (agSections()) {
+      for (const s of squares) {
+        const c = s.comp && s.comp[key], a = c && c.automated ? c.automated[method] : undefined;
+        if (c && Number.isFinite(a)) cp.push({ r: s.r, label: s.r.id + " " + key + " (" + agName(s.ann) + ")", human: c.human, auto: a });
+      }
+    } else {
+      const by = new Map();
+      for (const s of squares) {
+        if ((s.q.compartment === "junction" ? "region" : s.q.compartment) !== key || !Object.keys(s.counts).length || !Number.isFinite(s.auto)) continue;
+        if (ST.ag.unit === "square") { cp.push({ r: s.r, label: s.q.code + " " + key, human: human(s.counts), auto: s.auto }); continue; }
+        const e = by.get(s.r) || { r: s.r, label: s.r.id + " " + key, human: 0, auto: 0 }; e.human += human(s.counts); e.auto += s.auto; by.set(s.r, e);
+      }
+      cp.push(...by.values());
+    }
+    comp[key] = { pts: cp, st: agStatsOf(cp) };
+  }
   // the recall matrix: row = whose cells, column = who found them
   const src = [...anns, "auto"], name = agName;
   const M = src.map(() => src.map(() => null)), pair = {};
@@ -4313,27 +4340,84 @@ function computeAgree() {
     pair[a + "|" + b] = { na, nb, m, squares: used };
   }
   src.forEach((a, i) => src.forEach((b, j) => { const p = pair[a + "|" + b]; M[i][j] = p.na ? p.m / p.na : null; }));
-  return { pts, st, src, names: src.map(name), M, pair, nSquares: squares.length, anns, pending: [...new Set(pending)] };
+  return { pts, st, comp, src, names: src.map(name), M, pair, nSquares: squares.length, anns, pending: [...new Set(pending)] };
 }
 function agreeFigure(z) {
+  if (ST.ag.split) return agreeSplitFigure(z);
   const ag = ST.ag, fs = ST.fontPt * z, C = COLORS(), W = ag.widthMm * PT_PER_MM * z, H = ag.heightMm * PT_PER_MM * z;
-  const traces = [], vals = AG.pts.flatMap((p) => [Math.max(p.human, 0.5), Math.max(p.auto, 0.5)]);
-  const lo = Math.pow(10, Math.floor(Math.log10(Math.min(...vals)) * 2) / 2), hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...vals)) * 2) / 2);
-  traces.push({ type: "scatter", mode: "lines", x: [lo, hi], y: [lo, hi], line: { color: MID, width: 0.8 * z, dash: "dash" }, hoverinfo: "skip", showlegend: false });
-  for (const g of GENOTYPES) {
-    const p = AG.pts.filter((x) => x.r.genotype === g), gc = groupColor({ key: g, g });
-    traces.push({ type: "scatter", mode: "markers", name: g, x: p.map((x) => Math.max(x.human, 0.5)), y: p.map((x) => Math.max(x.auto, 0.5)),
-      customdata: p.map((x) => [x.label, x.human.toFixed(1), x.auto]), hovertemplate: "%{customdata[0]}<br>human %{customdata[1]}, automated %{customdata[2]}<extra></extra>",
-      marker: { symbol: SYMBOL[g], size: 5 * z, color: gc.fill, line: { color: gc.edge, width: 0.8 * z } } });
-  }
-  const s = AG.st, axb = baseAxis(C, z, fs);
-  const txt = s ? "r = " + s.r.toFixed(2) + " (log)<br>ρ = " + s.rho.toFixed(2) + "<br>CCC = " + s.ccc.toFixed(2) + "<br>n = " + s.n : "";
+  const axb = baseAxis(C, z, fs), ax = agAxis(AG.pts, axb, agSections() ? "Human count (annotated area)" : agXTitle()), ay = agAxis(AG.pts, axb, "Automated count");
+  const traces = [agDiagonal(ax, z, "x", "y"), ...agScatter(AG.pts, z, "x", "y", true)];
   return { data: traces, layout: { width: W, height: H, paper_bgcolor: "#ffffff", plot_bgcolor: "#ffffff", font: { family: "Arial, Helvetica, sans-serif", size: fs, color: C.text },
     margin: { l: 56 * z, r: 12 * z, t: 12 * z, b: 46 * z }, showlegend: true, legend: { x: 1, xanchor: "right", y: 0, yanchor: "bottom", font: { size: fs * 0.9 } },
-    annotations: [{ text: txt, xref: "paper", yref: "paper", x: 0.03, y: 0.97, xanchor: "left", yanchor: "top", showarrow: false, align: "left", font: { size: fs * 0.92 } }],
-    xaxis: { ...axb, type: "log", range: [Math.log10(lo), Math.log10(hi)], ...humanTicks(lo, hi), title: { text: agSections() ? "Human count (annotated area)" : "Human count (mean of " + (AG.anns.length > 1 ? AG.anns.length + " annotators" : "annotator " + (AG.anns[0] - 2)) + ")" } },
-    yaxis: { ...axb, type: "log", range: [Math.log10(lo), Math.log10(hi)], ...humanTicks(lo, hi), title: { text: "Automated count" }, scaleanchor: "x", scaleratio: 1 } } };
+    annotations: [{ text: AG.st ? agStatsText(AG.st) : "", xref: "paper", yref: "paper", x: 0.03, y: 0.97, xanchor: "left", yanchor: "top", showarrow: false, align: "left", font: { size: fs * 0.92 } }],
+    xaxis: ax, yaxis: { ...ay, scaleanchor: "x", scaleratio: 1 } } };
 }
+// the correlation per compartment and on log or linear axes; statistics follow the axes (log: log10 counts, 0 as 0.5)
+const AG_COMPS = [["home", "Home"], ["region", "Junction region"], ["crossed", "Crossed"]];
+const agLog = () => ST.ag.scale !== "linear";
+function agStatsOf(pts) {
+  if (pts.length < 3) return null;
+  const T = agLog() ? (v) => Math.log10(Math.max(v, 0.5)) : (v) => v;
+  const h = pts.map((p) => T(p.human)), a = pts.map((p) => T(p.auto));
+  return { n: pts.length, r: STATS.pearson(h, a), rho: (STATS.spearman(pts.map((p) => p.human), pts.map((p) => p.auto)) || {}).rho,
+    ccc: STATS.linCcc(h, a), ratio: pts.reduce((s, p) => s + p.auto, 0) / Math.max(pts.reduce((s, p) => s + p.human, 0), 1e-9) };
+}
+function agStatsText(s) {
+  if (!s) return "n < 3";
+  const f = (v) => (Number.isFinite(v) ? v.toFixed(2) : "–");
+  return "r = " + f(s.r) + (agLog() ? " (log)" : "") + "<br>ρ = " + f(s.rho) + "<br>CCC = " + f(s.ccc) + (agLog() ? " (log)" : "") + "<br>n = " + s.n;
+}
+const agVal = (v) => (agLog() ? Math.max(v, 0.5) : v);
+function agAxis(pts, axb, title) {
+  const vals = pts.flatMap((p) => [agVal(p.human), agVal(p.auto)]);
+  if (!agLog()) {
+    const hi = Math.max(1, ...vals) * 1.08;
+    return { ...axb, type: "linear", range: [0, hi], title: { text: title } };
+  }
+  const lo = vals.length ? Math.pow(10, Math.floor(Math.log10(Math.min(...vals)) * 2) / 2) : 0.5;
+  const hi = vals.length ? Math.pow(10, Math.ceil(Math.log10(Math.max(...vals)) * 2) / 2) : 10;
+  return { ...axb, type: "log", range: [Math.log10(lo), Math.log10(hi)], ...humanTicks(lo, hi), title: { text: title } };
+}
+function agXTitle() {
+  return agSections() ? "Human count" + (AG.anns.length === 1 ? " (" + agName(AG.anns[0]).replace("Ann.", "annotator") + ")" : " (annotated area)")
+    : "Human count (mean of " + (AG.anns.length > 1 ? AG.anns.length + " annotators" : "annotator " + (AG.anns[0] - 2)) + ")";
+}
+function agScatter(pts, z, xa, ya, legend) {
+  const out = [];
+  for (const g of GENOTYPES) {
+    const p = pts.filter((x) => x.r.genotype === g), gc = groupColor({ key: g, g });
+    out.push({ type: "scatter", mode: "markers", name: g, legendgroup: g, showlegend: legend, xaxis: xa, yaxis: ya,
+      x: p.map((x) => agVal(x.human)), y: p.map((x) => agVal(x.auto)),
+      customdata: p.map((x) => [x.label, (+x.human).toFixed(1), x.auto]), hovertemplate: "%{customdata[0]}<br>human %{customdata[1]}, automated %{customdata[2]}<extra></extra>",
+      marker: { symbol: SYMBOL[g], size: 5 * z, color: gc.fill, line: { color: gc.edge, width: 0.8 * z } } });
+  }
+  return out;
+}
+function agDiagonal(ax, z, xa, ya) {
+  const r = ax.range, lo = ax.type === "log" ? Math.pow(10, r[0]) : r[0], hi = ax.type === "log" ? Math.pow(10, r[1]) : r[1];
+  return { type: "scatter", mode: "lines", x: [lo, hi], y: [lo, hi], xaxis: xa, yaxis: ya, line: { color: MID, width: 0.8 * z, dash: "dash" }, hoverinfo: "skip", showlegend: false };
+}
+// the three compartments side by side, each with its own axes (same on x and y) and statistics
+function agreeSplitFigure(z) {
+  const ag = ST.ag, fs = ST.fontPt * z, C = COLORS(), W = (ag.splitWidthMm || 180) * PT_PER_MM * z, H = (ag.splitHeightMm || 66) * PT_PER_MM * z;
+  const axb = baseAxis(C, z, fs), gap = 0.085, w = (1 - 2 * gap) / 3, traces = [], ann = [];
+  const layout = { width: W, height: H, paper_bgcolor: "#ffffff", plot_bgcolor: "#ffffff", font: { family: "Arial, Helvetica, sans-serif", size: fs, color: C.text },
+    margin: { l: 52 * z, r: 10 * z, t: 22 * z, b: 46 * z }, showlegend: true,       // the legend under the right-hand plot, clear of the points
+    legend: { orientation: "h", x: 1, xanchor: "right", y: -32 * z / (H - 68 * z), yanchor: "top", font: { size: fs * 0.9 }, bgcolor: "rgba(255,255,255,0)" } };
+  AG_COMPS.forEach(([key, title], i) => {
+    const pts = (AG.comp[key] || {}).pts || [], sfx = i ? String(i + 1) : "", xa = "x" + sfx, ya = "y" + sfx, x0 = i * (w + gap);
+    const ax = agAxis(pts, axb, i === 1 ? agXTitle() : ""), ay = agAxis(pts, axb, i === 0 ? "Automated count" : "");
+    layout["xaxis" + sfx] = { ...ax, domain: [x0, x0 + w], anchor: ya };
+    layout["yaxis" + sfx] = { ...ay, domain: [0, 1], anchor: xa };
+    traces.push(agDiagonal(ax, z, xa, ya), ...agScatter(pts, z, xa, ya, i === AG_COMPS.length - 1));
+    ann.push({ text: "<b>" + title + "</b>", xref: xa + " domain", yref: "paper", x: 0.5, y: 1, yanchor: "bottom", showarrow: false, font: { size: fs } });
+    ann.push({ text: pts.length ? agStatsText(AG.comp[key].st) : "no counts", xref: xa + " domain", yref: ya + " domain", x: 0.04, y: 0.97,
+      xanchor: "left", yanchor: "top", showarrow: false, align: "left", font: { size: fs * 0.85 } });
+  });
+  layout.annotations = ann;
+  return { data: traces, layout };
+}
+
 function recallFigure(z) {
   const ag = ST.ag, fs = ST.fontPt * z, C = COLORS(), W = ag.widthMm * PT_PER_MM * z, H = ag.heightMm * PT_PER_MM * z;
   const n = AG.src.length, zz = AG.M.map((row) => row.map((v) => (v === null ? null : v)));
@@ -4354,6 +4438,7 @@ function updateAgree() {
   AG = computeAgree();
   const sec = agSections(), unit = sec ? "sections" : "squares";
   $("agUnitWrap").style.display = sec ? "none" : "";
+  $("agSplitSize").style.display = ST.ag.split ? "" : "none";
   $("agWho").textContent = sec ? "Human counts by: annotators 1 and 2 as ticked above (whole-section counts)" : "Human counts by: the square annotators ticked above";
   const meth = METHODS.find((m) => ST.method.startsWith(m.key + "-")), k = ST.method.split("-")[1];
   $("agNote").textContent = (meth ? meth.label + ", " + k + " SD" : ST.method) + " · " + (AG.anns.length ? AG.anns.map((a) => ANN_NAME[a]).join(", ") : "no annotator ticked") +
@@ -4380,7 +4465,11 @@ function updateAgree() {
     "<p class='note'>Recall matrix: row = whose cells, column = who found them; a cell of the row counts as found when the column has a point or object " +
     "within " + ST.ag.radius + " µm of it (one-to-one, nearest pairs first), on the " + unit + " both counted" + (sec ? " (in the annotator's area; " +
       "annotators 1 and 2 counted different sections, so they cannot be compared with each other)" : "") + ". The automated column is the recall of the method; " +
-    "the automated row is its precision. Correlation: Pearson r on log₁₀ counts, Spearman ρ, Lin's CCC on log₁₀ counts (zero counts as 0.5).</p>";
+    "the automated row is its precision. Correlation: Pearson r and Lin's CCC on " + (agLog() ? "log₁₀ counts (zero counts as 0.5)" : "counts") + ", Spearman ρ.</p>" +
+    (ST.ag.split ? "<table class='st'><tr><th>compartment</th><th>n</th><th>r</th><th>ρ</th><th>CCC</th><th>Σ automated ÷ Σ human</th></tr>" +
+      AG_COMPS.map(([key, title]) => { const s = AG.comp[key].st, f = (v) => (s && Number.isFinite(v) ? v.toFixed(2) : "–");
+        return "<tr><td>" + title + "</td><td>" + (s ? s.n : AG.comp[key].pts.length) + "</td><td>" + f(s && s.r) + "</td><td>" + f(s && s.rho) + "</td><td>" + f(s && s.ccc) + "</td><td>" + f(s && s.ratio) + "</td></tr>"; }).join("") +
+      "</table><p class='note'>Compartments as the automated counts define them: home = the home side of the extended junction interface; junction region = in the region's band; crossed = past the interface, the junction region included.</p>" : "");
 }
 
 // the detection confusion matrix of the method against one annotator or all ticked (pooled): true positives = cells the
@@ -4426,6 +4515,8 @@ function agreeCsv(which) {
   if (which === "confusion") { const c = agConfusion();
     return csvText(["annotators", "TP", "FN", "FP", "TN", "recall", "precision", "F1", ST.ag.source], [[c.who.map(agName).join(" + "), c.tp, c.fn, c.fp, "not defined", c.recall, c.precision, c.f1, c.units]]); }
   if (which === "recall") return csvText(["cells of", ...AG.names.map((n) => "found by " + n)], AG.M.map((row, i) => [AG.names[i], ...row.map((v) => (v === null ? "" : v))]));
+  if (ST.ag.split) return csvText(["compartment", "section", "point", "genotype", "experiment", "slide", "human", "automated_" + ST.method],
+    AG_COMPS.flatMap(([key]) => AG.comp[key].pts.map((p) => [key, p.r.id, p.label, p.r.genotype, p.r.experiment, p.r.slide, p.human, p.auto])));
   return csvText(["section", "point", "genotype", "experiment", "slide", "human", "automated_" + ST.method], AG.pts.map((p) => [p.r.id, p.label, p.r.genotype, p.r.experiment, p.r.slide, p.human, p.auto]));
 }
 
@@ -4440,8 +4531,10 @@ function exportImage(format, which) {
     : which === "agree" ? agreeFigure(z) : which === "recall" ? recallFigure(z) : which === "confusion" ? confusionFigure(z) : figure(z);
   const W = fig.layout.width, H = fig.layout.height;
   const size = which === "scatter" ? ST.sc : which === "dist" ? ST.ds : which === "human" ? ST.hv : which === "agree" || which === "recall" || which === "confusion" ? ST.ag : ST;
-  const wMm = size.widthMm, hMm = size.heightMm;
-  const stem = which === "agree" ? ST.ag.source + "_human_vs_automated_" + ST.method + (ST.ag.source === "sections" ? "" : "_" + ST.ag.unit)
+  const splitAg = which === "agree" && ST.ag.split;
+  const wMm = splitAg ? ST.ag.splitWidthMm || 180 : size.widthMm, hMm = splitAg ? ST.ag.splitHeightMm || 66 : size.heightMm;
+  const stem = which === "agree" ? ST.ag.source + "_human_vs_automated_" + ST.method + (ST.ag.source === "sections" ? "" : "_" + ST.ag.unit) +
+      (ST.ag.split ? "_by_compartment" : "") + (ST.ag.scale === "linear" ? "_linear" : "")
     : which === "recall" ? ST.ag.source + "_recall_matrix_" + ST.method + "_" + ST.ag.radius + "um"
     : which === "confusion" ? ST.ag.source + "_confusion_" + ST.method + "_" + (ST.ag.conf === "pooled" ? "pooled" : "annotator" + ST.ag.conf) + "_" + ST.ag.radius + "um"
     : which === "human" ? "human_vs_automated_" + ST.method + (ST.hv.plot === "ba" ? "_bland_altman" : "")

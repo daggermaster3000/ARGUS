@@ -631,6 +631,30 @@ def human_numbers(table: pd.DataFrame, methods: dict[str, dict]) -> dict[str, di
     return out
 
 
+def human_compartments(name: str, h: dict, counts: dict, sign, line, voxel: float) -> dict | None:
+    """One annotator's dots and each method's objects per compartment, as the automated counts define them: home
+    (on the home side of the extended junction interface), junction region (in the region's band) and crossed (past the
+    interface, the region included). Home only for a whole-section annotator (1); None without a junction interface."""
+    from .. import cells as ja
+
+    if sign is None or line is None or h["n"] > 2:
+        return None
+    dots = h["_dots"][h["_in"]]
+    away = sides.away(dots, np.asarray(line, float), sign) if len(dots) else np.zeros(0)
+    if paths.region_tif(name).exists() and len(dots):
+        band = ja.read_labels(paths.region_tif(name)) > 0
+        rows = np.clip(np.round(dots[:, 0] / voxel).astype(int), 0, band.shape[0] - 1)
+        cols = np.clip(np.round(dots[:, 1] / voxel).astype(int), 0, band.shape[1] - 1)
+        reg = band[rows, cols]
+    else:
+        reg = np.zeros(len(dots), bool)
+    out = {"region": {"human": int(reg.sum()), "automated": {k: c["reg"] for k, c in counts.items()}},
+           "crossed": {"human": int((away > 0).sum()), "automated": {k: c["crossed"] for k, c in counts.items()}}}
+    if h["n"] == 1:
+        out = {"home": {"human": int((away <= 0).sum()), "automated": {k: c["home"] for k, c in counts.items()}}, **out}
+    return out
+
+
 def ring_centroid(ring: list[float]) -> tuple[float, float, float]:
     """(x, y, |area|) of a flat ``[x0, y0, x1, y1, …]`` polygon (its vertices' mean when it has no area)."""
     x, y = np.asarray(ring[0::2], float), np.asarray(ring[1::2], float)
@@ -792,6 +816,9 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
             "squares": squares.get(s["name"], []),          # the blinded count squares on this section (frames)
         }
         for annotator, h in humans.get(s["name"], {}).items():
+            if not h.get("_edges"):                       # the annotated sections: counts per compartment
+                h["compartments"] = human_compartments(s["name"], h, methods[s["name"]]["counts"], methods[s["name"]]["sign"],
+                                                       s["line"], part["voxel"])
             dots_um, inside = h["_dots"], h["_in"]
             if h.get("_edges"):
                 y, x = dots_um[:, 0] / part["voxel"] / part["f"], dots_um[:, 1] / part["voxel"] / part["f"]
