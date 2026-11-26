@@ -4345,7 +4345,7 @@ function computeAgree() {
 function agreeFigure(z) {
   if (ST.ag.split) return agreeSplitFigure(z);
   const ag = ST.ag, fs = ST.fontPt * z, C = COLORS(), W = ag.widthMm * PT_PER_MM * z, H = ag.heightMm * PT_PER_MM * z;
-  const axb = baseAxis(C, z, fs), ax = agAxis(AG.pts, axb, agSections() ? "Human count (annotated area)" : agXTitle()), ay = agAxis(AG.pts, axb, "Automated count");
+  const axb = baseAxis(C, z, fs), ax = agAxis(AG.pts, axb, agXTitle()), ay = agAxis(AG.pts, axb, "Automated count");
   const traces = [agDiagonal(ax, z, "x", "y"), ...agScatter(AG.pts, z, "x", "y", true)];
   return { data: traces, layout: { width: W, height: H, paper_bgcolor: "#ffffff", plot_bgcolor: "#ffffff", font: { family: "Arial, Helvetica, sans-serif", size: fs, color: C.text },
     margin: { l: 56 * z, r: 12 * z, t: 12 * z, b: 46 * z }, showlegend: true, legend: { x: 1, xanchor: "right", y: 0, yanchor: "bottom", font: { size: fs * 0.9 } },
