@@ -223,6 +223,7 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
       <label id="agUnitWrap">Points <select id="agUnit"><option value="section">per section (its squares added up)</option><option value="square">per square</option></select></label>
       <label title="A human point and another point or object closer than this are the same cell">match within <select id="agRadius"><option value="4">4</option><option value="6">6</option><option value="8">8</option><option value="10">10</option></select> µm</label>
       <label><input type="checkbox" id="agFilters"> apply the page's filters</label>
+      <label title="The colour of a full cell in the recall and confusion matrices (an empty one is white)">matrix colour <input type="color" id="agColor" value="#3a3a3a"></label>
       <span class="note" id="agWho">Human counts by: the annotators ticked above</span>
     </div>
     <div class="agplots">
@@ -230,6 +231,8 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
         <p class="plothint">Right-click the plot to save it · <button class="linkbtn" data-menu="agree">or open the menu here</button></p></div>
       <div><div class="plotframe" id="plotframe6"><div id="plot6"></div></div>
         <p class="plothint">Right-click the matrix to save it · <button class="linkbtn" data-menu="recall">or open the menu here</button></p></div>
+      <div><div class="plotframe" id="plotframe7"><div id="plot7"></div></div>
+        <p class="plothint">Confusion matrix against <select id="agConf"></select> · right-click to save · <button class="linkbtn" data-menu="confusion">or open the menu here</button></p></div>
     </div>
     <div id="agStats"></div>
   </div>
@@ -1438,7 +1441,7 @@ const DEFAULTS = {
     medians: true, stats: true, statsText: null, statsPos: null, widthMm: 80, heightMm: 60, sizeAuto: true, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null },
   hv: { on: true, plot: "scatter", vs: "auto", unit: "section", labels: false, group: "genotype", show: "both", gstats: {}, filters: false, size: 4, widthMm: 95, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null,
     statsText: null, statsPos: null },
-  ag: { on: false, source: "squares", unit: "section", radius: 6, filters: false, widthMm: 85, heightMm: 80 },
+  ag: { on: false, source: "squares", unit: "section", radius: 6, filters: false, conf: "pooled", color: "#3a3a3a", widthMm: 85, heightMm: 80 },
 };
 // publication greys: WT3 filled dark grey, GD1 open white, black edges; black bars, lines and text
 const PUBLICATION_COLORS = { groups: { WT3: { fill: DARK, edge: INK }, GD1: { fill: "#ffffff", edge: INK } }, mean: INK, fit: INK, text: INK };
@@ -1660,7 +1663,7 @@ function syncMethodMenus() {
 function writeControls() {
   syncMethodMenus();
   $("agOn").checked = !!ST.ag.on; $("agSource").value = ST.ag.source || "squares"; $("agUnit").value = ST.ag.unit;
-  $("agUnitWrap").style.display = ST.ag.source === "sections" ? "none" : ""; $("agRadius").value = String(ST.ag.radius); $("agFilters").checked = !!ST.ag.filters;
+  $("agUnitWrap").style.display = ST.ag.source === "sections" ? "none" : ""; $("agRadius").value = String(ST.ag.radius); $("agFilters").checked = !!ST.ag.filters; $("agColor").value = ST.ag.color || "#3a3a3a";
   for (const id of INPUTS) {
     const el = $(id), v = ST[id];
     if (el === document.activeElement && el.type !== "checkbox" && el.tagName !== "SELECT") continue;   // not under the cursor of someone typing
@@ -3526,6 +3529,8 @@ function buildHumanControls() {
   $("agOn").onchange = () => { ST.ag.on = $("agOn").checked; update(); };
   $("agUnit").onchange = () => { ST.ag.unit = $("agUnit").value; update(); };
   $("agSource").onchange = () => { ST.ag.source = $("agSource").value; update(); };
+  $("agConf").onchange = () => { ST.ag.conf = $("agConf").value; update(); };
+  $("agColor").oninput = () => { ST.ag.color = $("agColor").value; update(); };
   $("agRadius").onchange = () => { ST.ag.radius = +$("agRadius").value; update(); };
   $("agFilters").onchange = () => { ST.ag.filters = $("agFilters").checked; update(); };
   $("bHvPdf").onclick = () => exportImage("pdf", "human");
@@ -4334,8 +4339,8 @@ function recallFigure(z) {
   const n = AG.src.length, zz = AG.M.map((row) => row.map((v) => (v === null ? null : v)));
   const ann = [];
   AG.M.forEach((row, i) => row.forEach((v, j) => ann.push({ x: AG.names[j], y: AG.names[i], text: v === null ? "–" : Math.round(100 * v) + " %", showarrow: false,
-    font: { size: fs * 0.95, color: v !== null && v > 0.55 ? "#ffffff" : C.text } })));
-  return { data: [{ type: "heatmap", z: zz, x: AG.names, y: AG.names, zmin: 0, zmax: 1, colorscale: [[0, "#ffffff"], [1, "#3a3a3a"]], xgap: 1.5 * z, ygap: 1.5 * z,
+    font: { size: fs * 0.95, color: agInk(v) } })));
+  return { data: [{ type: "heatmap", z: zz, x: AG.names, y: AG.names, zmin: 0, zmax: 1, colorscale: agScale(), xgap: 1.5 * z, ygap: 1.5 * z,
     hovertemplate: "%{y}'s cells found by %{x}: %{z:.0%}<extra></extra>", colorbar: { thickness: 8 * z, len: 0.8, tickformat: ".0%", outlinewidth: 0, tickfont: { size: fs * 0.85 } } }],
     layout: { width: W, height: H, paper_bgcolor: "#ffffff", plot_bgcolor: "#ffffff", font: { family: "Arial, Helvetica, sans-serif", size: fs, color: C.text }, annotations: ann,
       margin: { l: 70 * z, r: 10 * z, t: 12 * z, b: 46 * z },
@@ -4358,10 +4363,15 @@ function updateAgree() {
     const want = HV_KEY + ST.method + ST.ag.source;
     agLoad(AG.pending).then(() => { if (ST.ag.on && want === HV_KEY + ST.method + ST.ag.source) updateAgree(); });
   }
-  if (!AG.anns.length || !AG.pts.length) { Plotly.purge("plot5"); Plotly.purge("plot6"); $("agStats").innerHTML = "<p class='note'>Tick at least one " + (sec ? "of annotators 1, 2" : "square annotator") + " under “Human counts by”.</p>"; return; }
+  if (!AG.anns.length || !AG.pts.length) { Plotly.purge("plot5"); Plotly.purge("plot6"); Plotly.purge("plot7"); $("agStats").innerHTML = "<p class='note'>Tick at least one " + (sec ? "of annotators 1, 2" : "square annotator") + " under “Human counts by”.</p>"; return; }
   if (AG.pending.length) return;
   const a = agreeFigure(ST.zoom || 1), b = recallFigure(ST.zoom || 1), cfg = { displaylogo: false, responsive: false, modeBarButtonsToRemove: ["toImage", "select2d", "lasso2d"] };
   Plotly.react("plot5", a.data, a.layout, cfg); Plotly.react("plot6", b.data, b.layout, cfg);
+  const confOpts = [["pooled", "all ticked (pooled)"], ...AG.anns.map((an) => [String(an), agName(an).replace("Ann.", "annotator")])];
+  $("agConf").innerHTML = confOpts.map(([v, t]) => '<option value="' + v + '">' + t + "</option>").join("");
+  $("agConf").value = confOpts.some(([v]) => v === String(ST.ag.conf)) ? String(ST.ag.conf) : "pooled";
+  const cf = confusionFigure(ST.zoom || 1);
+  Plotly.react("plot7", cf.data, cf.layout, cfg);
   const ix = AG.src.indexOf("auto");
   $("agStats").innerHTML = "<table class='st'><tr><th>Automated against</th><th>human cells</th><th>automated objects</th><th>matched</th><th>recall (found)</th><th>precision (dotted)</th><th>F₁</th><th>" + unit + "</th></tr>" +
     AG.anns.map((an) => { const p = AG.pair[an + "|auto"], re = p.na ? p.m / p.na : NaN, pr = p.nb ? p.m / p.nb : NaN;
@@ -4372,8 +4382,49 @@ function updateAgree() {
       "annotators 1 and 2 counted different sections, so they cannot be compared with each other)" : "") + ". The automated column is the recall of the method; " +
     "the automated row is its precision. Correlation: Pearson r on log₁₀ counts, Spearman ρ, Lin's CCC on log₁₀ counts (zero counts as 0.5).</p>";
 }
+
+// the detection confusion matrix of the method against one annotator or all ticked (pooled): true positives = cells the
+// annotator dotted that the method found (one-to-one within the radius), false negatives = dotted cells it missed,
+// false positives = its objects nobody of them dotted; true negatives are not defined (no countable set of non-cells)
+function agConfusion() {
+  const who = ST.ag.conf === "pooled" || !AG.anns.includes(+ST.ag.conf) ? AG.anns : [+ST.ag.conf];
+  let tp = 0, fn = 0, fp = 0, units = 0;
+  for (const a of who) { const p = AG.pair[a + "|auto"]; tp += p.m; fn += p.na - p.m; fp += p.nb - p.m; units += p.squares; }
+  return { who, tp, fn, fp, recall: tp / Math.max(tp + fn, 1), precision: tp / Math.max(tp + fp, 1), f1: 2 * tp / Math.max(2 * tp + fn + fp, 1), units };
+}
+function confusionFigure(z) {
+  const ag = ST.ag, fs = ST.fontPt * z, C = COLORS(), W = ag.widthMm * PT_PER_MM * z, H = ag.heightMm * PT_PER_MM * z, c = agConfusion();
+  const cols = ["detected", "not detected"], rows = ["cell", "no cell"];
+  const zz = [[c.recall, 1 - c.recall], [1 - c.precision, null]];
+  const pct = (v) => Math.round(100 * v) + " %";
+  const txt = [["<b>TP " + c.tp + "</b><br>" + pct(c.recall) + " of dotted cells", "<b>FN " + c.fn + "</b><br>" + pct(1 - c.recall) + " missed"],
+    ["<b>FP " + c.fp + "</b><br>" + pct(1 - c.precision) + " of objects", "TN<br>not defined"]];
+  const ann = [];
+  txt.forEach((row, i) => row.forEach((t, j) => ann.push({ x: cols[j], y: rows[i], text: t, showarrow: false,
+    font: { size: fs * 0.92, color: agInk(zz[i][j]) } })));
+  const whoText = c.who.length > 1 ? "pooled over " + c.who.length + " annotators" : agName(c.who[0]).replace("Ann.", "annotator");
+  ann.push({ text: "recall " + pct(c.recall) + " · precision " + pct(c.precision) + " · F₁ " + c.f1.toFixed(2), xref: "paper", yref: "paper", x: 0.5, y: -0.2,
+    xanchor: "center", yanchor: "top", showarrow: false, font: { size: fs * 0.92 } });
+  return { data: [{ type: "heatmap", z: zz, x: cols, y: rows, zmin: 0, zmax: 1, colorscale: agScale(), xgap: 2 * z, ygap: 2 * z,
+    showscale: false, hoverinfo: "skip" }],
+    layout: { width: W, height: H, paper_bgcolor: "#ffffff", plot_bgcolor: "#f2f2f2", font: { family: "Arial, Helvetica, sans-serif", size: fs, color: C.text }, annotations: ann,
+      margin: { l: 74 * z, r: 10 * z, t: 58 * z, b: 70 * z },
+      title: { text: "Automated vs " + whoText, font: { size: fs }, x: 0.5, y: 1 - 4 * z / H, yanchor: "top" },
+      xaxis: { side: "top", title: { text: "automated", standoff: 4 * z }, showgrid: false, zeroline: false, ticks: "" },
+      yaxis: { autorange: "reversed", title: { text: "human", standoff: 6 * z }, showgrid: false, zeroline: false, ticks: "", automargin: true } } };
+}
+// the matrices' colour: white to the chosen colour; a label on a cell is white where the cell is dark enough
+function agScale() { return [[0, "#ffffff"], [1, ST.ag.color || "#3a3a3a"]]; }
+function agInk(v) {
+  if (v === null || v === undefined) return COLORS().text;
+  const h = (ST.ag.color || "#3a3a3a").replace("#", ""), c = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const mix = c.map((x) => 255 + (x - 255) * v), lum = (0.2126 * mix[0] + 0.7152 * mix[1] + 0.0722 * mix[2]) / 255;
+  return lum < 0.55 ? "#ffffff" : COLORS().text;
+}
 function agreeCsv(which) {
   if (!AG) return "";
+  if (which === "confusion") { const c = agConfusion();
+    return csvText(["annotators", "TP", "FN", "FP", "TN", "recall", "precision", "F1", ST.ag.source], [[c.who.map(agName).join(" + "), c.tp, c.fn, c.fp, "not defined", c.recall, c.precision, c.f1, c.units]]); }
   if (which === "recall") return csvText(["cells of", ...AG.names.map((n) => "found by " + n)], AG.M.map((row, i) => [AG.names[i], ...row.map((v) => (v === null ? "" : v))]));
   return csvText(["section", "point", "genotype", "experiment", "slide", "human", "automated_" + ST.method], AG.pts.map((p) => [p.r.id, p.label, p.r.genotype, p.r.experiment, p.r.slide, p.human, p.auto]));
 }
@@ -4384,14 +4435,15 @@ function exportImage(format, which) {
   const z = ST.zoom || 1;
   if (which === "dist" && !(DIST && DIST.ok)) return Promise.resolve();
   if (which === "human" && !(HV && HV.rows.length)) return Promise.resolve();
-  if ((which === "agree" || which === "recall") && !(AG && AG.pts.length)) return Promise.resolve();
+  if ((which === "agree" || which === "recall" || which === "confusion") && !(AG && AG.pts.length)) return Promise.resolve();
   const fig = which === "scatter" ? scatterFigure(z) : which === "dist" ? distFigure(z) : which === "human" ? humanFigure(z)
-    : which === "agree" ? agreeFigure(z) : which === "recall" ? recallFigure(z) : figure(z);
+    : which === "agree" ? agreeFigure(z) : which === "recall" ? recallFigure(z) : which === "confusion" ? confusionFigure(z) : figure(z);
   const W = fig.layout.width, H = fig.layout.height;
-  const size = which === "scatter" ? ST.sc : which === "dist" ? ST.ds : which === "human" ? ST.hv : which === "agree" || which === "recall" ? ST.ag : ST;
+  const size = which === "scatter" ? ST.sc : which === "dist" ? ST.ds : which === "human" ? ST.hv : which === "agree" || which === "recall" || which === "confusion" ? ST.ag : ST;
   const wMm = size.widthMm, hMm = size.heightMm;
   const stem = which === "agree" ? ST.ag.source + "_human_vs_automated_" + ST.method + (ST.ag.source === "sections" ? "" : "_" + ST.ag.unit)
     : which === "recall" ? ST.ag.source + "_recall_matrix_" + ST.method + "_" + ST.ag.radius + "um"
+    : which === "confusion" ? ST.ag.source + "_confusion_" + ST.method + "_" + (ST.ag.conf === "pooled" ? "pooled" : "annotator" + ST.ag.conf) + "_" + ST.ag.radius + "um"
     : which === "human" ? "human_vs_automated_" + ST.method + (ST.hv.plot === "ba" ? "_bland_altman" : "")
     : fileStem() + (which ? "_" + (which === "dist" ? "distribution" : which) : "");
   const pdf = format === "pdf";
@@ -4874,12 +4926,12 @@ const MENUS = {
     { label: "Reset", panes: ["pane-reset"] },
   ] },
 };
-for (const [key, title, frame] of [["agree", "Human against automated", "plotframe5"], ["recall", "Recall matrix", "plotframe6"]])
+for (const [key, title, frame] of [["agree", "Human against automated", "plotframe5"], ["recall", "Recall matrix", "plotframe6"], ["confusion", "Confusion matrix", "plotframe7"]])
   MENUS[key] = { title, frame, on: "agOn", items: [
     { label: "Save as SVG", action: () => exportImage("svg", key) },
     { label: "Save as PNG (600 dpi)", action: () => exportImage("png", key) },
     { label: "Save as PDF", action: () => exportImage("pdf", key) },
-    { label: "Save the data (CSV)", action: () => downloadText(agreeCsv(key), ST.ag.source + (key === "recall" ? "_recall_matrix_" : "_human_vs_automated_") + ST.method + ".csv") },
+    { label: "Save the data (CSV)", action: () => downloadText(agreeCsv(key), ST.ag.source + (key === "recall" ? "_recall_matrix_" : key === "confusion" ? "_confusion_" : "_human_vs_automated_") + ST.method + ".csv") },
   ] };
 for (const spec of Object.values(MENUS)) if (spec.on) spec.items.push({ label: "Hide this panel", action: () => { $(spec.on).click(); } });
 const HOVER_OPEN_MS = 180;
