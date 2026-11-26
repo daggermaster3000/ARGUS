@@ -70,7 +70,7 @@ import pandas as pd
 
 HERE = Path(__file__).resolve().parent
 
-from .. import paths, section_outline, sides  # noqa: E402
+from .. import cpself, paths, section_outline, sides  # noqa: E402
 
 # ---------------------------------------------------------------- Settings
 MASKS = paths.MASKS                                                # counting.py
@@ -102,7 +102,14 @@ METHODS = {
     "cellraw": {"label": "Per-nucleus rule, raw mean", "kind": "cell", "ks": (3, 5, 7), "default": 7,
                 "column": "AF488 mean"},
 }
-DEFAULT = "gauss-8"               #: the counting method of the official analysis (median + 8 robust SD)
+#: the paper's counting method: AF488⁺ cells segmented by the self-trained Cellpose model (cpself.py), counted at a
+#: signal of k noise SD (3, 5, 8), with a size filter of 20 µm² (10, 5, 3 µm² as variants)
+for _m, _a in cpself.SIZES.items():
+    METHODS[_m] = {"label": "Cellpose cpdino, self-trained" + ("" if _a == 20 else f", masks > {_a:g} µm²"), "kind": "mask",
+                   "ks": cpself.KS, "default": 5, "min_um2": _a, "cellpose": True}
+CPSELF = tuple(cpself.SIZES)
+DEFAULT = cpself.DEFAULT          #: the counting method of the paper (cpself-5)
+MASK_DEFAULT = "gauss-8"          #: the AF488 mask's counting threshold (the stored objects run_masks checks against)
 #: the Gaussian mask's variants with another size filter
 #: the object map's filter (object_filter.py): the 8 SD objects (> 3 µm²) kept by its feature ranges and hand exclusions,
 #: a method only once a filter has been saved
@@ -210,7 +217,8 @@ def masks_done(out: Path, name: str) -> bool:
     try:
         part = json.loads(methods_file(out, name).read_text(encoding="utf-8"))
         return part.get("version", 0) >= MASK_VERSION and all(mask_file(out, name, k).exists() for k in method_keys()
-                                                              if not METHODS[k.split("-")[0]].get("filtered"))
+                                                              if not METHODS[k.split("-")[0]].get("filtered")
+                                                              and not METHODS[k.split("-")[0]].get("cellpose"))
     except Exception:
         return False
 
@@ -223,7 +231,7 @@ def write_spreads(out: Path, table: pd.DataFrame) -> dict:
     """The robust SD of the threshold variants with a shared spread: the median over all sections of each section's own
     (``pooled``) and the median over each slide's sections (``slide``: section → value), from the stored counting
     summaries. A section's threshold is then its own median + k × that SD."""
-    noise = {n: json.loads((MASKS / n / "summary.json").read_text(encoding="utf-8"))["noise_sd"] for n in table["name"]}
+    noise = {n: json.loads((paths.af488_mask(n) / "summary.json").read_text(encoding="utf-8"))["noise_sd"] for n in table["name"]}
     t = table.assign(noise=table["name"].map(noise))
     by_slide = t.groupby("slide")["noise"].median()
     spreads = {"pooled": float(t["noise"].median()), "slide": {n: float(by_slide[s]) for n, s in zip(t["name"], t["slide"])}}
@@ -354,7 +362,7 @@ def section_sign(name: str, line) -> float | None:
     """The section's home sign (``sides.home_sign``) from the stored Gaussian 8 SD objects' area; None without a line."""
     if line is None:
         return None
-    o = pd.read_parquet(MASKS / name / "objects.parquet")
+    o = pd.read_parquet(paths.af488_mask(name) / "objects.parquet")
     o = o[o["mask"] == SIDE_MASK]
     raw = sides.raw_side(o[["Centroid Y (µm)", "Centroid X (µm)"]].to_numpy(float), line)
     return sides.home_sign(raw, o["Area (µm²)"].to_numpy(float))
@@ -453,7 +461,7 @@ def run_masks(name: str, out: str) -> str:
     f = max(1, int(round(TARGET_UM / voxel)))
     del nuclear
     # objects and cells outside the section are not counted (section_outline; the outline counting.py cached)
-    section = section_outline.outline_for(MASKS / name, paths.scan_path(name))     # not `outline`: that is the ring tracer
+    section = section_outline.outline_for(paths.af488_mask(name), paths.scan_path(name))     # not `outline`: that is the ring tracer
     # thresholds over the section's tissue from every channel; masks cut inside the outline widened 10 µm (counting.py version 4)
     tissue = section_outline.stats_mask(section, af488.shape)
     domain = section_outline.count_domain(section, af488.shape)
@@ -463,8 +471,8 @@ def run_masks(name: str, out: str) -> str:
         return section_outline.drop_outside(mask, section, line_um, voxel)[0]
 
     seconds["read"] = round(time.perf_counter() - tick, 1)
-    stored_summary = json.loads((MASKS / name / "summary.json").read_text(encoding="utf-8"))
-    stored_objects = pd.read_parquet(MASKS / name / "objects.parquet", columns=["mask"])["mask"].value_counts()
+    stored_summary = json.loads((paths.af488_mask(name) / "summary.json").read_text(encoding="utf-8"))
+    stored_objects = pd.read_parquet(paths.af488_mask(name) / "objects.parquet", columns=["mask"])["mask"].value_counts()
 
     def place(shapes: pd.DataFrame, in_region=None) -> pd.DataFrame:
         yx = shapes[["y", "x"]].to_numpy(float)
@@ -570,9 +578,9 @@ def run_masks(name: str, out: str) -> str:
     summary = {"version": MASK_VERSION, "id": sid, "name": name, "sign": sign, "counts": counts, "check": check,
                "seconds": {**seconds, "total": round(time.perf_counter() - started, 1)}}
     methods_file(out, name).write_text(json.dumps(_clean(summary), separators=(",", ":")), encoding="utf-8")
-    g = check[DEFAULT]
+    g = check[MASK_DEFAULT]
     return (f"{sid}: {summary['seconds']['total']:.0f} s ({', '.join(f'{k} {v:.0f}' for k, v in seconds.items())}); "
-            f"{DEFAULT} {g['objects']} objects (stored {g['stored_objects']}), crossed {counts[DEFAULT]['crossed']}")
+            f"{MASK_DEFAULT} {g['objects']} objects (stored {g['stored_objects']}), crossed {counts[MASK_DEFAULT]['crossed']}")
 
 
 # ---------------------------------------------------------------- the table and data.js
@@ -840,8 +848,54 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
     (out / "data.js").write_text("window.SECTION_DATA = " + text + ";\n", encoding="utf-8")
     shutil.copy(HERE / "section_browser.html", out / "section_browser.html")
     # the figure builder reads data.js and the biology notebook's sections_table.js (02_biology, last cell)
-    shutil.copy(HERE / "figure_builder.html", out / "figure_builder.html")
+    if (HERE / "figure_builder.html").exists():      # shipped with the paper package, not with the code repository
+        shutil.copy(HERE / "figure_builder.html", out / "figure_builder.html")
     return len(sections)
+
+
+def cpself_done(out: Path, name: str) -> bool:
+    try:
+        summary = json.loads(methods_file(out, name).read_text(encoding="utf-8"))
+        return summary.get("cpself_source") == str(paths.cellpose()) and all(
+            k in summary["counts"] and mask_file(out, name, k).exists() for k in cpself.keys())
+    except Exception:
+        return False
+
+
+def run_cpself(name: str, out: str) -> str:
+    """The self-trained Cellpose method for one section: its cells' outlines at each threshold and size filter, and
+    their counts (the same placement as ``cpself.count``), into parts/masks/ and the section's counts."""
+    from scipy import ndimage
+
+    out = Path(out)
+    sid = short(name)
+    t, sign = cpself.placed(name)
+    labels = np.load(paths.cellpose() / f"{sid}.npz")["labels"]
+    part = json.loads(part_file(out, name).read_text(encoding="utf-8"))
+    voxel, f = float(part["voxel"]), int(part["f"])
+    target = methods_file(out, name)
+    summary = json.loads(target.read_text(encoding="utf-8"))
+    boxes = ndimage.find_objects(labels)
+    rings = []
+    for lab in t["label"].astype(int):
+        box = boxes[lab - 1] if 0 < lab <= len(boxes) else None
+        rings.append(outline(labels[box] == lab, box[0].start, box[1].start, voxel, f) if box is not None else [])
+    shapes = pd.DataFrame({"area": t["area"], "y": t["y"], "x": t["x"], "rings": rings, "away": t["away"], "reg": t["reg"]})
+    shapes["side"] = np.where(np.isnan(shapes["away"]), -1, (shapes["away"] > 0).astype(int))
+    has_line = sign is not None
+    for m in CPSELF:
+        for k in METHODS[m]["ks"]:
+            key = f"{m}-{k}"
+            sel = shapes[((t["snr"] >= k) & (t["area"] > METHODS[m]["min_um2"])).to_numpy()]
+            a = sel["away"].to_numpy(float)
+            summary["counts"][key] = {"n": int(len(sel)), "reg": int(sel["reg"].astype(bool).sum()),
+                                      "crossed": int((a > 0).sum()) if has_line else None,
+                                      "home": int((a <= 0).sum()) if has_line else None,
+                                      "area2": int((a >= AREA_2_UM).sum()) if has_line else None, "thr": float(k)}
+            write_mask_js(mask_file(out, name, key), sid, key, sel)
+    summary["cpself_source"] = str(paths.cellpose())
+    target.write_text(json.dumps(_clean(summary), separators=(",", ":")), encoding="utf-8")
+    return f"{sid}: {DEFAULT} {summary['counts'][DEFAULT]['n']}"
 
 
 def pool_run(label: str, worker, todo: list[str], out: Path, every: int = 1) -> None:
@@ -873,19 +927,23 @@ def main(argv: list[str]) -> int:
         (out / folder).mkdir(parents=True, exist_ok=True)
     table = section_table()
     limit = int(argv[0]) if argv else None
+    scope = list(table["name"])[:limit] if limit else list(table["name"])   # --sections N: the first N sections, always the same
     print(f"{len(table)} sections -> {out}", flush=True)
-    todo = [n for n in table["name"] if not done(out, n)][:limit]
+    todo = [n for n in scope if not done(out, n)]
     pool_run("AF488 pictures", run_one, todo, out)
-    todo = [n for n in table["name"] if not red_file(out, n).exists() or not (out / "img" / f"{short(n)}_r.jpg").exists()]
-    pool_run("AF555 pictures", run_red, todo[:limit], out, every=25)
-    todo = [n for n in table["name"] if not masks_done(out, n)][:limit]
+    todo = [n for n in scope if not red_file(out, n).exists() or not (out / "img" / f"{short(n)}_r.jpg").exists()]
+    pool_run("AF555 pictures", run_red, todo, out, every=25)
+    todo = [n for n in scope if not masks_done(out, n)]
     write_spreads(out, table)                   # the shared robust SDs of the gpool / gslide thresholds
     pool_run("outlines and counts", run_masks, todo, out)
+    todo = [n for n in scope if (paths.cellpose() / f"{short(n)}.parquet").exists() and not cpself_done(out, n)]
+    pool_run("Cellpose self-trained", run_cpself, todo, out, every=25)
     apply_object_filter(out, table["name"])      # the object map's filter, when one is shipped (data/counting/object_filter.*)
     n = assemble(out, table)
     print(f"written {out / 'data.json'}: {n} sections", flush=True)
-    from . import objects_data                  # every counted object, for the figure builder (objects.js)
-    objects_data.main(["--out", str(out)])
+    if (HERE / "figure_builder.html").exists() and (HERE / "objects_data.py").exists():
+        from . import objects_data              # every counted object, for the figure builder (objects.js)
+        objects_data.main(["--out", str(out)])
     return 0
 
 

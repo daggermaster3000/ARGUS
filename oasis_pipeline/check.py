@@ -4,9 +4,14 @@
 
 * counting: per section, the thresholds and the number of objects of each mask, against ``data/counting/``
   (identical expected);
-* tables: every table of the paper (``rerun/figures/*.csv`` against ``results/tables/``), cell by cell, numbers to
-  6 significant digits (identical expected with the shipped segmentation; close, not identical, after ``--segment``);
-* browser: every section's counts in ``rerun/results/section_browser/data.json`` against ``results/section_browser/``.
+* cellpose: per section and method-threshold, the self-trained Cellpose counts (all, home, crossed, junction region)
+  against ``results/counting/cellpose_counts.csv`` (identical expected with the shipped masks; close after ``--infer``);
+* stats: the primary outcome and its sensitivity analyses against ``results/statistics/primary_outcome.csv``, numbers
+  to 6 significant digits (only when every section was counted);
+* tables: when the notebooks were run (paper package only), every table (``rerun/figures/*.csv`` against
+  ``results/tables/``), cell by cell;
+* browser: every section's counts in ``rerun/results/section_browser/data.json`` against ``results/section_browser/``,
+  for the methods both have.
 
 Prints what differs and exits 1 when anything does.
 """
@@ -27,6 +32,8 @@ from oasis import paths  # noqa: E402
 SHIPPED_MASKS = paths.DATA / "counting" / "af488_mask"
 SHIPPED_TABLES = paths.ROOT / "results" / "tables"
 SHIPPED_BROWSER = paths.ROOT / "results" / "section_browser"
+SHIPPED_CELLPOSE_COUNTS = paths.ROOT / "results" / "counting" / "cellpose_counts.csv"
+SHIPPED_STATISTICS = paths.ROOT / "results" / "statistics" / "primary_outcome.csv"
 
 
 def check_counting() -> int:
@@ -85,6 +92,41 @@ def check_tables() -> int:
     return bad
 
 
+def check_cellpose() -> int:
+    if not paths.CELLPOSE_COUNTS.exists():
+        print("cellpose: not re-run")
+        return 0
+    mine, ref = pd.read_csv(paths.CELLPOSE_COUNTS), pd.read_csv(SHIPPED_CELLPOSE_COUNTS)
+    m = mine.merge(ref, on=["section", "method"], how="left", suffixes=("", " shipped"), indicator=True)
+    missing = int((m["_merge"] != "both").sum())
+    cols = ("n", "home", "crossed", "region")
+    differ = ~np.logical_and.reduce([m[c].fillna(-1).to_numpy() == m[c + " shipped"].fillna(-1).to_numpy() for c in cols])
+    bad = sorted(set(m.loc[differ, "section"]))
+    print(f"cellpose: {mine['section'].nunique()} sections, {len(mine)} method-thresholds compared, "
+          f"{int(differ.sum())} differ in {len(bad)} sections" + (f": {bad[:10]}" if bad else "")
+          + (f"; {missing} not in the shipped table" if missing else "") + f" (masks: {paths.cellpose()})")
+    return int(differ.sum()) + missing
+
+
+def check_stats() -> int:
+    mine_file = paths.STATISTICS / "primary_outcome.csv"
+    if not mine_file.exists():
+        print("stats: not re-run")
+        return 0
+    mine, ref = pd.read_csv(mine_file), pd.read_csv(SHIPPED_STATISTICS)
+    if mine["n sections"].max() != ref["n sections"].max():
+        print(f"stats: re-run on {mine['n sections'].max()} sections, shipped on {ref['n sections'].max()}: not compared")
+        return 0
+    diffs = same_table(ref.sort_values(["outcome", "method"]).reset_index(drop=True),
+                       mine.sort_values(["outcome", "method"]).reset_index(drop=True))
+    p = mine[mine["primary"]].iloc[0]
+    print(f"stats: primary outcome {p['method']} WT3/GD1 {p['fold WT3/GD1']:.2f} ({p['CI low']:.2f}–{p['CI high']:.2f}); "
+          f"{'identical to the shipped' if not diffs else 'differs from the shipped'}")
+    for d in diffs[:5]:
+        print(f"      {d}")
+    return int(bool(diffs))
+
+
 def check_browser() -> int:
     mine = paths.BROWSER / "data.json"
     if not mine.exists():
@@ -92,16 +134,16 @@ def check_browser() -> int:
         return 0
     a = {s["name"]: s["counts"] for s in json.loads((SHIPPED_BROWSER / "data.json").read_text(encoding="utf-8"))["sections"]}
     b = {s["name"]: s["counts"] for s in json.loads(mine.read_text(encoding="utf-8"))["sections"]}
-    bad = [n for n in b if n in a and {k: {kk: v.get(kk) for kk in ("n", "crossed", "home", "reg")} for k, v in a[n].items()}
-           != {k: {kk: v.get(kk) for kk in ("n", "crossed", "home", "reg")} for k, v in b[n].items()}]
+    pick = lambda counts, keys: {k: {kk: counts[k].get(kk) for kk in ("n", "crossed", "home", "reg")} for k in keys}  # noqa: E731
+    bad = [n for n in b if n in a and pick(a[n], set(a[n]) & set(b[n])) != pick(b[n], set(a[n]) & set(b[n]))]
     print(f"browser: {len(b)} sections compared, {len(bad)} with different counts" + (f": {bad[:10]}" if bad else ""))
     return len(bad)
 
 
 def main() -> int:
     print(f"shipped: {paths.ROOT}\nre-run:  {paths.OUT}\nsegmentation used: {paths.segmentation()}\n")
-    bad = check_counting() + check_tables() + check_browser()
-    print("\nall identical" if not bad else f"\n{bad} differences (expected only after --segment)")
+    bad = check_counting() + check_cellpose() + check_stats() + check_tables() + check_browser()
+    print("\nall identical" if not bad else f"\n{bad} differences (expected only after --segment or --infer)")
     return 1 if bad else 0
 
 

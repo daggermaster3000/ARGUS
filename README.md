@@ -2342,7 +2342,11 @@ install_shortcut.py         creates/removes the desktop shortcut
 requirements.txt
 oasis_pipeline/             the OASIS paper's analysis as a standalone package (no viewer code), shipped in the
                             paper's data package as pipeline/: run.py re-makes every result from the raw scans,
-                            check.py compares with the shipped ones (oasis/ package, notebooks/, README.md)
+                            check.py compares with the shipped ones (oasis/ package, notebooks/, README.md);
+                            oasis/cpself.py counts the self-trained Cellpose masks (the paper's method), oasis/stats.py
+                            the primary outcome; REVIEWER_AGENT.md guides a reviewer's coding agent. Also exported
+                            (paper_package.py --code-repo) as the reviewers' code repository, without the notebooks
+                            and the figure builder
 microscopy_viewer/
   __main__.py               CLI entry point; opens argv paths, reports startup failures
   app.py                    assembles the viewer: docks, toolbar, shortcuts, file opening

@@ -60,6 +60,14 @@ JUNCTION_EVAL = DATA / "junction_eval"
 PICKS = DATA / "picks_20261020_0742.csv"
 PIPELINE = ROOT / "oasis_pipeline"
 VERIFIED_RUN = DATA / "_rerun_test"                               #: the pipeline's re-run checked identical
+#: the self-trained Cellpose model (cellpose_selftrain.py, epoch 20) and its masks on every section (cellpose_af488.py
+#: --model … --min-area 3): the paper's counting method (oasis_pipeline/oasis/cpself.py)
+CELLPOSE_MODEL = OUT / "cellpose_selftrain" / "models" / "cpdino_af488_self_e20"
+CELLPOSE_MASKS = OUT / "cellpose_af488_cpdino_af488_self_e20_min3"
+#: the code repository for the reviewers (build_code_repo): the pipeline without the notebooks and the figure builder
+CODE_REPO = Path(r"C:\Users\qfavey\Documents\oasis-assembloids")
+REPO_EXCLUDE = ("notebooks", "__pycache__", ".ipynb_checkpoints", ".venv")
+REPO_EXCLUDE_FILES = ("figure_builder.html", "objects_data.py", "glmm.py")
 #: the annotators, as the notebooks name them (folder → name in the package)
 ANNOTATORS = {"james_counts": "annotator_1", "quillan_counts": "annotator_2"}
 SQUARES = OUT / "annotation_v2"                                  #: the blinded count squares (annotation_squares.py)
@@ -242,6 +250,50 @@ def build_derived() -> None:
 def build_pipeline() -> None:
     robocopy(PIPELINE, PAPER / "pipeline", "__pycache__", ".ipynb_checkpoints", ".venv")
     say("pipeline: the analysis code")
+
+
+def build_cellpose() -> None:
+    """The self-trained Cellpose model (1.2 GB) and its masks (every mask > 3 µm², parquet + label map per section)."""
+    copy(CELLPOSE_MODEL, PAPER / "data" / "cellpose" / "model" / CELLPOSE_MODEL.name)
+    robocopy(CELLPOSE_MASKS, PAPER / "data" / "counting" / "cellpose")
+    say("cellpose: model and masks")
+
+
+def build_cellpose_results() -> None:
+    """The expected Cellpose counts and primary outcome, made by the pipeline itself from the shipped masks."""
+    import os
+
+    rerun = DATA / "_rerun_cellpose"
+    env = {**os.environ, "OASIS_PAPER": str(PAPER), "OASIS_OUT": str(rerun), "PYTHONIOENCODING": "utf-8"}
+    subprocess.run([sys.executable, str(PIPELINE / "run.py"), "--steps", "cellpose,stats"], cwd=PIPELINE, env=env, check=True)
+    copy(rerun / "counting" / "cellpose_counts.csv", PAPER / "results" / "counting" / "cellpose_counts.csv")
+    copy(rerun / "statistics" / "primary_outcome.csv", PAPER / "results" / "statistics" / "primary_outcome.csv")
+    say("results: Cellpose counts and the primary outcome")
+
+
+def build_code_repo(target: Path = CODE_REPO) -> None:
+    """The pipeline as a code repository for the reviewers: no notebooks, no figure builder (nor the object map), the
+    browser's links to them removed. README.md, REVIEWER_AGENT.md and .gitignore come from oasis_pipeline/ too; only
+    .git and a LICENSE added in the repository stay."""
+    keep = {".git", "LICENSE"}
+    for old in (target.iterdir() if target.exists() else []):          # the code is replaced, the repository's files kept
+        if old.name in keep:
+            continue
+        shutil.rmtree(old) if old.is_dir() else old.unlink()
+    for src in PIPELINE.rglob("*"):
+        rel = src.relative_to(PIPELINE)
+        if src.is_dir() or any(part in REPO_EXCLUDE for part in rel.parts) or src.name in REPO_EXCLUDE_FILES:
+            continue
+        dst = target / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    page = target / "oasis" / "browser" / "section_browser.html"
+    text = page.read_bytes().decode("utf-8")
+    import re
+    text, n = re.subn(r'<a href="(object_map|figure_builder)\.html"[^>]*>[^<]*</a>', "", text)
+    assert n == 2, n
+    page.write_bytes(text.encode("utf-8"))
+    say(f"code repository: {target}")
 
 
 def build_methods() -> None:
@@ -464,14 +516,18 @@ def main(argv: list[str]) -> int:
     build_segmentation(table)
     build_junction(table)
     build_counting(table)
+    build_cellpose()
     build_annotations()
     build_object_filter()
     build_derived()
     build_pipeline()
     build_methods()
     build_results()
+    build_cellpose_results()
     build_figures()
     build_readme(table)
+    if "--code-repo" in argv:
+        build_code_repo()
     if "--checksums" in argv:
         checksums()
     return 0

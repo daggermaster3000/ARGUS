@@ -1,0 +1,12 @@
+# outputs and environments
+rerun/
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+# the data package never goes in the repository
+data/
+results/
+*.ome.tiff
+*.npz
+*.parquet

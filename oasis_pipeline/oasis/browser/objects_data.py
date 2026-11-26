@@ -78,7 +78,7 @@ def section_objects(name: str, sign: float | None) -> tuple[pd.DataFrame, float]
     info = paths.section_info(name)
     line = info.get("line")
     line = np.asarray(json.loads(line) if isinstance(line, str) else line, float) if line else None
-    o = pd.read_parquet(MASKS / name / "objects.parquet")
+    o = pd.read_parquet(paths.af488_mask(name) / "objects.parquet")
     o = o[o["mask"] == METHOD_MASK].reset_index(drop=True)
     yx = o[["Centroid Y (µm)", "Centroid X (µm)"]].to_numpy(float)
     frame = pd.DataFrame({"area": o["Area (µm²)"].to_numpy(float), "reg": o["In region"].fillna(False).astype(int)})

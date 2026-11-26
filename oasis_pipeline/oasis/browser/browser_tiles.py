@@ -134,7 +134,7 @@ def main(argv: list[str]) -> int:
     out = BROWSER
     limit = int(argv[0]) if argv and argv[0].isdigit() else None
     names = [json.loads(p.read_text(encoding="utf-8"))["name"] for p in sorted((out / "parts").glob("*.json"))
-             if not p.name.endswith("_red.json")]
+             if not p.name.endswith("_red.json") and p.name != "spreads.json"]   # spreads.json: the gpool / gslide SDs
     todo = [n for n in names if not tiles_done(out, sb.short(n))]
     if limit:
         todo = todo[:limit]

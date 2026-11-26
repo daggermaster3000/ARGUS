@@ -80,7 +80,7 @@ def run_small(name: str, out: str) -> str:
     af488, nuclear, voxel = cv.read_planes(paths.scan_path(name))
     f = max(1, int(round(sb.TARGET_UM / voxel)))
     del nuclear
-    outline = sb.section_outline.outline_for(sb.MASKS / name, paths.scan_path(name))
+    outline = sb.section_outline.outline_for(paths.af488_mask(name), paths.scan_path(name))
     tissue = sb.section_outline.stats_mask(outline, af488.shape)      # as section_browser.run_masks
     domain = sb.section_outline.count_domain(outline, af488.shape)
     line_um = sb.section_outline.line_um(info)
@@ -89,7 +89,7 @@ def run_small(name: str, out: str) -> str:
     del af488
     signal = smooth - cv.local_background(smooth, cv.BACKGROUND_UM / voxel)
     del smooth
-    stored = json.loads((sb.MASKS / name / "summary.json").read_text(encoding="utf-8"))["thresholds"]
+    stored = json.loads((paths.af488_mask(name) / "summary.json").read_text(encoding="utf-8"))["thresholds"]
     cuts = sb.robust_cuts(signal, tissue, sb.METHODS["gauss"]["ks"])[0]
     (out / "parts" / "small").mkdir(parents=True, exist_ok=True)
     said = []

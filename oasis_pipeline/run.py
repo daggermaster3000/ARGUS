@@ -1,20 +1,25 @@
 """Re-run the OASIS paper's analysis from the raw scans and the stored junctions.
 
-    python run.py                          # counting → sizes → notebooks (statistics, figures, tables) → browser
-    python run.py --segment                # first segment every section again with Cellpose (GPU, ~1 day)
-    python run.py --steps counting,notebooks
+    python run.py                          # counting → sizes → cellpose → stats → browser
+    python run.py --steps cellpose,stats   # the paper's counts and primary outcome from the shipped masks (~2 min)
+    python run.py --infer                  # first re-make the Cellpose masks with the shipped model (GPU, hours)
+    python run.py --segment                # first segment every section's nuclei again with Cellpose (GPU, ~1 day)
     python run.py --workers 8              # sections processed at a time (each ~2 GB of memory)
     python check.py                        # compare the re-run with the shipped results
 
 Steps (each skips what it has already done, so an interrupted run continues):
 
-  segment    optional; Cellpose segmentation of every section (oasis/segment.py) → rerun/segmentation/
-  counting   the AF488 mask, the counted objects, each cell's cover (oasis/counting.py) → rerun/counting/
+  segment    optional; nuclei segmentation of every section (oasis/segment.py) → rerun/segmentation/
+  counting   the AF488 mask (its noise SD, the home side, the section outline) (oasis/counting.py) → rerun/counting/
   sizes      tissue area, assembloid length, the slim cell cache (oasis/sizes.py) → rerun/derived/
-  notebooks  01_validation (the count against the hand counts) and 02_biology (WT3 against GD1): every statistic,
-             figure and table of the paper → rerun/figures/, executed notebooks in rerun/notebooks/
-  browser    the interactive section browser and figure builder, with full-resolution tiles and outlines
+  infer      optional; the self-trained Cellpose masks of every section (oasis/cpself.py, GPU) → rerun/counting/cellpose/
+  cellpose   the paper's counts: Cellpose masks at 3, 5, 8 noise SD, home / crossed / junction region (oasis/cpself.py)
+             → rerun/counting/cellpose_counts.csv
+  stats      the primary outcome, WT3 ÷ GD1 of crossed cells per mm, and its sensitivity analyses (oasis/stats.py)
+             → rerun/statistics/primary_outcome.csv
+  browser    the interactive section browser, with full-resolution tiles and outlines
              → rerun/results/section_browser/ (~2–3 h)
+  notebooks  optional, when notebooks/ is present (the paper package): 01_validation, 02_biology
 
 Everything is written under ``rerun/`` beside ``data/`` (see oasis/paths.py); nothing shipped is changed.
 """
@@ -31,7 +36,7 @@ sys.path.insert(0, str(HERE))
 
 from oasis import paths  # noqa: E402
 
-STEPS = ("counting", "sizes", "notebooks", "browser")
+STEPS = ("counting", "sizes", "cellpose", "stats", "browser")
 NOTEBOOKS = ("01_validation.ipynb", "02_biology.ipynb")
 
 
@@ -65,14 +70,17 @@ def run_browser(workers: int, limit: int = 0) -> int:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--segment", action="store_true", help="segment every section again with Cellpose first")
-    parser.add_argument("--steps", default=",".join(STEPS), help=f"comma-separated, of: segment, {', '.join(STEPS)}")
+    parser.add_argument("--segment", action="store_true", help="segment every section's nuclei again with Cellpose first")
+    parser.add_argument("--infer", action="store_true", help="re-make the AF488 Cellpose masks with the shipped model (GPU)")
+    parser.add_argument("--steps", default=",".join(STEPS), help=f"comma-separated, of: segment, infer, {', '.join(STEPS)}, notebooks")
     parser.add_argument("--workers", type=int, default=4, help="sections processed at a time")
     parser.add_argument("--sections", type=int, default=0, help="only the first N sections (to try the pipeline)")
     args = parser.parse_args(argv)
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
     if args.segment and "segment" not in steps:
         steps.insert(0, "segment")
+    if args.infer and "infer" not in steps:
+        steps.insert(steps.index("cellpose") if "cellpose" in steps else len(steps), "infer")
     names = paths.section_names()[: args.sections] if args.sections else None
     print(f"package: {paths.ROOT}\noutputs: {paths.OUT}\nsteps:   {', '.join(steps)}", flush=True)
     for step in steps:
@@ -87,8 +95,21 @@ def main(argv: list[str]) -> int:
         elif step == "sizes":
             from oasis import sizes
             code = sizes.main(names, args.workers)
+        elif step == "infer":
+            from oasis import cpself
+            code = cpself.infer(names)
+        elif step == "cellpose":
+            from oasis import cpself
+            code = cpself.count(names)
+        elif step == "stats":
+            from oasis import stats
+            code = stats.main()
         elif step == "notebooks":
-            code = run_notebooks()
+            if not (HERE / "notebooks").is_dir():
+                print("no notebooks/ here (they ship with the paper package only)")
+                code = 2
+            else:
+                code = run_notebooks()
         elif step == "browser":
             code = run_browser(args.workers, args.sections)
         else:

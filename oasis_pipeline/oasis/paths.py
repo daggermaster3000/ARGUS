@@ -29,6 +29,8 @@ JUNCTIONS_HAND_DRAWN = ANNOTATIONS / "junctions_hand_drawn"
 COUNT_SQUARES = ANNOTATIONS / "count_squares"                  #: the blinded count squares (annotation_squares.py)
 SQUARES_KEY = COUNT_SQUARES / "key.csv"                       #: code → section, compartment, frame (µm)
 SQUARES_COUNTS = COUNT_SQUARES / "counts"                     #: square_counts_<annotator>.csv, as annotate.html exports
+CELLPOSE_MODEL = DATA / "cellpose" / "model" / "cpdino_af488_self_e20"   #: the self-trained Cellpose model (cpself.py)
+SHIPPED_CELLPOSE = DATA / "counting" / "cellpose"             #: <id>.parquet (every mask > 3 µm²: area, snr, …), <id>.npz
 OBJECT_FILTER = DATA / "counting" / "object_filter.parquet"    #: the object map's filter: per object (section, index) kept
 OBJECT_FILTER_META = DATA / "counting" / "object_filter.json"  #: its rules and hand exclusions
 
@@ -39,6 +41,9 @@ DERIVED = OUT / "derived"
 CACHE = DERIVED / "cell_cache"                                #: <s>.parquet: the cells near the line, slim
 SCALES_CSV = DERIVED / "section_scales.csv"                   #: assembloid length per section
 TISSUE_AREA_CSV = DERIVED / "section_tissue_area.csv"
+RERUN_CELLPOSE = OUT / "counting" / "cellpose"               #: the masks re-made by ``run.py --steps infer`` (GPU)
+CELLPOSE_COUNTS = OUT / "counting" / "cellpose_counts.csv"    #: per section and method-threshold: n, home, crossed, region
+STATISTICS = OUT / "statistics"                               #: the primary outcome (stats.py)
 FIGURES = OUT / "figures"                                     #: the paper's figures and tables
 BROWSER = OUT / "results" / "section_browser"
 NOTEBOOKS = OUT / "notebooks"                                 #: the executed notebooks
@@ -48,6 +53,19 @@ def segmentation() -> Path:
     """The segmentation every step reads: the re-run one when it is complete, else the shipped one."""
     done = RERUN_SEGMENTATION / "COMPLETE"
     return RERUN_SEGMENTATION if done.exists() else SHIPPED_SEGMENTATION
+
+
+SHIPPED_MASKS = DATA / "counting" / "af488_mask"               #: the shipped AF488 mask results (as MASKS)
+
+
+def af488_mask(name: str) -> Path:
+    """The section's AF488 mask results to read: the re-run's when the ``counting`` step made them, else the shipped."""
+    return MASKS / name if (MASKS / name / "summary.json").exists() else SHIPPED_MASKS / name
+
+
+def cellpose() -> Path:
+    """The Cellpose masks every later step reads: the re-made ones when complete, else the shipped ones."""
+    return RERUN_CELLPOSE if (RERUN_CELLPOSE / "COMPLETE").exists() else SHIPPED_CELLPOSE
 
 
 def scan_path(name: str) -> Path:
