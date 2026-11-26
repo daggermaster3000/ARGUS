@@ -49,13 +49,13 @@ MODEL = sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else "c
 #: the image Cellpose sees: "two" AF488 + nuclear stain (it then finds every cell; positivity is the SNR threshold),
 #: "af488" AF488 alone (it finds green cell bodies); chosen with --af488-only
 INPUT = "af488" if "--af488-only" in sys.argv else "two"
+#: smaller masks dropped at inference; --min-area 3 keeps every mask a size filter of 3, 5, 10 or 20 µm² may want
+MIN_AREA_UM2 = float(sys.argv[sys.argv.index("--min-area") + 1]) if "--min-area" in sys.argv else 20.0
 OUT = sb.OUT / (("cellpose_af488" if INPUT == "two" else "cellpose_af488_only") + ("" if MODEL == "cpdino" else "_" + Path(MODEL).name)
                 + ("" if MIN_AREA_UM2 == 20.0 else f"_min{MIN_AREA_UM2:g}"))
 NORM_PCT = (1.0, 99.9)            #: each channel scaled to these percentiles of the section's tissue
 FLOW_THRESHOLD = 0.4
 CELLPROB_THRESHOLD = 0.0
-#: smaller masks dropped at inference; --min-area 3 keeps every mask a size filter of 3, 5, 10 or 20 µm² may want
-MIN_AREA_UM2 = float(sys.argv[sys.argv.index("--min-area") + 1]) if "--min-area" in sys.argv else 20.0
 BATCH = 16
 VERSION = 1
 # --------------------------------------------------------------------------
@@ -133,7 +133,8 @@ def main(argv: list[str]) -> int:
         names = sorted(pd.read_csv(sb.SQUARES_KEY)["name"].unique())
     else:
         names = list(sb.section_table()["name"])
-    limit = next((int(a) for a in argv if a.isdigit()), None)
+    values = {argv[i + 1] for i, a in enumerate(argv[:-1]) if a in ("--model", "--min-area")}   # not a section limit
+    limit = next((int(a) for a in argv if a.isdigit() and a not in values), None)
     todo = [n for n in names if not done(n)][:limit]
     print(f"{len(todo)} sections -> {OUT} ({MODEL})", flush=True)
     started = time.perf_counter()
