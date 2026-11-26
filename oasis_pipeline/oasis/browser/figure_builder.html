@@ -53,7 +53,9 @@ table.st th { border-bottom: 1px solid var(--ink); }
 table.st td:first-child, table.st th:first-child { text-align: left; }
 .note { color: var(--dark); font-size: 12px; max-width: 900px; line-height: 1.45; }
 #scatterBox { margin-top: 18px; border-top: 1px solid var(--ink); padding-top: 6px; }
-#scatterBox.off, #distBox.off, #humanBox.off { display: none; }
+#scatterBox.off, #distBox.off, #humanBox.off, #agreeBox.off { display: none; }
+#agreeBox { margin-top: 18px; border-top: 1px solid var(--ink); padding-top: 6px; }
+#agreeBox .agplots { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
 #distBox, #humanBox { margin-top: 18px; border-top: 1px solid var(--ink); padding-top: 6px; }
 .plotframe { border: 1px dashed var(--light); display: inline-block; background: #fff; max-width: 100%; overflow: auto; }
 #hvTable table.st { margin: 0; }
@@ -168,7 +170,7 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
   </details>
   <details open>
     <summary>Panels</summary>
-    <div class="row"><span>Show</span><label><input type="checkbox" id="scOn">scatter</label><label><input type="checkbox" id="dsOn">distribution</label><label><input type="checkbox" id="hvOn">human against automated</label></div>
+    <div class="row"><span>Show</span><label><input type="checkbox" id="scOn">scatter</label><label><input type="checkbox" id="dsOn">distribution</label><label><input type="checkbox" id="hvOn">human against automated</label><label title="The blinded count squares: correlation and cell-by-cell recall"><input type="checkbox" id="agOn">agreement (squares)</label></div>
     <p class="hint">Everything else is on the plots: <b>right-click a plot</b> for its layers, axes, statistics, text, size and font, colours and export.</p>
   </details>
   <details open id="galleryBox">
@@ -212,6 +214,23 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
     <p class="plothint">Right-click the plot for options · <button class="linkbtn" data-menu="human">or open them here</button></p>
     <div id="hvStats"></div>
     <div id="hvTable" style="max-height: 420px; overflow: auto; border: 1px solid var(--light)"></div>
+  </div>
+  <div id="agreeBox" class="off">
+    <h2>Agreement with human counts (blinded squares)</h2>
+    <p id="agNote" class="note"></p>
+    <div class="row">
+      <label>Points <select id="agUnit"><option value="section">per section (its squares added up)</option><option value="square">per square</option></select></label>
+      <label title="A human point and another point or object closer than this are the same cell">match within <select id="agRadius"><option value="4">4</option><option value="6">6</option><option value="8">8</option><option value="10">10</option></select> µm</label>
+      <label><input type="checkbox" id="agFilters"> apply the page's filters</label>
+      <span class="note">Human counts by: the square annotators ticked above</span>
+    </div>
+    <div class="agplots">
+      <div><div class="plotframe" id="plotframe5"><div id="plot5"></div></div>
+        <p class="plothint">Right-click the plot to save it · <button class="linkbtn" data-menu="agree">or open the menu here</button></p></div>
+      <div><div class="plotframe" id="plotframe6"><div id="plot6"></div></div>
+        <p class="plothint">Right-click the matrix to save it · <button class="linkbtn" data-menu="recall">or open the menu here</button></p></div>
+    </div>
+    <div id="agStats"></div>
   </div>
   <div id="methodsBox">
     <h2>Methods</h2>
@@ -1418,6 +1437,7 @@ const DEFAULTS = {
     medians: true, stats: true, statsText: null, statsPos: null, widthMm: 80, heightMm: 60, sizeAuto: true, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null },
   hv: { on: true, plot: "scatter", vs: "auto", unit: "section", labels: false, group: "genotype", show: "both", gstats: {}, filters: false, size: 4, widthMm: 95, heightMm: 70, title: "", xlabel: "", ylabel: "", legendNames: {}, legendPos: null,
     statsText: null, statsPos: null },
+  ag: { on: false, unit: "section", radius: 6, filters: false, widthMm: 85, heightMm: 80 },
 };
 // publication greys: WT3 filled dark grey, GD1 open white, black edges; black bars, lines and text
 const PUBLICATION_COLORS = { groups: { WT3: { fill: DARK, edge: INK }, GD1: { fill: "#ffffff", edge: INK } }, mean: INK, fit: INK, text: INK };
@@ -1638,6 +1658,7 @@ function syncMethodMenus() {
 }
 function writeControls() {
   syncMethodMenus();
+  $("agOn").checked = !!ST.ag.on; $("agUnit").value = ST.ag.unit; $("agRadius").value = String(ST.ag.radius); $("agFilters").checked = !!ST.ag.filters;
   for (const id of INPUTS) {
     const el = $(id), v = ST[id];
     if (el === document.activeElement && el.type !== "checkbox" && el.tagName !== "SELECT") continue;   // not under the cursor of someone typing
@@ -1675,7 +1696,7 @@ function applyPreset(key) {
 function setState(s) {
   const base = JSON.parse(JSON.stringify(DEFAULTS));
   ST = Object.assign(base, s, { sc: Object.assign(base.sc, (s && s.sc) || {}), ds: Object.assign(base.ds, (s && s.ds) || {}),
-    hv: Object.assign(base.hv, (s && s.hv) || {}) });
+    hv: Object.assign(base.hv, (s && s.hv) || {}), ag: Object.assign(base.ag, (s && s.ag) || {}) });
   if (!["section", "object"].includes(ST.ds.unit)) ST.ds.unit = "section";
   if (!(ST.ds.kind in KIND_NAMES)) ST.ds.kind = DEFAULTS.ds.kind;
   if (!["scatter", "ba", "groups"].includes(ST.hv.plot)) ST.hv.plot = "scatter";
@@ -2517,6 +2538,7 @@ function update() {
   updateScatter();
   updateDist();
   updateHuman();
+  updateAgree();
   updateMethods();
   renderData();
   saveHash();
@@ -3498,6 +3520,11 @@ let HV = null, HV_KEY = "", DRAWN4 = false, BUSY4 = false;
 function buildHumanControls() {
   wirePanelInputs(HV_INPUTS, () => ST.hv, HV_NUMERIC);
   $("bHvSvg").onclick = () => exportImage("svg", "human");
+  // the agreement panel's controls
+  $("agOn").onchange = () => { ST.ag.on = $("agOn").checked; update(); };
+  $("agUnit").onchange = () => { ST.ag.unit = $("agUnit").value; update(); };
+  $("agRadius").onchange = () => { ST.ag.radius = +$("agRadius").value; update(); };
+  $("agFilters").onchange = () => { ST.ag.filters = $("agFilters").checked; update(); };
   $("bHvPdf").onclick = () => exportImage("pdf", "human");
   $("bHvPng").onclick = () => exportImage("png", "human");
   $("bHvCsv").onclick = () => downloadText(humanCsv(false), "human_vs_automated_" + ST.method + ".csv");
@@ -4165,17 +4192,148 @@ function svgToPdf(text, wMm, hMm, name) {
   }).catch((e) => alert("The PDF could not be made: " + e.message + ". The SVG export works without a network connection."));
 }
 
+
+// ------------------------------------------------------------------ agreement with the blinded squares: correlation, recall
+// The squares' human counts (the square annotators ticked: n > 2) against the automated count of the chosen method, per
+// section (its squares added up) or per square; and, cell by cell, which source finds which source's cells: every pair
+// of sources matched one-to-one within a radius, nearest pairs first, on the squares both counted.
+let AG = null;
+function agSources() { return ST.annotators.filter((a) => a > 2); }
+function agMatch(a, b, r) {
+  if (!a.length || !b.length) return 0;
+  const pairs = [];
+  for (let i = 0; i < a.length; i++) for (let j = 0; j < b.length; j++) {
+    const d = Math.hypot(a[i][0] - b[j][0], a[i][1] - b[j][1]); if (d <= r) pairs.push([d, i, j]);
+  }
+  pairs.sort((x, y) => x[0] - y[0]);
+  const ua = new Set(), ub = new Set(); let n = 0;
+  for (const [, i, j] of pairs) if (!ua.has(i) && !ub.has(j)) { ua.add(i); ub.add(j); n++; }
+  return n;
+}
+function computeAgree() {
+  const anns = agSources(), keep = ST.ag.filters ? new Set(selected()) : null, method = ST.method;
+  const squares = [];
+  for (const r of ROWS) {
+    const d = r.d; if (!d || !d.squares || !d.squares.length || (keep && !keep.has(r))) continue;
+    const umpx = d.um_per_px || 1;
+    for (const q of d.squares) {
+      const pts = {}, counts = {};
+      for (const a of anns) {
+        if (q.human[String(a)] === undefined) continue;
+        counts[a] = q.human[String(a)];
+        const h = (d.humans || []).find((x) => x.n === a);
+        pts[a] = h ? h.dots.x.map((x, i) => [x, h.dots.y[i]]).filter(([x, y]) => x >= q.x && x < q.x + q.size && y >= q.y && y < q.y + q.size) : [];
+      }
+      const auto = q.automated ? q.automated[method] : undefined;
+      pts.auto = q.auto_xy && q.auto_xy[method] ? q.auto_xy[method] : null;
+      squares.push({ r, q, umpx, counts, auto, pts });
+    }
+  }
+  // the correlation: per square or per section, human = mean of the annotators who counted it
+  const pts = [];
+  const human = (c) => { const v = Object.values(c); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : NaN; };
+  if (ST.ag.unit === "square") {
+    for (const s of squares) if (Object.keys(s.counts).length && Number.isFinite(s.auto)) pts.push({ r: s.r, label: s.q.code + " " + s.q.compartment, human: human(s.counts), auto: s.auto });
+  } else {
+    const by = new Map();
+    for (const s of squares) {
+      if (!Object.keys(s.counts).length || !Number.isFinite(s.auto)) continue;
+      const e = by.get(s.r) || { r: s.r, label: s.r.id, human: 0, auto: 0 }; e.human += human(s.counts); e.auto += s.auto; by.set(s.r, e);
+    }
+    pts.push(...by.values());
+  }
+  const L = (v) => Math.log10(Math.max(v, 0.5));
+  const st = pts.length >= 3 ? { n: pts.length, r: STATS.pearson(pts.map((p) => L(p.human)), pts.map((p) => L(p.auto))),
+    rho: (STATS.spearman(pts.map((p) => p.human), pts.map((p) => p.auto)) || {}).rho,
+    ccc: STATS.linCcc(pts.map((p) => L(p.human)), pts.map((p) => L(p.auto))),
+    ratio: pts.reduce((a, p) => a + p.auto, 0) / Math.max(pts.reduce((a, p) => a + p.human, 0), 1e-9) } : null;
+  // the recall matrix: row = whose cells, column = who found them
+  const src = [...anns, "auto"], name = (a) => (a === "auto" ? "Automated" : "Ann. " + (a - 2));
+  const M = src.map(() => src.map(() => null)), pair = {};
+  for (const a of src) for (const b of src) {
+    let na = 0, nb = 0, m = 0, used = 0;
+    for (const s of squares) {
+      if (!s.pts[a] || !s.pts[b]) continue;
+      used++; na += s.pts[a].length; nb += s.pts[b].length;
+      m += a === b ? s.pts[a].length : agMatch(s.pts[a], s.pts[b], ST.ag.radius / s.umpx);
+    }
+    pair[a + "|" + b] = { na, nb, m, squares: used };
+  }
+  src.forEach((a, i) => src.forEach((b, j) => { const p = pair[a + "|" + b]; M[i][j] = p.na ? p.m / p.na : null; }));
+  return { pts, st, src, names: src.map(name), M, pair, nSquares: squares.length, anns };
+}
+function agreeFigure(z) {
+  const ag = ST.ag, fs = ST.fontPt * z, C = COLORS(), W = ag.widthMm * PT_PER_MM * z, H = ag.heightMm * PT_PER_MM * z;
+  const traces = [], vals = AG.pts.flatMap((p) => [Math.max(p.human, 0.5), Math.max(p.auto, 0.5)]);
+  const lo = Math.pow(10, Math.floor(Math.log10(Math.min(...vals)) * 2) / 2), hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...vals)) * 2) / 2);
+  traces.push({ type: "scatter", mode: "lines", x: [lo, hi], y: [lo, hi], line: { color: MID, width: 0.8 * z, dash: "dash" }, hoverinfo: "skip", showlegend: false });
+  for (const g of GENOTYPES) {
+    const p = AG.pts.filter((x) => x.r.genotype === g), gc = groupColor({ key: g, g });
+    traces.push({ type: "scatter", mode: "markers", name: g, x: p.map((x) => Math.max(x.human, 0.5)), y: p.map((x) => Math.max(x.auto, 0.5)),
+      customdata: p.map((x) => [x.label, x.human.toFixed(1), x.auto]), hovertemplate: "%{customdata[0]}<br>human %{customdata[1]}, automated %{customdata[2]}<extra></extra>",
+      marker: { symbol: SYMBOL[g], size: 5 * z, color: gc.fill, line: { color: gc.edge, width: 0.8 * z } } });
+  }
+  const s = AG.st, axb = baseAxis(C, z, fs);
+  const txt = s ? "r = " + s.r.toFixed(2) + " (log)<br>ρ = " + s.rho.toFixed(2) + "<br>CCC = " + s.ccc.toFixed(2) + "<br>n = " + s.n : "";
+  return { data: traces, layout: { width: W, height: H, paper_bgcolor: "#ffffff", plot_bgcolor: "#ffffff", font: { family: "Arial, Helvetica, sans-serif", size: fs, color: C.text },
+    margin: { l: 56 * z, r: 12 * z, t: 12 * z, b: 46 * z }, showlegend: true, legend: { x: 1, xanchor: "right", y: 0, yanchor: "bottom", font: { size: fs * 0.9 } },
+    annotations: [{ text: txt, xref: "paper", yref: "paper", x: 0.03, y: 0.97, xanchor: "left", yanchor: "top", showarrow: false, align: "left", font: { size: fs * 0.92 } }],
+    xaxis: { ...axb, type: "log", range: [Math.log10(lo), Math.log10(hi)], ...humanTicks(lo, hi), title: { text: "Human count (mean of " + (AG.anns.length > 1 ? AG.anns.length + " annotators" : "annotator " + (AG.anns[0] - 2)) + ")" } },
+    yaxis: { ...axb, type: "log", range: [Math.log10(lo), Math.log10(hi)], ...humanTicks(lo, hi), title: { text: "Automated count" }, scaleanchor: "x", scaleratio: 1 } } };
+}
+function recallFigure(z) {
+  const ag = ST.ag, fs = ST.fontPt * z, C = COLORS(), W = ag.widthMm * PT_PER_MM * z, H = ag.heightMm * PT_PER_MM * z;
+  const n = AG.src.length, zz = AG.M.map((row) => row.map((v) => (v === null ? null : v)));
+  const ann = [];
+  AG.M.forEach((row, i) => row.forEach((v, j) => ann.push({ x: AG.names[j], y: AG.names[i], text: v === null ? "–" : Math.round(100 * v) + " %", showarrow: false,
+    font: { size: fs * 0.95, color: v !== null && v > 0.55 ? "#ffffff" : C.text } })));
+  return { data: [{ type: "heatmap", z: zz, x: AG.names, y: AG.names, zmin: 0, zmax: 1, colorscale: [[0, "#ffffff"], [1, "#3a3a3a"]], xgap: 1.5 * z, ygap: 1.5 * z,
+    hovertemplate: "%{y}'s cells found by %{x}: %{z:.0%}<extra></extra>", colorbar: { thickness: 8 * z, len: 0.8, tickformat: ".0%", outlinewidth: 0, tickfont: { size: fs * 0.85 } } }],
+    layout: { width: W, height: H, paper_bgcolor: "#ffffff", plot_bgcolor: "#ffffff", font: { family: "Arial, Helvetica, sans-serif", size: fs, color: C.text }, annotations: ann,
+      margin: { l: 70 * z, r: 10 * z, t: 12 * z, b: 46 * z },
+      xaxis: { side: "bottom", tickangle: 0, title: { text: "found by", standoff: 6 * z }, showline: false, ticks: "",
+        tickmode: "array", tickvals: AG.names, ticktext: AG.names },
+      yaxis: { autorange: "reversed", title: { text: "cells of", standoff: 8 * z }, showline: false, ticks: "", automargin: true } } };
+}
+function updateAgree() {
+  $("agreeBox").className = ST.ag.on ? "" : "off";
+  if (!ST.ag.on) return;
+  AG = computeAgree();
+  const meth = METHODS.find((m) => ST.method.startsWith(m.key + "-")), k = ST.method.split("-")[1];
+  $("agNote").textContent = (meth ? meth.label + ", " + k + " SD" : ST.method) + " · " + (AG.anns.length ? AG.anns.map((a) => ANN_NAME[a]).join(", ") : "no square annotator ticked") +
+    " · " + AG.nSquares + " squares · match within " + ST.ag.radius + " µm";
+  if (!AG.anns.length || !AG.pts.length) { Plotly.purge("plot5"); Plotly.purge("plot6"); $("agStats").innerHTML = "<p class='note'>Tick at least one square annotator under “Human counts by”.</p>"; return; }
+  const a = agreeFigure(ST.zoom || 1), b = recallFigure(ST.zoom || 1), cfg = { displaylogo: false, responsive: false, modeBarButtonsToRemove: ["toImage", "select2d", "lasso2d"] };
+  Plotly.react("plot5", a.data, a.layout, cfg); Plotly.react("plot6", b.data, b.layout, cfg);
+  const ix = AG.src.indexOf("auto");
+  $("agStats").innerHTML = "<table class='st'><tr><th>Automated against</th><th>human cells</th><th>automated objects</th><th>matched</th><th>recall (found)</th><th>precision (dotted)</th><th>F₁</th><th>squares</th></tr>" +
+    AG.anns.map((an) => { const p = AG.pair[an + "|auto"], re = p.na ? p.m / p.na : NaN, pr = p.nb ? p.m / p.nb : NaN;
+      return "<tr><td>annotator " + (an - 2) + "</td><td>" + p.na + "</td><td>" + p.nb + "</td><td>" + p.m + "</td><td>" + (100 * re).toFixed(0) + " %</td><td>" +
+        (100 * pr).toFixed(0) + " %</td><td>" + (2 * p.m / Math.max(p.na + p.nb, 1)).toFixed(2) + "</td><td>" + p.squares + "</td></tr>"; }).join("") + "</table>" +
+    "<p class='note'>Recall matrix: row = whose cells, column = who found them; a cell of the row counts as found when the column has a point or object " +
+    "within " + ST.ag.radius + " µm of it (one-to-one, nearest pairs first), on the squares both counted. The automated column is the recall of the method; " +
+    "the automated row is its precision. Correlation: Pearson r on log₁₀ counts, Spearman ρ, Lin's CCC on log₁₀ counts (zero counts as 0.5).</p>";
+}
+function agreeCsv(which) {
+  if (!AG) return "";
+  if (which === "recall") return csvText(["cells of", ...AG.names.map((n) => "found by " + n)], AG.M.map((row, i) => [AG.names[i], ...row.map((v) => (v === null ? "" : v))]));
+  return csvText(["section", "point", "genotype", "experiment", "slide", "human", "automated_" + ST.method], AG.pts.map((p) => [p.r.id, p.label, p.r.genotype, p.r.experiment, p.r.slide, p.human, p.auto]));
+}
+
 function exportImage(format, which) {
   // The figure as drawn on screen (zoom z: 1 pt = z px). The SVG gets its physical size in mm and a viewBox, so it
   // opens at the chosen size with the text as text; the PNG is scaled to 600 dpi at that size.
   const z = ST.zoom || 1;
   if (which === "dist" && !(DIST && DIST.ok)) return Promise.resolve();
   if (which === "human" && !(HV && HV.rows.length)) return Promise.resolve();
-  const fig = which === "scatter" ? scatterFigure(z) : which === "dist" ? distFigure(z) : which === "human" ? humanFigure(z) : figure(z);
+  if ((which === "agree" || which === "recall") && !(AG && AG.pts.length)) return Promise.resolve();
+  const fig = which === "scatter" ? scatterFigure(z) : which === "dist" ? distFigure(z) : which === "human" ? humanFigure(z)
+    : which === "agree" ? agreeFigure(z) : which === "recall" ? recallFigure(z) : figure(z);
   const W = fig.layout.width, H = fig.layout.height;
-  const size = which === "scatter" ? ST.sc : which === "dist" ? ST.ds : which === "human" ? ST.hv : ST;
+  const size = which === "scatter" ? ST.sc : which === "dist" ? ST.ds : which === "human" ? ST.hv : which === "agree" || which === "recall" ? ST.ag : ST;
   const wMm = size.widthMm, hMm = size.heightMm;
-  const stem = which === "human" ? "human_vs_automated_" + ST.method + (ST.hv.plot === "ba" ? "_bland_altman" : "")
+  const stem = which === "agree" ? "squares_human_vs_automated_" + ST.method + "_" + ST.ag.unit : which === "recall" ? "squares_recall_matrix_" + ST.method + "_" + ST.ag.radius + "um"
+    : which === "human" ? "human_vs_automated_" + ST.method + (ST.hv.plot === "ba" ? "_bland_altman" : "")
     : fileStem() + (which ? "_" + (which === "dist" ? "distribution" : which) : "");
   const pdf = format === "pdf";
   if (pdf) format = "svg";
@@ -4657,6 +4815,13 @@ const MENUS = {
     { label: "Reset", panes: ["pane-reset"] },
   ] },
 };
+for (const [key, title, frame] of [["agree", "Human against automated (squares)", "plotframe5"], ["recall", "Recall matrix (squares)", "plotframe6"]])
+  MENUS[key] = { title, frame, on: "agOn", items: [
+    { label: "Save as SVG", action: () => exportImage("svg", key) },
+    { label: "Save as PNG (600 dpi)", action: () => exportImage("png", key) },
+    { label: "Save as PDF", action: () => exportImage("pdf", key) },
+    { label: "Save the data (CSV)", action: () => downloadText(agreeCsv(key), (key === "recall" ? "squares_recall_matrix_" : "squares_human_vs_automated_") + ST.method + ".csv") },
+  ] };
 for (const spec of Object.values(MENUS)) if (spec.on) spec.items.push({ label: "Hide this panel", action: () => { $(spec.on).click(); } });
 const HOVER_OPEN_MS = 180;
 let MENU = null;              // { panel, el, fly, item, timer }

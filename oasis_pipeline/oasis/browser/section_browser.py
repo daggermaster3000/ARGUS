@@ -681,8 +681,11 @@ def square_numbers(out: Path, parts: dict[str, dict]) -> tuple[dict[str, dict], 
             x0, y0, side = k["frame_left_um"] / voxel / f, k["frame_top_um"] / voxel / f, k["frame_um"] / voxel / f
             auto = {m: int(((c[:, 0] >= x0) & (c[:, 0] < x0 + side) & (c[:, 1] >= y0) & (c[:, 1] < y0 + side)).sum())
                     for m, c in centroids.items()}
+            # each method's objects in the frame (picture pixels), for the figure builder's cell-by-cell recall
+            auto_xy = {m: np.round(c[(c[:, 0] >= x0) & (c[:, 0] < x0 + side) & (c[:, 1] >= y0) & (c[:, 1] < y0 + side)], 1).tolist()
+                       for m, c in centroids.items()}
             entry = {"code": k["code"], "compartment": k["compartment"], "x": round(x0, 1), "y": round(y0, 1), "size": round(side, 1),
-                     "human": {}, "automated": auto}
+                     "human": {}, "automated": auto, "auto_xy": auto_xy}
             for who, s in seen[seen["code"] == k["code"]].groupby("who"):
                 d = dots[(dots["code"] == k["code"]) & (dots["who"] == who)]
                 n = 2 + int(who)
