@@ -134,9 +134,37 @@ if OBJECT_FILTER.exists() and OBJECT_FILTER_META.exists():
 #: Cellpose cpdino fine-tuned on the counting mask's surest cells (cellpose_selftrain.py, run by cellpose_af488.py):
 #: its masks in the section at mean signal ≥ k noise SD; a method once the run's tables exist
 CELLPOSE_SELF = OUT / "cellpose_af488_cpdino_af488_self_e20"
+#: the same model's run keeping masks from 3 µm² (cellpose_af488.py --min-area 3): once complete, the method's source,
+#: with a size filter of 20, 10, 5 or 3 µm² (the variants cpself, cpself10, cpself5, cpself3)
+CELLPOSE_SELF_ALL = OUT / "cellpose_af488_cpdino_af488_self_e20_min3"
+CP_SIZES = (20,)
+if CELLPOSE_SELF_ALL.is_dir() and CELLPOSE_SELF.is_dir() and \
+        len(list(CELLPOSE_SELF_ALL.glob("*.parquet"))) >= len(list(CELLPOSE_SELF.glob("*.parquet"))) > 0:
+    CELLPOSE_SELF, CP_SIZES = CELLPOSE_SELF_ALL, (20, 10, 5, 3)
 if CELLPOSE_SELF.is_dir() and any(CELLPOSE_SELF.glob("*.parquet")):
-    METHODS["cpself"] = {"label": "Cellpose cpdino self-trained on the counting mask's surest cells", "kind": "mask",
-                         "ks": (3, 5, 8), "default": 5, "min_um2": 20.0, "cellpose": str(CELLPOSE_SELF.name)}
+    for _a in CP_SIZES:
+        METHODS["cpself" if _a == 20 else f"cpself{_a}"] = {
+            "label": "Cellpose cpdino self-trained on the counting mask's surest cells" + ("" if _a == 20 else f", masks > {_a} µm²"),
+            "kind": "mask", "ks": (3, 5, 8), "default": 5, "min_um2": float(_a), "cellpose": str(CELLPOSE_SELF.name)}
+CPSELF = tuple(m for m, spec in METHODS.items() if spec.get("cellpose"))
+#: the pages' menus: each method's family and its variant within the family (method → (family, variant))
+MENU = {
+    "gauss": ("AF488 mask, Gaussian 20 µm background", "section's SD, objects > 20 µm²"),
+    "gauss10": ("AF488 mask, Gaussian 20 µm background", "section's SD, objects > 10 µm²"),
+    "gauss5": ("AF488 mask, Gaussian 20 µm background", "section's SD, objects > 5 µm²"),
+    "gauss3": ("AF488 mask, Gaussian 20 µm background", "section's SD, objects > 3 µm²"),
+    "gpool": ("AF488 mask, Gaussian 20 µm background", "SD pooled over all sections, objects > 20 µm²"),
+    "gslide": ("AF488 mask, Gaussian 20 µm background", "SD pooled over the slide, objects > 20 µm²"),
+    "gfilt": ("AF488 mask, Gaussian 20 µm background", "filtered on the object map"),
+    "median": ("AF488 mask, local median 45 µm background", "objects > 20 µm²"),
+    "cellmf": ("Per-nucleus rule", "median-filtered mean"),
+    "cellraw": ("Per-nucleus rule", "raw mean"),
+    "cpself": ("Cellpose cpdino, self-trained", "masks > 20 µm²"),
+    "cpself10": ("Cellpose cpdino, self-trained", "masks > 10 µm²"),
+    "cpself5": ("Cellpose cpdino, self-trained", "masks > 5 µm²"),
+    "cpself3": ("Cellpose cpdino, self-trained", "masks > 3 µm²"),
+}
+
 SIZE_VARIANTS = tuple(m for m, spec in METHODS.items() if spec.get("of") == "gauss" and not spec.get("filtered"))
 MEDIAN_BACKGROUND_UM = 45.0       #: junction_analysis.less_local_median's window (for the label only)
 SIMPLIFY_PX = 0.5                 #: outlines simplified to within this many picture pixels
@@ -748,8 +776,10 @@ def square_numbers(out: Path, parts: dict[str, dict]) -> tuple[dict[str, dict], 
 
 def cpself_done(out: Path, name: str) -> bool:
     try:
-        counts = json.loads(methods_file(out, name).read_text(encoding="utf-8"))["counts"]
-        return all(f"cpself-{k}" in counts and mask_file(out, name, f"cpself-{k}").exists() for k in METHODS["cpself"]["ks"])
+        summary = json.loads(methods_file(out, name).read_text(encoding="utf-8"))
+        counts = summary["counts"]
+        return summary.get("cpself_source") == CELLPOSE_SELF.name and all(
+            f"{m}-{k}" in counts and mask_file(out, name, f"{m}-{k}").exists() for m in CPSELF for k in METHODS[m]["ks"])
     except Exception:
         return False
 
@@ -788,9 +818,9 @@ def run_cpself(name: str, out: str) -> str:
         shapes["reg"] = band[rows, cols]
     else:
         shapes["reg"] = False
-    for k in METHODS["cpself"]["ks"]:
-        key = f"cpself-{k}"
-        sel = shapes[(t["snr"] >= k).to_numpy()]
+    for m, k in [(m, k) for m in CPSELF for k in METHODS[m]["ks"]]:
+        key = f"{m}-{k}"
+        sel = shapes[((t["snr"] >= k) & (t["area"] > METHODS[m]["min_um2"])).to_numpy()]
         a = sel["away"].to_numpy(float)
         has_line = sign is not None
         summary["counts"][key] = {"n": int(len(sel)), "reg": int(sel["reg"].astype(bool).sum()),
@@ -798,6 +828,7 @@ def run_cpself(name: str, out: str) -> str:
                                   "home": int((a <= 0).sum()) if has_line else None,
                                   "area2": int((a >= AREA_2_UM).sum()) if has_line else None, "thr": float(k)}
         write_mask_js(mask_file(out, name, key), sid, key, sel)
+    summary["cpself_source"] = CELLPOSE_SELF.name
     target.write_text(json.dumps(_clean(summary), separators=(",", ":")), encoding="utf-8")
     return f"{sid}: cpself-5 {summary['counts']['cpself-5']['n']}"
 
@@ -897,6 +928,7 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
         sections.append(entry)
     catalogue = [{"key": m, "label": spec["label"], "kind": spec["kind"], "ks": list(spec["ks"]),
                   "default": spec["default"], "min_um2": spec.get("min_um2"), "of": spec.get("of"),
+                  "family": MENU.get(m, (spec["label"], ""))[0], "variant": MENU.get(m, (spec["label"], ""))[1],
                   **({"filter": json.loads(OBJECT_FILTER_META.read_text(encoding="utf-8"))} if spec.get("filtered") else {})}
                  for m, spec in METHODS.items()]
     payload = _clean({"generated": time.strftime("%Y-%m-%d %H:%M"), "methods": catalogue, "default": DEFAULT,
@@ -950,7 +982,7 @@ def main(argv: list[str]) -> int:
     todo = [n for n in table["name"] if masks_done(out, n) and not sizes_done(out, n)][:limit]
     pool_run("variants (objects > 10, > 5, > 3 µm²; SD pooled over all sections, over the slide)", run_sizes, todo, out)
     apply_object_filter(out, table["name"])      # the object map's filter, when one has been saved (object_filter.py)
-    if "cpself" in METHODS:                      # the self-trained Cellpose, for the sections it has run on
+    if CPSELF:                                   # the self-trained Cellpose, for the sections it has run on
         todo = [n for n in table["name"] if (CELLPOSE_SELF / f"{short(n)}.parquet").exists() and not cpself_done(out, n)][:limit]
         pool_run("Cellpose self-trained", run_cpself, todo, out, every=25)
     n = assemble(out, table)

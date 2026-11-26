@@ -101,7 +101,8 @@ body.gallery #gallery { display: grid; }
   <h1>Section browser</h1>
   <span class="sub" id="subtitle">AF488 and what the counting method labelled, every analysed section</span>
   <span class="method">
-    <label title="How a cell is called AF488-positive. The mask methods outline bright AF488 in the image itself; the per-nucleus rules call each segmented cell from its mean AF488.">Positivity <select id="mMethod"></select></label>
+    <label title="How a cell is called AF488-positive. The mask methods outline bright AF488 in the image itself; the per-nucleus rules call each segmented cell from its mean AF488; Cellpose segments AF488+ cells.">Positivity <select id="mFam"></select></label>
+    <label title="The variant within the method: size filter, how the threshold's SD is taken, the object-map filter …">variant <select id="mMethod"></select></label>
     <label title="Median + k robust SD (1.4826 × MAD): of the background-subtracted AF488 inside the tissue for the masks, of the junction region's cells for the per-nucleus rules. Higher: fewer, brighter cells.">Threshold <select id="mK"></select></label>
   </span>
   <span class="modes"><a href="object_map.html" style="color: var(--ink); align-self: center; margin-right: 8px;" title="Every AF488 mask object placed by a UMAP of its shape, intensity and nucleus features: select groups such as neurites and see what excluding them does (object_map.py)">Object map &rarr;</a><a href="figure_builder.html" style="color: var(--ink); align-self: center; margin-right: 8px;" title="The biology notebook's graphs, with your own normalisation, for publication">Figure builder &rarr;</a><button id="mViewer" class="on">Viewer</button><button id="mGallery">Gallery</button></span>
@@ -295,9 +296,16 @@ function applyNumbers() {
   }
 }
 
+// the menus: method family → variant → threshold (data.js gives each method its family and variant)
+const famOf = (m) => m.family || m.label, varOf = (m) => m.variant || m.label;
 function fillMethodSelects() {
-  $("mMethod").innerHTML = DATA.methods.map((m) => '<option value="' + m.key + '">' + m.label + "</option>").join("");
+  const fams = [...new Set(DATA.methods.map(famOf))];
+  $("mFam").innerHTML = fams.map((f) => "<option>" + f + "</option>").join("");
+  $("mFam").value = famOf(METHOD);
+  const inFam = DATA.methods.filter((m) => famOf(m) === famOf(METHOD));
+  $("mMethod").innerHTML = inFam.map((m) => '<option value="' + m.key + '">' + varOf(m) + "</option>").join("");
   $("mMethod").value = METHOD.key;
+  $("mMethod").disabled = inFam.length < 2;
   $("mK").innerHTML = METHOD.ks.map((k) => '<option value="' + k + '">' + k + " SD" + (METHOD.key + "-" + k === DATA.default ? " (counting method)" : "") +
     (METHOD.key === "cellmf" && k === 7 ? " (the run's rule)" : "") + "</option>").join("");
   $("mK").value = KEY.split("-")[1];
@@ -1152,6 +1160,11 @@ function init(d) {
   if (kept.size) { setValue("sizeX", kept.size.x); setValue("sizeY", kept.size.y); setValue("logX", kept.size.logX); setValue("logY", kept.size.logY); }
   setValue("logStrip", kept.logStrip);
   $("mMethod").onchange = () => { setMethod($("mMethod").value + "-" + $("mK").value, true); saveUI(); };
+  $("mFam").onchange = () => {                   // a family: its counting-method variant if it has it, else its first
+    const inFam = DATA.methods.filter((m) => famOf(m) === $("mFam").value);
+    const m = inFam.find((x) => DATA.default.startsWith(x.key + "-")) || inFam[0];
+    setMethod(m.key + "-" + (m.ks.map(String).includes($("mK").value) ? $("mK").value : m.default), true); saveUI();
+  };
   $("mK").onchange = () => { setMethod(METHOD.key + "-" + $("mK").value, true); saveUI(); };
   setupStage();
   setupContrast();

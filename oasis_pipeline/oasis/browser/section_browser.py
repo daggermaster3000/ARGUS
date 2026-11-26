@@ -111,6 +111,23 @@ OBJECT_FILTER_META = paths.OBJECT_FILTER_META
 if OBJECT_FILTER.exists() and OBJECT_FILTER_META.exists():
     METHODS["gfilt"] = {"label": "AF488 mask, Gaussian 20 µm background, filtered on the object map", "kind": "mask",
                         "ks": (8,), "default": 8, "min_um2": 3.0, "of": "gauss", "filtered": "gauss3-8"}
+#: the pages' menus: each method's family and its variant within the family (method → (family, variant))
+MENU = {
+    "gauss": ("AF488 mask, Gaussian 20 µm background", "section's SD, objects > 20 µm²"),
+    "gauss10": ("AF488 mask, Gaussian 20 µm background", "section's SD, objects > 10 µm²"),
+    "gauss5": ("AF488 mask, Gaussian 20 µm background", "section's SD, objects > 5 µm²"),
+    "gauss3": ("AF488 mask, Gaussian 20 µm background", "section's SD, objects > 3 µm²"),
+    "gpool": ("AF488 mask, Gaussian 20 µm background", "SD pooled over all sections, objects > 20 µm²"),
+    "gslide": ("AF488 mask, Gaussian 20 µm background", "SD pooled over the slide, objects > 20 µm²"),
+    "gfilt": ("AF488 mask, Gaussian 20 µm background", "filtered on the object map"),
+    "median": ("AF488 mask, local median 45 µm background", "objects > 20 µm²"),
+    "cellmf": ("Per-nucleus rule", "median-filtered mean"),
+    "cellraw": ("Per-nucleus rule", "raw mean"),
+    "cpself": ("Cellpose cpdino, self-trained", "masks > 20 µm²"),
+    "cpself10": ("Cellpose cpdino, self-trained", "masks > 10 µm²"),
+    "cpself5": ("Cellpose cpdino, self-trained", "masks > 5 µm²"),
+    "cpself3": ("Cellpose cpdino, self-trained", "masks > 3 µm²"),
+}
 SIZE_VARIANTS = tuple(m for m, spec in METHODS.items() if spec.get("of") == "gauss" and not spec.get("filtered"))
 MEDIAN_BACKGROUND_UM = 45.0       #: junction_analysis.less_local_median's window (for the label only)
 SIMPLIFY_PX = 0.5                 #: outlines simplified to within this many picture pixels
@@ -783,6 +800,7 @@ def assemble(out: Path, table: pd.DataFrame) -> int:
         sections.append(entry)
     catalogue = [{"key": m, "label": spec["label"], "kind": spec["kind"], "ks": list(spec["ks"]),
                   "default": spec["default"], "min_um2": spec.get("min_um2"), "of": spec.get("of"),
+                  "family": MENU.get(m, (spec["label"], ""))[0], "variant": MENU.get(m, (spec["label"], ""))[1],
                   **({"filter": json.loads(OBJECT_FILTER_META.read_text(encoding="utf-8"))} if spec.get("filtered") else {})}
                  for m, spec in METHODS.items()]
     payload = _clean({"generated": time.strftime("%Y-%m-%d %H:%M"), "methods": catalogue, "default": DEFAULT,

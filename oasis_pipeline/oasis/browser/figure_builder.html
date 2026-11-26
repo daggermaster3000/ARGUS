@@ -129,7 +129,9 @@ details.sub > summary { font-weight: normal; color: var(--dark); font-size: 12px
   <details open>
     <summary>What to plot</summary>
     <div class="row"><label>Preset <select id="preset"></select></label></div>
-    <div class="row"><label id="methodLabel" title="How a cell is called AF488-positive, for the variables total, region, crossed, home and auto_in_human_area.">Positivity <select id="method"></select></label></div>
+    <div class="row"><label id="methodLabel" title="How a cell is called AF488-positive, for the variables total, region, crossed, home and auto_in_human_area.">Positivity <select id="pmFam"></select></label><select id="method" hidden aria-hidden="true"></select></div>
+    <div class="row"><label title="The variant within the method: size filter, how the threshold's SD is taken, the object-map filter …">variant <select id="pmVar"></select></label>
+      <label title="Median + k robust SD (masks, per-nucleus rules) or k noise SD (Cellpose)">threshold <select id="pmK"></select></label></div>
     <label for="formula"><b>Formula</b> (one value per section)</label>
     <textarea id="formula" rows="2" spellcheck="false"></textarea>
     <div id="formulaMsg"></div>
@@ -1514,6 +1516,19 @@ function buildControls() {
     opts.push('<option value="' + key + '">' + m.label + ", " + k + " SD" + (key === COUNTING ? " (counting method)" : "") + "</option>");
   }
   $("method").innerHTML = opts.join("") || '<option value="' + COUNTING + '">counting method</option>';
+  // the visible menus: family → variant → threshold; they set the hidden one, which the page reads
+  const setKey = (key) => { $("method").value = key; $("method").dispatchEvent(new Event("change")); };
+  $("pmFam").onchange = () => {
+    const inFam = METHODS.filter((m) => (m.family || m.label) === $("pmFam").value);
+    const m = inFam.find((x) => COUNTING.startsWith(x.key + "-")) || inFam[0];
+    const k = String(ST.method).split("-")[1];
+    setKey(m.key + "-" + (m.ks.map(String).includes(k) ? k : m.default));
+  };
+  $("pmVar").onchange = () => {
+    const m = METHODS.find((x) => x.key === $("pmVar").value), k = String(ST.method).split("-")[1];
+    setKey(m.key + "-" + (m.ks.map(String).includes(k) ? k : m.default));
+  };
+  $("pmK").onchange = () => setKey(String(ST.method).split("-")[0] + "-" + $("pmK").value);
   $("methodLabel").title += " The notebook's counting method is " + methodShort(COUNTING) + ".";
   for (const el of document.querySelectorAll(".cmName")) el.textContent = methodShort(COUNTING);
   if (maskName(COUNTING)) $("maskName").textContent = maskName(COUNTING);
@@ -1610,7 +1625,19 @@ function onInput(id) {
   update();
 }
 
+function syncMethodMenus() {
+  if (!METHODS.length) return;
+  const [key0, k] = String(ST.method).split("-"), m = METHODS.find((x) => x.key === key0) || METHODS[0], fam = (x) => x.family || x.label;
+  $("pmFam").innerHTML = [...new Set(METHODS.map(fam))].map((f) => "<option>" + f + "</option>").join("");
+  $("pmFam").value = fam(m);
+  const inFam = METHODS.filter((x) => fam(x) === fam(m));
+  $("pmVar").innerHTML = inFam.map((x) => '<option value="' + x.key + '">' + (x.variant || x.label) + "</option>").join("");
+  $("pmVar").value = m.key; $("pmVar").disabled = inFam.length < 2;
+  $("pmK").innerHTML = m.ks.map((v) => '<option value="' + v + '">' + v + " SD" + (m.key + "-" + v === COUNTING ? " (counting method)" : "") + "</option>").join("");
+  $("pmK").value = k;
+}
 function writeControls() {
+  syncMethodMenus();
   for (const id of INPUTS) {
     const el = $(id), v = ST[id];
     if (el === document.activeElement && el.type !== "checkbox" && el.tagName !== "SELECT") continue;   // not under the cursor of someone typing
