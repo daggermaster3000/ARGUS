@@ -86,7 +86,9 @@ def dotted(t: pd.DataFrame) -> tuple[np.ndarray, dict]:
                 if i not in used_d and j not in used_o:
                     used_d.add(i); used_o.add(j)
                     out[inside.index[j]] += 1
-    return out, {"annotators": len(who), "dots": totals}
+    # by number, never by name (the page and object_map.js are published)
+    label = lambda w: f"Annotator {sb.SQUARE_ANNOTATORS.get(str(w).strip().lower(), '?')}"  # noqa: E731
+    return out, {"annotators": len(who), "dots": {label(w): v for w, v in totals.items()}}
 
 
 def main() -> int:

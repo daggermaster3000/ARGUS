@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -70,6 +71,8 @@ REPO_EXCLUDE = ("notebooks", "__pycache__", ".ipynb_checkpoints", ".venv")
 REPO_EXCLUDE_FILES = ("figure_builder.html", "objects_data.py", "glmm.py")
 #: the annotators, as the notebooks name them (folder → name in the package)
 ANNOTATORS = {"james_counts": "annotator_1", "quillan_counts": "annotator_2"}
+#: the square annotators' names (as typed into annotate.html) → their number in the package: no names are published
+SQUARE_NAMES = {"James": "Annotator 1", "Quillan": "Annotator 2"}
 SQUARES = OUT / "annotation_v2"                                  #: the blinded count squares (annotation_squares.py)
 SQUARES_KEY = OUT / "annotation_v2_key.csv"
 CONDA_PYTHON = Path(r"C:/Users/qfavey/.conda/envs/napari-env-q/python.exe")   # converts the notebooks to HTML
@@ -126,6 +129,81 @@ def store_copy(src: Path, dst: Path) -> bool:
                                    "junction interface, µm); ROIs/<name>: their outlines (y, x px)")
         for key in top:
             a.copy(top[key], group, name=key)
+    anonymize_store(dst)                                     # no annotator's name in the published store
+    return True
+
+
+#: names in the stores' keys and texts → the annotator's number (case-insensitive; longest first)
+NAME_TEXT = {"manual counts quillan": "manual counts annotator 2", "james counts": "manual counts annotator 1",
+             "quillan": "annotator 2", "james": "annotator 1"}
+
+
+def anonymous(text: str) -> str:
+    for name, label in NAME_TEXT.items():
+        text = re.sub(re.escape(name), label, text, flags=re.IGNORECASE)
+    return text
+
+
+def anonymize_store(path: Path) -> int:
+    """Rename every group or dataset whose name holds an annotator's name, and rewrite such text attributes; in place."""
+    import h5py
+
+    n = 0
+    with h5py.File(path, "r+") as h:
+        names = []
+        h.visit(names.append)
+        for old in sorted(names, key=lambda k: -k.count("/")):          # deepest first, so parents move last
+            leaf = old.rsplit("/", 1)[-1]
+            if anonymous(leaf) != leaf:
+                h.move(old, old[: len(old) - len(leaf)] + anonymous(leaf))
+                n += 1
+        objects = [h]
+        h.visit(lambda k: objects.append(h[k]))
+        for obj in objects:
+            for k, v in list(obj.attrs.items()):
+                text = v.decode("utf-8") if isinstance(v, bytes) else v
+                if isinstance(text, str) and anonymous(text) != text:
+                    obj.attrs[k] = anonymous(text)
+                    n += 1
+    if n:
+        repack(path)
+    return n
+
+
+def repack(path: Path) -> None:
+    """Rewrite an HDF5 file into a fresh one (h5py's copy), so renamed keys leave no old names in its free space."""
+    import h5py
+
+    tmp = path.with_name(path.name + ".tmp")
+    with h5py.File(path, "r") as a, h5py.File(tmp, "w") as b:
+        for k, v in a.attrs.items():
+            b.attrs[k] = v
+        for key in a:
+            a.copy(a[key], b, name=key)
+    tmp.replace(path)
+
+
+def anonymize_xlsx(path: Path) -> int:
+    """Every text cell of a workbook without an annotator's name; in place, only when a cell changes."""
+    from openpyxl import load_workbook
+
+    wb, n = load_workbook(path), 0
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for c in row:
+                if isinstance(c.value, str) and anonymous(c.value) != c.value:
+                    c.value = anonymous(c.value)
+                    n += 1
+    if n:
+        wb.save(path)
+    return n
+
+
+def anonymize_text_file(path: Path) -> bool:
+    text = path.read_bytes().decode("utf-8")
+    if anonymous(text) == text:
+        return False
+    path.write_bytes(anonymous(text).encode("utf-8"))
     return True
 
 
@@ -169,6 +247,7 @@ def build_segmentation(table: pd.DataFrame) -> None:
     d = PAPER / "data" / "segmentation"
     copy(RUN / "README.txt", d / "run_README.txt")
     copy(RUN / "counts.xlsx", d / "run_counts_and_review.xlsx")
+    anonymize_xlsx(d / "run_counts_and_review.xlsx")          # e.g. a region source naming its annotator
     n = 0
     for name in table["name"]:
         n += copy(RUN / "cells" / f"{name}.csv", d / "cells" / f"{name}.csv")
@@ -183,6 +262,7 @@ def build_junction(table: pd.DataFrame) -> None:
     for name in table["name"]:
         info = json.loads((RUN / "cells" / f"{name}.json").read_text(encoding="utf-8"))
         n += copy(RUN / "cells" / f"{name}.json", d / "sections" / f"{name}.json")
+        anonymize_text_file(d / "sections" / f"{name}.json")      # e.g. the band source "… region <annotator>"
         n += copy(RUN / "labels" / f"{name} region.tif", d / "region" / f"{name} region.tif")
         store = DATA / f"{name}.ome.tiff.argus.h5"
         if store.exists():
@@ -226,6 +306,17 @@ def build_annotations() -> None:
         n += copy(SQUARES_KEY, q / "key.csv")
         n += copy(SQUARES / "PROTOCOL.md", q / "PROTOCOL.md")
         for f in sorted((SQUARES / "counts").glob("square_counts_*.csv")):
+            text = f.read_bytes().decode("utf-8")
+            name = f.stem.replace("square_counts_", "")
+            if name in SQUARE_NAMES:                         # by number, file name and annotator column
+                label = SQUARE_NAMES[name]
+                text = re.sub(rf"(?m)^{name},", f"{label},", text)
+                target = q / "counts" / f"square_counts_{label.replace(' ', '_')}.csv"
+                if not target.exists() or target.read_bytes() != text.encode("utf-8"):
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(text.encode("utf-8"))
+                    n += 1
+                continue
             n += copy(f, q / "counts" / f.name)
     h = d / "junctions_hand_drawn"
     for f in ("annotated_all.csv", "scores.csv", "seeding.jsonl"):
