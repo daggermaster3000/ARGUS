@@ -223,6 +223,7 @@ const SVGNS = "http://www.w3.org/2000/svg";
 const $ = (id) => document.getElementById(id);
 
 let DATA = null, S = [], BYID = {}, VIEW = [], CUR = null;
+let HAS_HUMANS = true;            // false when the data holds no manual counts (the reviewers' bundle): their controls hide
 let sortKey = "crossed_per_mm", sortDir = -1;
 let vb = { x: 0, y: 0, w: 1, h: 1 };
 let METHOD = null, KEY = null;            // the positivity method shown ({key, label, kind, ks}) and "<method>-<k>"
@@ -263,6 +264,7 @@ function loadData() {
 function prepare(d) {
   DATA = d;
   S = d.sections;
+  HAS_HUMANS = S.some((s) => (s.humans && s.humans.length) || (s.squares && s.squares.length));
   for (const s of S) {
     BYID[s.id] = s;
     // one human per section (none is counted by both); the first if there were two
@@ -992,7 +994,7 @@ function info(s) {
   html += '<h2>Overlays</h2><div id="legend">' +
     legendItem(blob("#ffffff"), one + " at home: not past the junction interface") +
     legendItem(blob(MAGENTA), one + " crossed: past the junction interface, extended straight past its ends") +
-    legendItem('<path d="M5 9h8M9 5v8" stroke="#ffffff" stroke-width="1.5"/>', "human dot (faint: outside the counted area)") +
+    (HAS_HUMANS ? legendItem('<path d="M5 9h8M9 5v8" stroke="#ffffff" stroke-width="1.5"/>', "human dot (faint: outside the counted area)") : "") +
     (s.squares && s.squares.length ? legendItem('<rect x="3" y="3" width="12" height="12" fill="none" stroke="#ffff00" stroke-width="1.5"/>', "blinded count square (120 µm)") : "") +
     legendItem('<path d="M2 14L16 4" stroke="#ffffff" stroke-width="2"/>', "junction interface") +
     legendItem('<rect x="3" y="4" width="12" height="10" fill="none" stroke="#d9d9d9" stroke-dasharray="3 2" stroke-width="1.5"/>', "junction region") +
@@ -1168,6 +1170,13 @@ function init(d) {
   $("mK").onchange = () => { setMethod(METHOD.key + "-" + $("mK").value, true); saveUI(); };
   setupStage();
   setupContrast();
+  // no manual counts in the data: hide what shows them; no retrained Cellpose outlines: hide their toggle
+  const hide = (id) => { const el = $(id); if (el) { el.checked = false; (el.closest("label") || el).style.display = "none"; } };
+  if (!HAS_HUMANS) {
+    ["fHuman", "tHumans", "tSquares"].forEach(hide);
+    $("p1").closest(".plotbox").style.display = "none";
+  }
+  if (!Object.keys(window.CP_INDEX || {}).length) hide("tCellpose");
   refresh();
   if (window.Plotly) { plotHuman(); plotStrip(); plotSize(); }
   else { $("p1").textContent = "The plots need plotly from cdnjs (no internet connection?)."; }

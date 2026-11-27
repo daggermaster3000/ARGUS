@@ -618,6 +618,8 @@ def human_numbers(table: pd.DataFrame, methods: dict[str, dict]) -> dict[str, di
     lines = table.set_index("name")["line"]
     out: dict[str, dict] = {}
     for index, (annotator, folder) in enumerate(ANNOTATORS.items(), start=1):
+        if not (folder / "clicks.parquet").exists():          # the manual counts are not shared with every package
+            continue
         dots = pd.read_parquet(folder / "clicks.parquet")
         for name, d in dots.groupby("name"):
             if name not in methods:

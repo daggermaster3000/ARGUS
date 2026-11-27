@@ -14,12 +14,15 @@ and the full re-run takes hours, but the central claims can be checked in minute
 | Sensitivity of the outcome to the signal threshold (3, 5, 8 noise SD) and size filter (20, 10, 5, 3 µm²) | rows of `rerun/statistics/primary_outcome.csv` | included above |
 | The AF488 intensity mask (noise SD, home side, section outline) from the raw scans | `run.py --steps counting` + `check.py` | ~20 s per section, ~1 GB raw scan each |
 | The Cellpose masks themselves, from the raw scans with the shipped model | `run.py --infer` | GPU, hours; not bit-for-bit repeatable |
-| The section browser (outlines, counts per section, hand counts) | §4 | open the shipped one; rebuild a few sections in minutes |
+| The section browser (outlines and counts per section) | §4 | open the shipped one; rebuild a few sections in minutes |
 
 **Not reproduced by this code** (inputs, not outputs): the junction interfaces (found automatically, reviewed by eye,
-redrawn by hand where wrong), the manual cell counts, and the trained Cellpose model (training is described in the
-Methods). The validation statistics against the manual counts and the paper's figures were made with separate
-analysis notebooks, which are not part of this repository.
+redrawn by hand where wrong) and the trained Cellpose model (training is described in the Methods).
+
+**Not shared:** the manual annotations (the hand cell counts used to validate the method, the blinded count squares,
+the hand-drawn junction interfaces used to evaluate the junction finder). The validation against them (agreement,
+Bland–Altman, inter-annotator variability) and the paper's figures cannot be re-run from the reviewers' data; they
+are reported in the Methods. Code paths that use the annotations skip them when they are absent.
 
 ## 2. Setup
 
@@ -76,8 +79,8 @@ full `browser` step (2.5–3.5 h, ~8 GB of output).
 
 ## 4. The section browser
 
-The browser shows every section with its junction interface, junction region, the counted cells' outlines (home and
-crossed coloured differently), the manual counters' points and the blinded count squares, with a table and plots.
+The browser shows every section with its junction interface, junction region and the counted cells' outlines (home
+and crossed coloured differently), with a table and plots. (Its manual-count layers are empty in the reviewers' data.)
 
 - **Shipped (complete)**: `results/section_browser/section_browser.html` in the data package. It works straight from
   disk in Chrome, Edge or Firefox. URL options: `?m=cpself-5` the counting method shown (the default), `#<section id>`
@@ -94,9 +97,7 @@ data.json
   sections[]         one per section:
     id, name, genotype, experiment, slide, length_um (junction interface), area_mm2
     counts[<method>-<k>]   n (all), home, crossed, reg (junction region), area2, thr
-    humans[]         manual counts: n (annotator), human (count), automated[<method>-<k>] (count in the same area),
-                     compartments {home, region, crossed: {human, automated}}, dots {x, y, in} (picture pixels)
-    squares[]        the blinded 120 µm count squares: code, compartment, human {annotator: count}, automated
+    humans[], squares[]   the manual counts and the blinded count squares: empty in the reviewers' data
     line, region     the junction interface and region (picture pixels; um_per_px gives the scale)
 parts/masks/<id>__<method>-<k>.js   each counted cell: rings (outline, picture pixels), away (µm past the interface),
                                      side (1 crossed, 0 home, −1 no interface), reg (in the junction region)

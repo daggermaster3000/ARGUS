@@ -12,7 +12,9 @@ counts, the primary outcome and the interactive section browser, and compares th
 ## The data
 
 The code reads the data package (≈ 700 GB: raw scans, junction interfaces, Cellpose model and masks, the expected
-results). It is not in this repository. **Data package: `<DOI / link to be added>`.**
+results). It is not in this repository. **Data package: `<DOI / link to be added>`.** The manual annotations used
+to validate the method (hand cell counts, blinded count squares) are not part of the data shared with the reviewers;
+the code skips them when they are absent.
 
 Put this repository inside the package folder as `pipeline/`, or anywhere else with `OASIS_PAPER` set to the package:
 
@@ -86,7 +88,7 @@ repeatable, so after `--infer` or `--segment` the counts are close, not identica
 - **Primary outcome** (`oasis/stats.py`): log(1 + crossed cells per mm of junction interface), linear mixed model with
   genotype and experiment as fixed effects and slide as a random intercept (REML); the genotype effect as a fold.
 - **What is data, not code**: the junction interfaces (found automatically, each reviewed by eye and redrawn by hand
-  where wrong), the hand counts, and the trained Cellpose model.
+  where wrong) and the trained Cellpose model.
 
 ## Code
 

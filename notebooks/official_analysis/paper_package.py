@@ -69,6 +69,18 @@ CELLPOSE_MASKS = OUT / "cellpose_af488_cpdino_af488_self_e20_min3"
 CODE_REPO = Path(r"C:\Users\qfavey\Documents\oasis-assembloids")
 REPO_EXCLUDE = ("notebooks", "__pycache__", ".ipynb_checkpoints", ".venv")
 REPO_EXCLUDE_FILES = ("figure_builder.html", "objects_data.py", "glmm.py")
+#: the reviewers' data bundle (build_review_bundle): what of the package it holds (hard links), and what it leaves out
+REVIEW = DATA / "oasis-review"
+REVIEW_INCLUDE = ("data/raw", "data/design", "data/segmentation", "data/derived", "data/cellpose",
+                  "data/junction/sections", "data/junction/region", "data/junction/junction_lines.csv",
+                  "data/counting/af488_mask", "data/counting/cellpose",
+                  "results/counting", "results/statistics", "results/section_browser")
+#: not shared with the reviewers: the manual annotations (and what is made from them), the figure builder, the object map
+REVIEW_EXCLUDE = ("results/section_browser/data.json", "results/section_browser/data.js",
+                  "results/section_browser/section_browser.html", "results/section_browser/figure_builder.html",
+                  "results/section_browser/object_map.html", "results/section_browser/object_map.js",
+                  "results/section_browser/objects.js", "results/section_browser/sections_table.js",
+                  "data/design/analysed_sections.csv")
 #: the annotators, as the notebooks name them (folder → name in the package)
 ANNOTATORS = {"james_counts": "annotator_1", "quillan_counts": "annotator_2"}
 #: the square annotators' names (as typed into annotate.html) → their number in the package: no names are published
@@ -387,6 +399,63 @@ def build_code_repo(target: Path = CODE_REPO) -> None:
     say(f"code repository: {target}")
 
 
+def build_review_bundle(target: Path = REVIEW) -> None:
+    """The reviewers' data bundle, beside the package: its inputs and expected results hard-linked (no copy), without
+    the manual annotations (data/annotations, the junction stores with their manual-count layers, the browser's hand
+    counts and count squares, the 'human-counted' column), the figure builder, the object map, the notebooks, figures
+    and tables (made with the hand counts); the code repository as pipeline/. Rebuilding replaces it."""
+    import hashlib
+
+    if target.exists():
+        shutil.rmtree(target)
+    sums = dict(reversed(line.split("  ", 1)) for line in (PAPER / "SHA256SUMS").read_text(encoding="utf-8").splitlines())
+    listed, n = {}, 0
+    for rel in REVIEW_INCLUDE:
+        src = PAPER / rel
+        for f in ([src] if src.is_file() else sorted(x for x in src.rglob("*") if x.is_file())):
+            r = f.relative_to(PAPER).as_posix()
+            if r in REVIEW_EXCLUDE:
+                continue
+            dst = target / r
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.link(f, dst)
+            listed[r] = sums.get(r)
+            n += 1
+    # the browser's data without the hand counts and the count squares; the page without the figure builder's link
+    bdir = target / "results" / "section_browser"
+    data = json.loads((PAPER / "results/section_browser/data.json").read_text(encoding="utf-8"))
+    for sec in data["sections"]:
+        sec["humans"], sec["squares"] = [], []
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    (bdir / "data.json").write_text(text, encoding="utf-8")
+    (bdir / "data.js").write_text("window.SECTION_DATA = " + text + ";\n", encoding="utf-8")
+    shutil.copy2(CODE_REPO / "oasis" / "browser" / "section_browser.html", bdir / "section_browser.html")
+    design = pd.read_csv(PAPER / "data/design/analysed_sections.csv")
+    design.drop(columns=[c for c in design.columns if "human" in c.lower()]).to_csv(
+        target / "data/design/analysed_sections.csv", index=False, encoding="utf-8")
+    # the code: the reviewers' repository (README, REVIEWER_AGENT.md, …), without its .git
+    for f in sorted(x for x in CODE_REPO.rglob("*") if x.is_file() and ".git" not in x.relative_to(CODE_REPO).parts[:1]):
+        dst = target / "pipeline" / f.relative_to(CODE_REPO)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, dst)
+    for f in [bdir / "data.json", bdir / "data.js", bdir / "section_browser.html", target / "data/design/analysed_sections.csv",
+              *sorted((target / "pipeline").rglob("*"))]:
+        if f.is_file():
+            listed[f.relative_to(target).as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()
+    missing = [r for r, d in listed.items() if d is None]
+    for r in missing:                                      # not in the package's list (should not happen): hash it
+        listed[r] = hashlib.sha256((target / r).read_bytes()).hexdigest()
+    (target / "SHA256SUMS").write_text("".join(f"{d}  {r}\n" for r, d in sorted(listed.items())), encoding="utf-8")
+    (target / "README.md").write_text(
+        "# OASIS assembloids: data for the reviewers\n\n"
+        "The inputs and expected results of the analysis, with the code in `pipeline/`. Start with "
+        "`pipeline/README.md`; a coding agent should read `pipeline/REVIEWER_AGENT.md`. The section browser: "
+        "`results/section_browser/section_browser.html` (opens from disk). `SHA256SUMS` lists every file.\n\n"
+        "The manual annotations (hand cell counts, blinded count squares, hand-drawn junction evaluation) are not "
+        "part of this bundle.\n", encoding="utf-8")
+    say(f"review bundle: {n} files linked, {len(missing)} hashed afresh -> {target}")
+
+
 def build_methods() -> None:
     d = PAPER / "methods"
     nb = d / "notebooks"
@@ -619,6 +688,8 @@ def main(argv: list[str]) -> int:
     build_readme(table)
     if "--code-repo" in argv:
         build_code_repo()
+    if "--review-bundle" in argv:
+        build_review_bundle()
     if "--checksums" in argv:
         checksums()
     return 0
